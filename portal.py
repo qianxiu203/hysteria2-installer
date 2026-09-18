@@ -212,7 +212,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
     sub_port = m.get("subscription_port", 8443)
     pin_sha256 = m.get("pin_sha256", "")
     pin_block = (f'<div class="api-box"><div><div style="font-size:11px;color:var(--muted);font-weight:700">'
-                 f'服务端证书 SHA-256 指纹 (仅供人工核对 · 不写入自动导入直链)</div>'
+                 f'自签证书 SHA-256 指纹 (HEX · 已写入直链 pinSHA256 / Xray 的 pinnedPeerCertSha256)</div>'
                  f'<div class="api-key-code" id="api-pin-val">{html.escape(pin_sha256)}</div></div>'
                  f'<button class="button" type="button" data-copy="api-pin-val" data-orig="复制指纹">复制指纹</button></div>') if pin_sha256 else ''
     listen_port = m.get("listen_port", 19984)
@@ -524,16 +524,24 @@ def content_policy(extra_script=None):
 
 
 def get_cert_pin_sha256(root_path):
+    """SHA-256 of the certificate DER, as plain lowercase HEX.
+
+    v2rayNG/v2rayN (Xray core) copy the hysteria2 URI's `pinSHA256` straight into
+    Xray's `pinnedPeerCertSha256`, which is a HEX field - a base64 value there makes
+    Xray abort with `encoding/hex: invalid byte`.
+    """
     cert_file = Path(root_path) / 'cert' / 'server.crt'
     if not cert_file.exists():
         return ''
     try:
-        p1 = subprocess.Popen(['openssl', 'x509', '-in', str(cert_file), '-outform', 'DER'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        p2 = subprocess.Popen(['openssl', 'dgst', '-sha256', '-binary'], stdin=p1.stdout, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        p3 = subprocess.Popen(['openssl', 'base64'], stdin=p2.stdout, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        p1 = subprocess.Popen(['openssl', 'x509', '-in', str(cert_file), '-outform', 'DER'],
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        p2 = subprocess.Popen(['openssl', 'dgst', '-sha256'], stdin=p1.stdout,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         p1.stdout.close()
-        p2.stdout.close()
-        return p3.communicate()[0].decode().strip()
+        out = p2.communicate()[0].decode().strip()
+        hexval = out.rsplit('=', 1)[-1].strip().lower()
+        return hexval if len(hexval) == 64 and all(c in '0123456789abcdef' for c in hexval) else ''
     except Exception:
         return ''
 
@@ -548,12 +556,20 @@ def artifacts(m, auth_override=None, name_override=None):
     listen_port = m.get('listen_port', 19984)
     obfs_password = m.get('obfs_password', '')
     hop_port_range = m.get('hop_port_range', '')
-    # 自签证书统一走 insecure=1：这是官方客户端(v2rayNG / NekoBox / sing-box / Clash)都认的信任开关。
-    # 直链不再写入 pinSHA256 —— 该字段官方 hysteria 端要求 base64，而 Xray 内核按 hex 解析，
-    # 一旦写入 base64 就会触发 `encoding/hex: invalid byte`，客户端配置构建直接失败(表现为扫码后连不上)。
+    # 证书信任策略（已逐条对照 v2rayNG 源码 / Xray 内核行为对齐）：
+    #   * 公网可信证书：直链不带任何 pin / insecure，全客户端开箱即用；
+    #   * 自签证书：同时带 pinSHA256(<HEX64>) 与 insecure=1 ——
+    #       v2rayNG/v2rayN 把 pinSHA256 直接塞进 Xray 的 pinnedPeerCertSha256，该字段必须是【纯 HEX】，
+    #       写 base64 会触发 `encoding/hex: invalid byte` 导致配置构建失败（这正是上一版扫码连不上的根因）；
+    #       v2rayNG 源码仅在 pin 为空时才输出 allowInsecure，故两者并存既不报错，又能让只认 insecure 的
+    #       sing-box / NekoBox / Clash / 官方 hysteria 正常跳过校验。
+    raw_pin = (m.get('pin_sha256') or '').strip().lower()
+    pin_sha256 = raw_pin if len(raw_pin) == 64 and all(c in '0123456789abcdef' for c in raw_pin) else ''
     params = {'sni': server_name}
     if is_insecure:
         params['insecure'] = '1'
+        if pin_sha256:
+            params['pinSHA256'] = pin_sha256
     if obfs_password:
         params.update({'obfs': 'salamander', 'obfs-password': obfs_password})
     if hop_port_range:
