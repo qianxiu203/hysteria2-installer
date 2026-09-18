@@ -249,6 +249,20 @@ setup_system_firewall() {
     fi
 }
 
+select_subscription_port() {
+    local candidate="${HY2_SUB_PORT}"
+    local listener
+    while true; do
+        listener=$(ss -ltnp "sport = :${candidate}" 2>/dev/null || true)
+        if [[ -z "$listener" || "$listener" == *"hysteria"* ]]; then
+            HY2_SUB_PORT="$candidate"
+            log_info "Clash HTTPS 订阅端口: ${HY2_SUB_PORT}"
+            return
+        fi
+        candidate=$((RANDOM % 50000 + 10000))
+    done
+}
+
 clear_all_hopping_rules() {
     # 彻底扫描并清理所有历史残留的 REDIRECT 到 hysteria 端口的 iptables 规则，防止旧端口重定向死循环
     while iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | grep -q "REDIRECT.*udp"; do
@@ -291,6 +305,7 @@ setup_iptables_port_hopping() {
 generate_server_config() {
     log_step "生成 Hysteria 2 服务端配置: ${HY2_CONFIG}..."
     mkdir -p "$HY2_DIR" "$HY2_SUB_DIR"
+    select_subscription_port
     SUB_TOKEN=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 32)
 
     cat > "$HY2_CONFIG" <<EOF
