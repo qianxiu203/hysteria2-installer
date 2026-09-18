@@ -333,7 +333,9 @@ generate_server_config() {
     log_step "生成 Hysteria 2 服务端配置: ${HY2_CONFIG}..."
     mkdir -p "$HY2_DIR" "$HY2_SUB_DIR"
     select_subscription_port
-    SUB_TOKEN=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 32)
+    # head closes the pipe after enough bytes; tolerate tr's resulting SIGPIPE
+    # when pipefail is enabled.
+    SUB_TOKEN=$( (tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 32) || true )
 
     cat > "$HY2_CONFIG" <<EOF
 # Hysteria 2 Server Configuration
