@@ -65,16 +65,25 @@ footer{display:flex;justify-content:space-between;margin-top:32px;color:#879996;
 .traffic-fill.danger{background:var(--danger)}
 .api-box{background:#f7faf9;border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
 .api-key-code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px;color:#284d56;word-break:break-all;margin-top:4px}
-.modal-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;background:#f8fbfb;border:1px solid var(--line);border-radius:14px;padding:20px;margin-bottom:20px}
-.form-field{display:grid;gap:6px}
-.form-field label{font-size:12px;font-weight:700;color:var(--ink);display:flex;justify-content:space-between;align-items:center}
-.form-field input{height:40px;padding:0 12px;border:1px solid var(--line);border-radius:9px;font-size:13px;background:#fff;outline:none;transition:border-color .15s}
+.modal-form{display:grid;grid-template-columns:1fr 1fr;gap:16px 20px;background:#f8fbfb;border:1px solid var(--line);border-radius:14px;padding:22px;margin-bottom:20px}
+.form-field{display:flex;flex-direction:column;gap:6px}
+.form-field-full{grid-column:1/-1}
+.form-field label{font-size:13px;font-weight:700;color:var(--ink);display:flex;justify-content:space-between;align-items:center}
+.form-field label span{font-weight:400;color:var(--muted);font-size:12px}
+.form-field input{height:42px;padding:0 12px;border:1px solid var(--line);border-radius:9px;font-size:13px;background:#fff;outline:none;transition:border-color .15s}
 .form-field input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(8,127,116,0.12)}
-.form-field small{font-size:11px;color:var(--muted);line-height:1.4}
-.input-with-action{display:flex;gap:6px}
+.form-field small{font-size:11px;color:var(--muted);line-height:1.4;margin-top:2px}
+.input-with-action{display:flex;gap:8px}
 .input-with-action input{flex:1;min-width:0}
-.btn-mini{padding:0 10px;height:40px;background:#eaf5ef;border:1px solid #c3ddd5;color:var(--accent);border-radius:9px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}
+.btn-mini{padding:0 12px;height:42px;background:#eaf5ef;border:1px solid #c3ddd5;color:var(--accent);border-radius:9px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;transition:background .15s}
 .btn-mini:hover{background:#dbeef7}
+
+@media(max-width:760px){
+  main{padding:20px 16px 32px}.topbar{padding-bottom:20px}.layout,.config-grid{grid-template-columns:1fr}.qr-frame{max-width:248px;margin:18px auto}.card{padding:20px}h1{font-size:26px}.advanced-title{display:block}footer{gap:15px;flex-direction:column}.private{font-size:10px}.brand{font-size:13px}
+  .login-card{padding:28px 20px;border-radius:20px}
+  .tab-btn{padding:9px 12px;font-size:13px}
+  .modal-form{grid-template-columns:1fr;gap:14px;padding:16px}
+}
 
 /* 登录样式 */
 .login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px 16px;background:radial-gradient(ellipse at top,#eef5f3 0%,#f3f7f6 100%)}
@@ -140,6 +149,12 @@ function genRandom(targetId, prefix='') {
   const rand = Array.from(crypto.getRandomValues(new Uint8Array(8))).map(b => b.toString(16).padStart(2, '0')).join('');
   el.value = prefix ? (prefix + '_' + rand.substring(0, 8)) : rand;
 }
+
+document.querySelectorAll('[data-gen]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    genRandom(btn.dataset.gen, btn.dataset.prefix || '');
+  });
+});
 
 document.querySelectorAll('[data-copy]').forEach(button => {
   button.addEventListener('click', async () => {
@@ -327,49 +342,49 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
         <input type="hidden" name="action" value="create">
         
         <div class="form-field">
-          <label for="f_uid">用户标识 (User ID) <span style="font-weight:400;color:var(--muted)">必填</span></label>
+          <label for="f_uid">用户标识 (User ID) <span>必填</span></label>
           <div class="input-with-action">
-            <input id="f_uid" name="user_id" placeholder="例如: user_01 (可点击随机)" required>
-            <button type="button" class="btn-mini" onclick="genRandom('f_uid', 'user')">🎲 随机生成</button>
+            <input id="f_uid" name="user_id" placeholder="例如: user_01" required>
+            <button type="button" class="btn-mini" data-gen="f_uid" data-prefix="user">🎲 随机生成</button>
           </div>
           <small>客户端节点命名或用户唯一标识</small>
         </div>
 
         <div class="form-field">
-          <label for="f_pwd">连接认证密码 <span style="font-weight:400;color:var(--muted)">留空随机</span></label>
+          <label for="f_pwd">连接认证密码 <span>留空随机</span></label>
           <div class="input-with-action">
-            <input id="f_pwd" name="password" placeholder="留空提交时将自动生成">
-            <button type="button" class="btn-mini" onclick="genRandom('f_pwd')">🎲 随机密码</button>
+            <input id="f_pwd" name="password" placeholder="留空提交时自动生成">
+            <button type="button" class="btn-mini" data-gen="f_pwd">🎲 随机密码</button>
           </div>
           <small>买家或客户端用于握手的秘密连接密钥</small>
         </div>
 
         <div class="form-field">
-          <label for="f_days">服务有效期 (天) <span style="font-weight:400;color:var(--muted)">默认 30</span></label>
+          <label for="f_days">服务有效期 (天) <span>默认 30</span></label>
           <input id="f_days" name="duration_days" type="number" min="1" max="3650" value="30" placeholder="默认 30 天">
           <small>从创建时间起算的有效天数</small>
         </div>
 
         <div class="form-field">
-          <label for="f_traffic">流量限额 (GB) <span style="font-weight:400;color:var(--muted)">0 为不限</span></label>
+          <label for="f_traffic">流量限额 (GB) <span>0 为不限</span></label>
           <input id="f_traffic" name="traffic_gb" type="number" step="0.5" min="0" value="0" placeholder="输入例如 100">
           <small>达到限额后系统将自动阻断连接</small>
         </div>
 
         <div class="form-field">
-          <label for="f_iplimit">同时在线 IP 限制 <span style="font-weight:400;color:var(--muted)">0 为不限</span></label>
+          <label for="f_iplimit">同时在线 IP 限制 <span>0 为不限</span></label>
           <input id="f_iplimit" name="ip_limit" type="number" min="0" max="100" value="0" placeholder="例如填 1 或 2">
           <small>限制单人或单家庭设备同时使用</small>
         </div>
 
         <div class="form-field">
-          <label for="f_note">备注信息 <span style="font-weight:400;color:var(--muted)">选填</span></label>
+          <label for="f_note">备注信息 <span>选填</span></label>
           <input id="f_note" name="note" placeholder="例如: 客户小明 / 微信购买">
           <small>便于你在控制台快速区分订单来源</small>
         </div>
 
-        <div style="grid-column:1/-1;margin-top:4px">
-          <button class="button primary" style="width:100%;height:42px;font-size:14px" type="submit">立即创建并开通用户 →</button>
+        <div class="form-field-full" style="margin-top:6px">
+          <button class="button primary" style="width:100%;height:44px;font-size:14px" type="submit">立即创建并开通用户 →</button>
         </div>
       </form>
     </details>
