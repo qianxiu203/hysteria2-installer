@@ -520,7 +520,7 @@ show_client_configs() {
 write_portal_program() {
     cat > "$HY2_DIR/portal.py" <<'PYPORTAL'
 """仅监听回环地址；公网 TLS 由 Hysteria 的 masquerade proxy 提供。
-集成多租户 REST API、同时在线 IP 限制引擎与可视化多用户管理控制台。
+采用现代轻奢 Tab 导航系统，解耦节点连接、多用户管理与集群 API 凭据。
 """
 import base64
 import hashlib
@@ -538,15 +538,55 @@ from urllib.parse import parse_qs, quote, urlencode
 
 
 STYLE = """
-:root{color-scheme:light;--ink:#122b31;--muted:#667c81;--line:#dce7e6;--accent:#087f74;--accent-hover:#066960;--danger:#cf3c3c;--danger-bg:#fdf2f2;--brand-bg:#eaf5ef}
+:root{color-scheme:light;--ink:#122b31;--muted:#667c81;--line:#dce7e6;--accent:#087f74;--accent-hover:#066960;--danger:#cf3c3c;--danger-bg:#fdf2f2;--brand-bg:#eaf5ef;--card-bg:#ffffff}
 *{box-sizing:border-box}body{margin:0;background:#f3f7f6;color:var(--ink);font:15px/1.6 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
-main{max-width:1160px;margin:auto;padding:32px 28px 48px}.topbar{display:flex;justify-content:space-between;align-items:center;padding-bottom:32px}
+main{max-width:1160px;margin:auto;padding:32px 28px 48px}.topbar{display:flex;justify-content:space-between;align-items:center;padding-bottom:24px}
 .brand{font-weight:800;letter-spacing:.04em;display:flex;gap:10px;align-items:center}.logo{background:var(--ink);color:white;border-radius:12px;padding:7px 12px;font-size:17px}.private{font-size:12px;color:var(--accent);border:1px solid #c3ddd5;border-radius:30px;padding:5px 12px;background:#eaf5ef}
-.eyebrow{font-size:11px;letter-spacing:.16em;font-weight:750;color:var(--accent)}h1{font-size:34px;letter-spacing:-.04em;margin:6px 0}h2{font-size:18px;margin:0 0 4px}p{margin:0;color:var(--muted)}.hero{margin-bottom:26px}.hero p{font-size:14px}
-.layout{display:grid;grid-template-columns:320px minmax(0,1fr);gap:22px;align-items:start}.card{background:#fff;border:1px solid var(--line);border-radius:20px;padding:24px;box-shadow:0 5px 22px #183f3505}.qr-card{text-align:center}.qr-frame{background:#fff;border:1px solid var(--line);border-radius:16px;padding:14px;margin:20px 0}.qr-frame img{display:block;width:100%;height:auto}.hint{font-size:12px}.tags{display:flex;gap:6px;justify-content:center;flex-wrap:wrap;margin-top:18px}.tag{background:#f0f5f4;color:#526a70;border-radius:6px;padding:3px 8px;font-size:11px}
-.stack{display:grid;gap:18px}.card-head{display:flex;gap:14px;align-items:center;margin-bottom:16px}.step{display:grid;place-items:center;flex:0 0 38px;height:38px;border-radius:11px;background:#e8f4f0;color:var(--accent);font-weight:750}.card-head p{font-size:12px}textarea{display:block;width:100%;min-width:0;border:1px solid var(--line);background:#f7faf9;border-radius:12px;padding:14px;color:#35545c;font:12px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;resize:vertical;overflow-wrap:anywhere}textarea.link{height:92px}textarea.config{height:290px;margin-top:18px}textarea:focus{outline:2px solid #65b3a5;outline-offset:2px}.actions{display:flex;gap:10px;align-items:center;margin-top:14px;flex-wrap:wrap}.button{display:inline-flex;align-items:center;justify-content:center;gap:6px;border:1px solid var(--line);background:white;border-radius:9px;padding:9px 15px;color:var(--ink);text-decoration:none;font:600 12px/1.5 inherit;cursor:pointer}.button.primary{background:var(--accent);color:white;border-color:var(--accent)}.button.danger{background:var(--danger);color:white;border-color:var(--danger)}.button:hover{filter:brightness(.94)}button:focus-visible,a:focus-visible,summary:focus-visible{outline:3px solid #65b3a5;outline-offset:3px}.note{font-size:12px;margin-top:12px}.advanced{margin-top:24px}.advanced-title{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}.advanced-title p{font-size:12px}.config-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}summary{cursor:pointer;font-weight:650;list-style-position:inside}summary span{font-size:11px;font-weight:400;color:var(--muted);margin-left:10px}.security{margin-top:24px;padding:15px 18px;border:1px solid #d8e6df;border-radius:12px;background:#eaf2ed;color:#4f6a60;font-size:12px}footer{display:flex;justify-content:space-between;margin-top:22px;color:#879996;font-size:11px}.status{font-size:12px;color:var(--accent)}
+.eyebrow{font-size:11px;letter-spacing:.16em;font-weight:750;color:var(--accent)}h1{font-size:32px;letter-spacing:-.04em;margin:6px 0}h2{font-size:18px;margin:0 0 4px}p{margin:0;color:var(--muted)}.hero{margin-bottom:24px}.hero p{font-size:14px}
 
-/* 登录与多用户控制台样式 */
+/* Tab 导航容器 */
+.tab-bar{display:flex;gap:8px;border-bottom:2px solid var(--line);margin-bottom:26px;overflow-x:auto;padding-bottom:2px}
+.tab-btn{display:inline-flex;align-items:center;gap:8px;padding:11px 18px;border:none;background:none;color:var(--muted);font-size:14px;font-weight:700;cursor:pointer;border-radius:10px 10px 0 0;position:relative;transition:all .18s ease;white-space:nowrap}
+.tab-btn:hover{color:var(--ink);background:#ebf3f1}
+.tab-btn.active{color:var(--accent);background:#fff}
+.tab-btn.active:after{content:'';position:absolute;bottom:-2px;left:0;right:0;height:2px;background:var(--accent)}
+.tab-pane{display:none}
+.tab-pane.active{display:block;animation:fadeIn .2s ease-out}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+
+/* 卡片与网格 */
+.layout{display:grid;grid-template-columns:320px minmax(0,1fr);gap:22px;align-items:start}
+.card{background:#fff;border:1px solid var(--line);border-radius:20px;padding:24px;box-shadow:0 5px 22px #183f3505}
+.qr-card{text-align:center}.qr-frame{background:#fff;border:1px solid var(--line);border-radius:16px;padding:14px;margin:20px 0}.qr-frame img{display:block;width:100%;height:auto}
+.hint{font-size:12px}.tags{display:flex;gap:6px;justify-content:center;flex-wrap:wrap;margin-top:18px}.tag{background:#f0f5f4;color:#526a70;border-radius:6px;padding:3px 8px;font-size:11px}
+.stack{display:grid;gap:18px}.card-head{display:flex;gap:14px;align-items:center;margin-bottom:16px}.step{display:grid;place-items:center;flex:0 0 38px;height:38px;border-radius:11px;background:#e8f4f0;color:var(--accent);font-weight:750}.card-head p{font-size:12px}
+textarea{display:block;width:100%;min-width:0;border:1px solid var(--line);background:#f7faf9;border-radius:12px;padding:14px;color:#35545c;font:12px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;resize:vertical;overflow-wrap:anywhere}
+textarea.link{height:92px}textarea.config{height:290px;margin-top:18px}textarea:focus{outline:2px solid #65b3a5;outline-offset:2px}
+.actions{display:flex;gap:10px;align-items:center;margin-top:14px;flex-wrap:wrap}
+.button{display:inline-flex;align-items:center;justify-content:center;gap:6px;border:1px solid var(--line);background:white;border-radius:9px;padding:9px 15px;color:var(--ink);text-decoration:none;font:600 12px/1.5 inherit;cursor:pointer}
+.button.primary{background:var(--accent);color:white;border-color:var(--accent)}.button.danger{background:var(--danger);color:white;border-color:var(--danger)}.button:hover{filter:brightness(.94)}
+.note{font-size:12px;margin-top:12px}.advanced{margin-top:24px}.advanced-title{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}.advanced-title p{font-size:12px}.config-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+summary{cursor:pointer;font-weight:650;list-style-position:inside}summary span{font-size:11px;font-weight:400;color:var(--muted);margin-left:10px}
+.security{margin-top:24px;padding:15px 18px;border:1px solid #d8e6df;border-radius:12px;background:#eaf2ed;color:#4f6a60;font-size:12px}
+footer{display:flex;justify-content:space-between;margin-top:32px;color:#879996;font-size:11px}.status{font-size:12px;color:var(--accent)}
+
+/* 多用户与集群专属卡片样式 */
+.user-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;flex-wrap:wrap;gap:12px}
+.badge-count{background:var(--brand-bg);color:var(--accent);border:1px solid #c3ddd5;border-radius:20px;padding:4px 12px;font-size:12px;font-weight:700}
+.user-table-wrap{width:100%;overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:#fff}
+.user-table{width:100%;border-collapse:collapse;text-align:left;font-size:13px}
+.user-table th{background:#f8fbfb;padding:12px 14px;color:var(--muted);font-weight:700;border-bottom:1px solid var(--line);white-space:nowrap}
+.user-table td{padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:middle;white-space:nowrap}
+.user-table tr:last-child td{border-bottom:none}
+.status-pill{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:700}
+.status-pill.active{background:#eafaf3;color:#0b8650}
+.status-pill.expired{background:#fff1f0;color:#cf3c3c}
+.api-box{background:#f7faf9;border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.api-key-code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px;color:#284d56;word-break:break-all;margin-top:4px}
+.modal-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;background:#f9fbfb;border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
+.modal-form input{height:38px;padding:0 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;background:#fff}
+
+/* 登录样式 */
 .login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px 16px;background:radial-gradient(ellipse at top,#eef5f3 0%,#f3f7f6 100%)}
 .login-card{width:100%;max-width:420px;background:#fff;border:1px solid var(--line);border-radius:24px;padding:36px 30px;box-shadow:0 12px 36px rgba(18,43,49,0.06)}
 .login-brand{text-align:center;margin-bottom:28px}
@@ -573,32 +613,37 @@ main{max-width:1160px;margin:auto;padding:32px 28px 48px}.topbar{display:flex;ju
 .login-footer{margin-top:24px;padding-top:18px;border-top:1px solid #edf2f1;font-size:12px;color:var(--muted);line-height:1.6;text-align:center}
 .login-footer code{background:#eef4f2;color:#33565f;padding:2px 6px;border-radius:4px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
 
-/* 多用户与集群控制台卡片 */
-.user-panel{margin-top:28px}
-.user-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:12px}
-.user-stats{display:flex;gap:12px;flex-wrap:wrap}
-.badge-count{background:var(--brand-bg);color:var(--accent);border:1px solid #c3ddd5;border-radius:20px;padding:4px 10px;font-size:12px;font-weight:700}
-.user-table-wrap{width:100%;overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:#fff}
-.user-table{width:100%;border-collapse:collapse;text-align:left;font-size:13px}
-.user-table th{background:#f8fbfb;padding:12px 14px;color:var(--muted);font-weight:700;border-bottom:1px solid var(--line);white-space:nowrap}
-.user-table td{padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:middle;white-space:nowrap}
-.user-table tr:last-child td{border-bottom:none}
-.status-pill{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:700}
-.status-pill.active{background:#eafaf3;color:#0b8650}
-.status-pill.expired{background:#fff1f0;color:#cf3c3c}
-.status-pill.limit{background:#fff7e6;color:#d46b08}
-.api-box{background:#f7faf9;border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
-.api-key-code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:#35545c;word-break:break-all}
-.modal-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;background:#f9fbfb;border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
-.modal-form input{height:38px;padding:0 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;background:#fff}
-
 @media(max-width:760px){
-  main{padding:20px 16px 32px}.topbar{padding-bottom:24px}.layout,.config-grid{grid-template-columns:1fr}.qr-frame{max-width:248px;margin:18px auto}.card{padding:20px}h1{font-size:28px}.advanced-title{display:block}footer{gap:15px}.private{font-size:10px}.brand{font-size:13px}
+  main{padding:20px 16px 32px}.topbar{padding-bottom:20px}.layout,.config-grid{grid-template-columns:1fr}.qr-frame{max-width:248px;margin:18px auto}.card{padding:20px}h1{font-size:26px}.advanced-title{display:block}footer{gap:15px;flex-direction:column}.private{font-size:10px}.brand{font-size:13px}
   .login-card{padding:28px 20px;border-radius:20px}
+  .tab-btn{padding:9px 12px;font-size:13px}
 }
 """
 
 SCRIPT = """
+function switchTab(tabId) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+  const btn = document.querySelector('[data-tab="' + tabId + '"]');
+  const pane = document.getElementById('pane-' + tabId);
+  if (btn && pane) {
+    btn.classList.add('active');
+    pane.classList.add('active');
+    history.replaceState(null, null, '#' + tabId);
+  }
+}
+
+document.querySelectorAll('[data-tab]').forEach(btn => {
+  btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+});
+
+if (location.hash) {
+  const hash = location.hash.substring(1);
+  if (document.getElementById('pane-' + hash)) {
+    switchTab(hash);
+  }
+}
+
 document.querySelectorAll('[data-copy]').forEach(button => {
   button.addEventListener('click', async () => {
     const field = document.getElementById(button.dataset.copy);
@@ -606,12 +651,12 @@ document.querySelectorAll('[data-copy]').forEach(button => {
     try {
       const val = field.value || field.textContent || '';
       await navigator.clipboard.writeText(val);
-      status.textContent = '已复制到剪贴板 ✓';
+      if (status) status.textContent = '已复制到剪贴板 ✓';
       button.textContent = '已复制 ✓';
-      setTimeout(() => { button.textContent = '复制'; }, 1800);
+      setTimeout(() => { button.textContent = button.dataset.orig || '复制'; }, 1800);
     } catch (_) {
       if (field.select) { field.focus(); field.select(); }
-      status.textContent = '已选中，请按 Ctrl+C 复制';
+      if (status) status.textContent = '已选中，请按 Ctrl+C 复制';
     }
   });
 });
@@ -635,7 +680,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
     def field(identifier, value, kind='link'):
         return f'<textarea id="{identifier}" class="{kind}" aria-label="{identifier}" readonly spellcheck="false">{html.escape(value)}</textarea>'
     def copy(identifier):
-        return f'<button class="button primary" type="button" data-copy="{identifier}">复制</button>'
+        return f'<button class="button primary" type="button" data-copy="{identifier}" data-orig="复制">复制</button>'
     
     is_insecure = m.get('is_insecure', False)
     server_name = m.get('server_name') or m.get('public_ip', 'localhost')
@@ -662,7 +707,6 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
         online_str = f'<span class="badge-count" style="font-size:11px;">{online_ips} 在线</span>' if online_ips > 0 else '<span style="color:var(--muted)">0</span>'
         note = u.get('note') or '-'
         
-        # 用户专属直链弹窗触发
         user_rows.append(f'''<tr>
           <td><strong>{html.escape(uid)}</strong><div style="font-size:11px;color:var(--muted)">{html.escape(note)}</div></td>
           <td>{status_html}</td>
@@ -678,64 +722,134 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
           </td>
         </tr>''')
 
-    users_table_html = "".join(user_rows) or '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:20px">暂无多用户数据</td></tr>'
+    users_table_html = "".join(user_rows) or '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px">暂无多用户数据</td></tr>'
 
-    return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>HY2 · 节点与多用户控制中心</title><style>{STYLE}</style></head><body><main>
-<nav class="topbar" aria-label="页面标识"><div class="brand"><span class="logo">H₂</span> HYSTERIA <span> / 节点与集群控制中心</span></div><span class="private">● 集群运行中</span></nav>
-<header class="hero"><div class="eyebrow">CLUSTER AGENT & MULTI-TENANT</div><h1>节点配置与多用户管理</h1><p>支持原生 Hysteria 2 客户端订阅，同时提供 REST API 自动开户与同时在线 IP 限制。</p></header>
+    return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>HY2 · 节点与集群中心</title><style>{STYLE}</style></head><body><main>
+<nav class="topbar" aria-label="页面标识"><div class="brand"><span class="logo">H₂</span> HYSTERIA <span> / 控制中心</span></div><span class="private">● 集群运行中</span></nav>
+<header class="hero"><div class="eyebrow">HYSTERIA 2 NODE DASHBOARD</div><h1>{html.escape(server_name)}</h1><p>官方核心驱动 · 极速 QUIC 代理 · 多用户开户与集群调度</p></header>
 
-<!-- API 对接控制台卡片 -->
-<section class="card" style="margin-bottom:24px;border-left:4px solid var(--accent)">
-  <div class="card-head"><span class="step">API</span><div><h2>集群通信与商城对接凭据</h2><p>可直接填入 pay.isoziyuan.com / admin / node-panels</p></div></div>
-  <div class="api-box">
-    <div><div style="font-size:11px;color:var(--muted);font-weight:700">API 基础地址 (Base URL)</div><div class="api-key-code" id="api-base-val">https://{host}:{sub_port}</div></div>
-    <button class="button" type="button" data-copy="api-base-val">复制地址</button>
-  </div>
-  <div class="api-box">
-    <div><div style="font-size:11px;color:var(--muted);font-weight:700">通信密钥 (Bearer API Key)</div><div class="api-key-code" id="api-key-val">{html.escape(api_key or "")}</div></div>
-    <button class="button primary" type="button" data-copy="api-key-val">复制 Key</button>
-  </div>
-</section>
+<!-- 顶部 Tab 导航栏 -->
+<div class="tab-bar">
+  <button class="tab-btn active" data-tab="connect">🚀 节点导入 (Connect)</button>
+  <button class="tab-btn" data-tab="users">👥 多用户管理 ({active_count}/{len(users)})</button>
+  <button class="tab-btn" data-tab="cluster">🔑 集群与 API 对接</button>
+  <button class="tab-btn" data-tab="configs">⚙️ 高级配置</button>
+</div>
 
-<!-- 多租户与在线 IP 管理中心 -->
-<section class="card user-panel" style="margin-bottom:24px">
-  <div class="user-header">
-    <div><h2>多用户与 IP 限制管理</h2><p style="font-size:13px">实时监控当前节点有效用户、到期状态与在线客户端 IP 限制</p></div>
-    <div class="user-stats">
-      <span class="badge-count">有效用户: {active_count} / {len(users)}</span>
+<!-- Tab 1: 节点连接视图 -->
+<div class="tab-pane active" id="pane-connect">
+  <div class="layout">
+    <section class="card qr-card">
+      <div class="eyebrow">QUICK CONNECT</div>
+      <h2>主管理员扫码</h2>
+      <p class="hint">适用于支持 Hysteria 2 的客户端</p>
+      <div class="qr-frame"><img src="qr.svg" alt="HY2 节点导入二维码" width="260" height="260"></div>
+      <p class="hint">打开客户端扫描二维码直接导入</p>
+      <div class="tags"><span class="tag">Hysteria 2</span><span class="tag">TLS</span><span class="tag">''' + ('Salamander' if obfs_pw else 'QUIC') + '''</span></div>
+    </section>
+    <div class="stack">
+      <section class="card">
+        <div class="card-head"><span class="step">01</span><div><h2>节点直链 (URI)</h2><p>v2rayN / Nekobox / Shadowrocket</p></div></div>
+        ''' + field('hy2-link', uri) + '''
+        <div class="actions">''' + copy('hy2-link') + '''</div>
+        <p class="note">''' + html.escape(host) + ' · UDP ' + str(int(listen_port)) + '''</p>
+      </section>
+      <section class="card">
+        <div class="card-head"><span class="step">02</span><div><h2>Clash 订阅</h2><p>适用于 Clash Meta / Mihomo 内核</p></div></div>
+        ''' + field('clash-subscription', subscription) + '''
+        <div class="actions">''' + copy('clash-subscription') + '''<a class="button" href="clash.yaml" download="clash.yaml">下载配置 ↓</a></div>
+        <p class="note">在客户端添加订阅链接即可自动同步。</p>
+      </section>
     </div>
   </div>
+</div>
 
-  <!-- 手动添加用户表单 -->
-  <details style="margin-bottom:18px"><summary class="button" style="margin-bottom:12px;list-style:none">＋ 手动添加/开通新用户</summary>
-    <form class="modal-form" method="POST" action="/{token}/manage-user">
-      <input type="hidden" name="action" value="create">
-      <input name="user_id" placeholder="用户标识 (如: user_01)" required>
-      <input name="password" placeholder="连接密码 (留空随机生成)">
-      <input name="duration_days" type="number" value="30" placeholder="有效天数 (默认30)">
-      <input name="ip_limit" type="number" value="0" placeholder="限制同时在线 IP 数 (0为不限)">
-      <input name="note" placeholder="备注说明 (如: 客户小明)">
-      <button class="button primary" type="submit">立即创建用户</button>
-    </form>
-  </details>
+<!-- Tab 2: 多用户与 IP 限制视图 -->
+<div class="tab-pane" id="pane-users">
+  <section class="card">
+    <div class="user-header">
+      <div><h2>多用户与 IP 限制管理</h2><p style="font-size:13px">实时监控当前节点有效用户、到期状态与在线客户端 IP 限制</p></div>
+      <div class="user-stats">
+        <span class="badge-count">有效用户: {active_count} / {len(users)}</span>
+      </div>
+    </div>
 
-  <div class="user-table-wrap">
-    <table class="user-table">
-      <thead><tr><th>用户标识</th><th>状态</th><th>IP 限制 (实时)</th><th>到期时间</th><th>连接密码</th><th>操作</th></tr></thead>
-      <tbody>{users_table_html}</tbody>
-    </table>
-  </div>
-</section>
+    <!-- 手动添加用户卡片 -->
+    <details style="margin-bottom:18px">
+      <summary class="button" style="margin-bottom:12px;list-style:none">＋ 手动添加/开通新用户</summary>
+      <form class="modal-form" method="POST" action="/{token}/manage-user">
+        <input type="hidden" name="action" value="create">
+        <input name="user_id" placeholder="用户标识 (如: user_01)" required>
+        <input name="password" placeholder="连接密码 (留空随机生成)">
+        <input name="duration_days" type="number" value="30" placeholder="有效天数 (默认30)">
+        <input name="ip_limit" type="number" value="0" placeholder="限制同时在线 IP 数 (0为不限)">
+        <input name="note" placeholder="备注说明 (如: 客户小明)">
+        <button class="button primary" type="submit">立即创建用户</button>
+      </form>
+    </details>
 
-<!-- 默认节点导入卡片 -->
-<div class="layout"><section class="card qr-card"><div class="eyebrow">QUICK CONNECT</div><h2>主管理员节点扫码</h2><p class="hint">适用于支持 Hysteria 2 的客户端</p><div class="qr-frame"><img src="qr.svg" alt="HY2 节点导入二维码" width="260" height="260"></div><p class="hint">打开客户端的「扫描二维码」功能</p><div class="tags"><span class="tag">Hysteria 2</span><span class="tag">TLS</span><span class="tag">''' + ('Salamander' if obfs_pw else 'QUIC') + '''</span></div></section>
-<div class="stack"><section class="card"><div class="card-head"><span class="step">01</span><div><h2>主节点链接</h2><p>v2rayN / Nekobox / Shadowrocket</p></div></div>''' + field('hy2-link', uri) + '<div class="actions">' + copy('hy2-link') + '</div><p class="note">' + html.escape(host) + ' · UDP ' + str(int(listen_port)) + '''</p></section>
-<section class="card"><div class="card-head"><span class="step">02</span><div><h2>Clash 订阅</h2><p>适用于 Clash Meta / Mihomo 内核</p></div></div>''' + field('clash-subscription', subscription) + '<div class="actions">' + copy('clash-subscription') + '''<a class="button" href="clash.yaml" download="clash.yaml">下载配置 ↓</a></div><p class="note">在客户端添加订阅；若不支持带账号密码的 URL，可下载后导入。</p></section></div></div>
+    <div class="user-table-wrap">
+      <table class="user-table">
+        <thead><tr><th>用户标识</th><th>状态</th><th>IP 限制 (实时)</th><th>到期时间</th><th>连接密码</th><th>操作</th></tr></thead>
+        <tbody>{users_table_html}</tbody>
+      </table>
+    </div>
+  </section>
+</div>
 
-<section class="advanced"><div class="advanced-title"><h2>配置文件</h2><p>需要手动调整？展开查看完整内容。</p></div><div class="config-grid">
-<details class="card"><summary>Clash / Mihomo <span>完整配置</span></summary>''' + field('clash-config', clash, 'config') + '<div class="actions">' + copy('clash-config') + '''<a class="button" href="clash.yaml" download="clash.yaml">下载 ↓</a></div></details>
-<details class="card"><summary>Sing-box <span>出站配置片段</span></summary>''' + field('sing-config', sing, 'config') + '<div class="actions">' + copy('sing-config') + '''<a class="button" href="sing-box.json" download="sing-box.json">下载 ↓</a></div></details></div></section>
-<div class="security">私密提示 · 链接和二维码包含连接凭据，请勿公开分享或发送截图给他人。</div><p id="copy-status" class="status" role="status" aria-live="polite"></p><footer><span>HYSTERIA 2 / PRIVATE CLUSTER PORTAL</span><span>配置由你的服务器动态生成</span></footer></main><script>''' + SCRIPT + '</script></body></html>'
+<!-- Tab 3: 集群与 API 对接视图 -->
+<div class="tab-pane" id="pane-cluster">
+  <section class="card" style="border-left:4px solid var(--accent)">
+    <div class="card-head"><span class="step">API</span><div><h2>集群通信与商城对接凭据</h2><p>可直接在 pay.isoziyuan.com / admin / node-panels 添加此节点</p></div></div>
+    
+    <div class="api-box">
+      <div>
+        <div style="font-size:11px;color:var(--muted);font-weight:700">API 基础地址 (Base URL)</div>
+        <div class="api-key-code" id="api-base-val">https://{host}:{sub_port}</div>
+      </div>
+      <button class="button" type="button" data-copy="api-base-val" data-orig="复制地址">复制地址</button>
+    </div>
+    
+    <div class="api-box">
+      <div>
+        <div style="font-size:11px;color:var(--muted);font-weight:700">通信密钥 (Bearer API Key)</div>
+        <div class="api-key-code" id="api-key-val">{html.escape(api_key or "")}</div>
+      </div>
+      <button class="button primary" type="button" data-copy="api-key-val" data-orig="复制 Key">复制 Key</button>
+    </div>
+
+    <div style="margin-top:20px;padding:16px;background:#f9fbfb;border-radius:12px;border:1px solid var(--line);font-size:13px;color:#35545c;line-height:1.7">
+      <strong>接入指南：</strong><br>
+      1. 打开商城后台 <code>/admin/node-panels/hy2</code> 点击「添加 Hysteria 2」；<br>
+      2. 填入上方 API 基础地址与通信密钥，点击「测试」确认连通；<br>
+      3. 在「添加节点商品」中绑定该节点，买家下单即可秒级全自动开户！
+    </div>
+  </section>
+</div>
+
+<!-- Tab 4: 高级配置文件视图 -->
+<div class="tab-pane" id="pane-configs">
+  <section class="advanced" style="margin-top:0">
+    <div class="advanced-title"><h2>完整配置文件片段</h2><p>支持手动复制或下载独立配置文件。</p></div>
+    <div class="config-grid">
+      <div class="card">
+        <div class="card-head"><span class="step">C</span><div><h2>Clash / Mihomo</h2><p>完整配置文件</p></div></div>
+        ''' + field('clash-config', clash, 'config') + '''
+        <div class="actions">''' + copy('clash-config') + '''<a class="button" href="clash.yaml" download="clash.yaml">下载 ↓</a></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><span class="step">S</span><div><h2>Sing-box</h2><p>出站 Outbounds JSON</p></div></div>
+        ''' + field('sing-config', sing, 'config') + '''
+        <div class="actions">''' + copy('sing-config') + '''<a class="button" href="sing-box.json" download="sing-box.json">下载 ↓</a></div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="security">私密提示 · 链接和二维码包含连接凭据，请勿公开分享或发送截图给他人。</div>
+<p id="copy-status" class="status" role="status" aria-live="polite"></p>
+<footer><span>HYSTERIA 2 / CLUSTER AGENT PORTAL</span><span>配置由你的服务器动态生成</span></footer>
+</main><script>''' + SCRIPT + '</script></body></html>'
 
 
 def login_html(token, error_msg=None):
@@ -817,7 +931,7 @@ def prepare(meta_path, port, node_api_key=None):
         'admin_master': {
             'password': m['auth_password'],
             'expires_at': 2085974400,
-            'ip_limit': 0,  # 0 为不限制
+            'ip_limit': 0,
             'status': 'active',
             'created_at': int(time.time()),
             'note': 'Master Admin'
@@ -877,9 +991,8 @@ def serve(path):
     session_secret = data.get('session_secret', data['auth_hash'])
     meta_path = portal_path.parent / 'client_meta.json'
 
-    # 在线客户端 IP 滑动窗口跟踪器: { uid: { "ip_str": last_seen_ts } }
     ip_tracker = {}
-    IP_TIMEOUT_SECONDS = 180  # 3 分钟内有鉴权活动视为同一个在线 IP
+    IP_TIMEOUT_SECONDS = 180
 
     def save_data():
         try:
@@ -904,7 +1017,6 @@ def serve(path):
         host = m.get('public_ip', '127.0.0.1') if m.get('is_insecure') else m.get('server_name', 'localhost')
         subscription = f"https://{access.get('username','')}:{access.get('password','')}@{host}:{m.get('subscription_port',8443)}/{data['token']}/clash.yaml"
         
-        # 附加在线 IP 统计到展示字典
         now_ts = int(time.time())
         display_users = {}
         for uid, uinfo in data.get('users', {}).items():
@@ -984,7 +1096,6 @@ def serve(path):
                     req_data = json.loads(body)
                     client_auth = req_data.get('auth', '').strip()
                     client_addr = req_data.get('addr', '')
-                    # 解析客户端 IPv4 / IPv6 地址（去掉端口）
                     client_ip = client_addr.rsplit(':', 1)[0].strip('[]') if client_addr else ''
                 except Exception:
                     return self.reply_json(200, {'ok': False, 'msg': 'Bad auth request'})
@@ -1006,27 +1117,22 @@ def serve(path):
                 if matched_user.get('expires_at', 0) < now_ts:
                     return self.reply_json(200, {'ok': False, 'msg': 'User account expired'})
 
-                # -------- 同时在线 IP 限制检查 -------- #
                 ip_limit = int(matched_user.get('ip_limit', 0))
                 if ip_limit > 0 and client_ip:
                     tracker = ip_tracker.setdefault(matched_uid, {})
-                    # 清理超时 IP
                     active_ips = {ip: t for ip, t in tracker.items() if now_ts - t < IP_TIMEOUT_SECONDS}
                     ip_tracker[matched_uid] = active_ips
 
                     if client_ip not in active_ips and len(active_ips) >= ip_limit:
-                        # 超过允许的最大 IP 数，拒绝本次连接
                         return self.reply_json(200, {'ok': False, 'msg': f'Concurrent IP limit exceeded ({ip_limit} max)'})
-                    # 记录活跃 IP 活动时间戳
                     active_ips[client_ip] = now_ts
                 elif client_ip:
-                    # 不限制 IP 时依然记录供控制台展示
                     tracker = ip_tracker.setdefault(matched_uid, {})
                     tracker[client_ip] = now_ts
 
                 return self.reply_json(200, {'ok': True, 'id': matched_uid})
 
-            # 2. REST API 接口通道（供商城 pay.isoziyuan.com 调度）
+            # 2. REST API 接口通道
             if self.path.startswith('/api/v1/'):
                 if not self.verify_api_key():
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized API key'})
@@ -1041,7 +1147,6 @@ def serve(path):
                 sub = self.path[len('/api/v1/'):]
                 now_ts = int(time.time())
 
-                # 动态开户: /api/v1/users/create (支持 ip_limit)
                 if sub == 'users/create':
                     user_id = params.get('user_id') or ('hy2_' + secrets.token_hex(6))
                     pwd = params.get('password') or secrets.token_hex(16)
@@ -1097,7 +1202,7 @@ def serve(path):
 
                 return self.reply_json(404, {'ok': False, 'error': 'API endpoint not found'})
 
-            # 3. Web 网页版直接增删用户通道 (需已登录 Session)
+            # 3. Web 网页版直接增删用户通道
             prefix = '/' + data['token'] + '/'
             if self.path == prefix + 'manage-user':
                 if not self.is_authenticated():
@@ -1131,7 +1236,7 @@ def serve(path):
 
                     regenerate_page()
                     self.send_response(302)
-                    self.send_header('Location', prefix)
+                    self.send_header('Location', prefix + '#users')
                     self.end_headers()
                     return
                 except Exception:
@@ -1179,7 +1284,6 @@ def serve(path):
                 return self.reply(429, b'Too many requests')
             self.server.requests.append(now)
 
-            # REST API 心跳与元数据监控
             if self.path.startswith('/api/v1/'):
                 if not self.verify_api_key():
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized API key'})
@@ -1205,7 +1309,6 @@ def serve(path):
                 page = login_html(data['token'])
                 return self.reply(200, page.encode('utf-8'), 'text/html; charset=utf-8')
 
-            # 每次访问主页刷新一次用户和 IP 在线统计
             if subpath == '':
                 regenerate_page()
 
