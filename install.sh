@@ -803,10 +803,10 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
   </section>
 </div>
 
-<!-- Tab 3: 集群与 API 对接视图 -->
+<!-- Tab 3: 集群与通用 REST API 对接视图 -->
 <div class="tab-pane" id="pane-cluster">
   <section class="card" style="border-left:4px solid var(--accent)">
-    <div class="card-head"><span class="step">API</span><div><h2>集群通信与商城对接凭据</h2><p>可直接在 pay.isoziyuan.com / admin / node-panels 添加此节点</p></div></div>
+    <div class="card-head"><span class="step">API</span><div><h2>通用 REST API 接口与集群对接凭据</h2><p>支持接入任何自动化发卡商城、用户控制中心或第三方管理系统</p></div></div>
     
     <div class="api-box">
       <div>
@@ -818,17 +818,52 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
     
     <div class="api-box">
       <div>
-        <div style="font-size:11px;color:var(--muted);font-weight:700">通信密钥 (Bearer API Key)</div>
+        <div style="font-size:11px;color:var(--muted);font-weight:700">通信鉴权密钥 (Bearer API Key)</div>
         <div class="api-key-code" id="api-key-val">{api_key_str}</div>
       </div>
       <button class="button primary" type="button" data-copy="api-key-val" data-orig="复制 Key">复制 Key</button>
     </div>
 
-    <div style="margin-top:20px;padding:16px;background:#f9fbfb;border-radius:12px;border:1px solid var(--line);font-size:13px;color:#35545c;line-height:1.7">
-      <strong>接入指南：</strong><br>
-      1. 打开商城后台 <code>/admin/node-panels/hy2</code> 点击「添加 Hysteria 2」；<br>
-      2. 填入上方 API 基础地址与通信密钥，点击「测试」确认连通；<br>
-      3. 在「添加节点商品」中绑定该节点，买家下单即可秒级全自动开户！
+    <!-- 标准 REST API 接口调用规范与示例 -->
+    <div style="margin-top:24px">
+      <h3 style="font-size:15px;margin:0 0 12px;color:var(--ink)">📋 标准 REST API 接口规范与代码示例</h3>
+
+      <div style="display:grid;gap:14px">
+        <details class="card" style="padding:16px;box-shadow:none;border-color:#d7e5e2">
+          <summary style="font-size:13px;color:#1e4c56"><strong>1. 创建/开通用户</strong> <code>POST /api/v1/users/create</code></summary>
+          <div style="margin-top:12px;font-size:12px;color:var(--muted)">
+            <p style="margin-bottom:6px"><strong>请求 Header：</strong> <code>Authorization: Bearer &lt;API_KEY&gt;</code> &nbsp;|&nbsp; <code>Content-Type: application/json</code></p>
+            <p style="margin-bottom:6px"><strong>请求 Body 参数：</strong></p>
+            <pre style="background:#f4f8f7;padding:10px;border-radius:8px;overflow-x:auto;color:#284850">{{"user_id": "buyer_01", "password": "custom_password", "duration_days": 30, "ip_limit": 1, "note": "客户订单"}}</pre>
+            <p style="margin:8px 0 6px"><strong>响应内容：</strong> 包含 <code>ok: true</code>, 专属 <code>uri</code> 节点直链与 <code>clash</code> 配置片段。</p>
+          </div>
+        </details>
+
+        <details class="card" style="padding:16px;box-shadow:none;border-color:#d7e5e2">
+          <summary style="font-size:13px;color:#1e4c56"><strong>2. 延长有效期 (续费)</strong> <code>POST /api/v1/users/renew</code></summary>
+          <div style="margin-top:12px;font-size:12px;color:var(--muted)">
+            <pre style="background:#f4f8f7;padding:10px;border-radius:8px;overflow-x:auto;color:#284850">{{"user_id": "buyer_01", "extend_days": 30}}</pre>
+          </div>
+        </details>
+
+        <details class="card" style="padding:16px;box-shadow:none;border-color:#d7e5e2">
+          <summary style="font-size:13px;color:#1e4c56"><strong>3. 注销/删除用户</strong> <code>POST /api/v1/users/delete</code></summary>
+          <div style="margin-top:12px;font-size:12px;color:var(--muted)">
+            <pre style="background:#f4f8f7;padding:10px;border-radius:8px;overflow-x:auto;color:#284850">{{"user_id": "buyer_01"}}</pre>
+          </div>
+        </details>
+
+        <details class="card" style="padding:16px;box-shadow:none;border-color:#d7e5e2">
+          <summary style="font-size:13px;color:#1e4c56"><strong>4. 节点健康状态与用户数</strong> <code>GET /api/v1/node/meta</code></summary>
+          <div style="margin-top:12px;font-size:12px;color:var(--muted)">
+            <p>返回当前节点的端口、公网 IP/域名、混淆模式以及当前有效用户数。</p>
+          </div>
+        </details>
+      </div>
+
+      <div style="margin-top:16px;padding:14px;background:#f3f7f6;border-radius:10px;font-size:12px;color:#456972">
+        💡 <strong>通用性说明：</strong>任何自动化系统（如发卡商城、WHMCS、Telegram 机器人、自建 Python/Node.js/Go 后端）只需发送标准 HTTP POST 请求携带 Bearer Token，即可实现全自动集群开户与到期停用。
+      </div>
     </div>
   </section>
 </div>
