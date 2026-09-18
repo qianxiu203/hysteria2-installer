@@ -520,7 +520,7 @@ show_client_configs() {
 write_portal_program() {
     cat > "$HY2_DIR/portal.py" <<'PYPORTAL'
 """仅监听回环地址；公网 TLS 由 Hysteria 的 masquerade proxy 提供。
-采用现代轻奢 Tab 导航系统，解耦节点连接、多用户管理与集群 API 凭据。
+采用现代轻奢 Tab 导航系统，解耦节点连接、多用户管理（支持 IP 限制与实时流量统计）与集群 API 凭据。
 """
 import base64
 import hashlib
@@ -581,6 +581,9 @@ footer{display:flex;justify-content:space-between;margin-top:32px;color:#879996;
 .status-pill{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:700}
 .status-pill.active{background:#eafaf3;color:#0b8650}
 .status-pill.expired{background:#fff1f0;color:#cf3c3c}
+.traffic-bar{height:6px;width:90px;background:#e6edec;border-radius:4px;overflow:hidden;margin-top:5px}
+.traffic-fill{height:100%;background:var(--accent);border-radius:4px}
+.traffic-fill.danger{background:var(--danger)}
 .api-box{background:#f7faf9;border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
 .api-key-code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px;color:#284d56;word-break:break-all;margin-top:4px}
 .modal-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;background:#f9fbfb;border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
@@ -676,41 +679,80 @@ function toggleSecret(id, btn) {
 """
 
 
+def format_bytes(b):
+    if b < 1024:
+        return f"{b} B"
+    elif b < 1024**2:
+        return f"{b/1024:.1f} KB"
+    elif b < 1024**3:
+        return f"{b/1024**2:.2f} MB"
+    else:
+        return f"{b/1024**3:.2f} GB"
+
+
 def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token=""):
-    def field(identifier, value, kind='link'):
+    def field(identifier, value, kind="link"):
         return f'<textarea id="{identifier}" class="{kind}" aria-label="{identifier}" readonly spellcheck="false">{html.escape(value)}</textarea>'
     def copy(identifier):
         return f'<button class="button primary" type="button" data-copy="{identifier}" data-orig="复制">复制</button>'
     
-    is_insecure = m.get('is_insecure', False)
-    server_name = m.get('server_name') or m.get('public_ip', 'localhost')
-    public_ip = m.get('public_ip', server_name)
+    is_insecure = m.get("is_insecure", False)
+    server_name = m.get("server_name") or m.get("public_ip", "localhost")
+    public_ip = m.get("public_ip", server_name)
     host = public_ip if is_insecure else server_name
-    sub_port = m.get('subscription_port', 8443)
-    listen_port = m.get('listen_port', 19984)
-    obfs_pw = m.get('obfs_password', '')
+    sub_port = m.get("subscription_port", 8443)
+    listen_port = m.get("listen_port", 19984)
+    obfs_pw = m.get("obfs_password", "")
     users = users or {}
     now_ts = int(time.time())
     
-    # 渲染多用户表格行
     user_rows = []
     active_count = 0
-    for uid, u in sorted(users.items(), key=lambda x: x[1].get('created_at', 0), reverse=True):
-        is_active = u.get('status') == 'active' and u.get('expires_at', 0) >= now_ts
+    total_used_bytes = 0
+
+    for uid, u in sorted(users.items(), key=lambda x: x[1].get("created_at", 0), reverse=True):
+        used_bytes = int(u.get("used_bytes", 0))
+        limit_bytes = int(u.get("limit_bytes", 0))
+        total_used_bytes += used_bytes
+
+        is_traffic_ok = limit_bytes == 0 or used_bytes < limit_bytes
+        is_time_ok = u.get("expires_at", 0) >= now_ts
+        is_active = u.get("status") == "active" and is_time_ok and is_traffic_ok
+
         if is_active:
             active_count += 1
-        status_html = '<span class="status-pill active">正常</span>' if is_active else '<span class="status-pill expired">已到期/停用</span>'
-        expires_str = time.strftime('%Y-%m-%d %H:%M', time.localtime(u.get('expires_at', 0))) if u.get('expires_at', 0) < 2000000000 else '永久有效'
-        ip_limit = u.get('ip_limit', 0)
-        ip_limit_str = f"{ip_limit} IP" if ip_limit > 0 else '不限'
-        online_ips = len(u.get('online_ips', {}))
+
+        if not is_traffic_ok:
+            status_html = '<span class="status-pill expired">流量超额</span>'
+        elif not is_time_ok:
+            status_html = '<span class="status-pill expired">已到期</span>'
+        elif u.get("status") != "active":
+            status_html = '<span class="status-pill expired">已停用</span>'
+        else:
+            status_html = '<span class="status-pill active">正常</span>'
+
+        expires_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(u.get("expires_at", 0))) if u.get("expires_at", 0) < 2000000000 else "永久有效"
+        ip_limit = u.get("ip_limit", 0)
+        ip_limit_str = f"{ip_limit} IP" if ip_limit > 0 else "不限"
+        online_ips = len(u.get("online_ips", {}))
         online_str = f'<span class="badge-count" style="font-size:11px;">{online_ips} 在线</span>' if online_ips > 0 else '<span style="color:var(--muted)">0</span>'
-        note = u.get('note') or '-'
         
-        user_rows.append(f'''<tr>
+        # 流量展示与进度条
+        if limit_bytes > 0:
+            percent = min(round((used_bytes / limit_bytes) * 100), 100)
+            bar_class = "danger" if percent >= 90 else ""
+            traffic_display = f"""<div>{format_bytes(used_bytes)} / {format_bytes(limit_bytes)} <span style="font-size:11px;color:var(--muted)">({percent}%)</span></div>
+            <div class="traffic-bar"><div class="traffic-fill {bar_class}" style="width:{percent}%"></div></div>"""
+        else:
+            traffic_display = f"<div>{format_bytes(used_bytes)} <span style="font-size:11px;color:var(--muted)">(不限)</span></div>"
+
+        note = u.get("note") or "-"
+        
+        user_rows.append(f"""<tr>
           <td><strong>{html.escape(uid)}</strong><div style="font-size:11px;color:var(--muted)">{html.escape(note)}</div></td>
           <td>{status_html}</td>
           <td>{ip_limit_str} ({online_str})</td>
+          <td>{traffic_display}</td>
           <td>{expires_str}</td>
           <td><code style="font-size:11px">{html.escape(u.get("password","")[:4] + "****" + u.get("password","")[-4:])}</code></td>
           <td>
@@ -720,25 +762,28 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
               <button class="button danger" style="padding:4px 10px;font-size:11px" type="submit">删除</button>
             </form>
           </td>
-        </tr>''')
+        </tr>""")
 
-    users_table_html = "".join(user_rows) or '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px">暂无多用户数据</td></tr>'
+    users_table_html = "".join(user_rows) or '<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:24px">暂无多用户数据</td></tr>'
+    obfs_badge = "Salamander" if obfs_pw else "QUIC"
+    field_hy2 = field("hy2-link", uri)
+    copy_hy2 = copy("hy2-link")
+    field_sub = field("clash-subscription", subscription)
+    copy_sub = copy("clash-subscription")
+    field_clash_cfg = field("clash-config", clash, "config")
+    copy_clash_cfg = copy("clash-config")
+    field_sing_cfg = field("sing-config", sing, "config")
+    copy_sing_cfg = copy("sing-config")
 
-    obfs_badge = 'Salamander' if obfs_pw else 'QUIC'
-    host_display = html.escape(host)
-    sn_display = html.escape(server_name)
-    listen_port_int = int(listen_port)
-    api_key_str = html.escape(api_key or "")
-
-    return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>HY2 · 节点与集群中心</title><style>{STYLE}</style></head><body><main>
+    return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>HY2 · 节点与集群中心</title><style>{STYLE}</style></head><body><main>
 <nav class="topbar" aria-label="页面标识"><div class="brand"><span class="logo">H₂</span> HYSTERIA <span> / 控制中心</span></div><span class="private">● 集群运行中</span></nav>
-<header class="hero"><div class="eyebrow">HYSTERIA 2 NODE DASHBOARD</div><h1>{sn_display}</h1><p>官方核心驱动 · 极速 QUIC 代理 · 多用户开户与集群调度</p></header>
+<header class="hero"><div class="eyebrow">HYSTERIA 2 NODE DASHBOARD</div><h1>{html.escape(server_name)}</h1><p>官方核心驱动 · 极速 QUIC 代理 · 多用户开户与流量/IP限制</p></header>
 
 <!-- 顶部 Tab 导航栏 -->
 <div class="tab-bar">
   <button class="tab-btn active" data-tab="connect">🚀 节点导入 (Connect)</button>
   <button class="tab-btn" data-tab="users">👥 多用户管理 ({active_count}/{len(users)})</button>
-  <button class="tab-btn" data-tab="cluster">🔑 集群与 API 对接</button>
+  <button class="tab-btn" data-tab="cluster">🔑 通用 REST API 对接</button>
   <button class="tab-btn" data-tab="configs">⚙️ 高级配置</button>
 </div>
 
@@ -756,27 +801,28 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
     <div class="stack">
       <section class="card">
         <div class="card-head"><span class="step">01</span><div><h2>节点直链 (URI)</h2><p>v2rayN / Nekobox / Shadowrocket</p></div></div>
-        {field('hy2-link', uri)}
-        <div class="actions">{copy('hy2-link')}</div>
-        <p class="note">{host_display} · UDP {listen_port_int}</p>
+        {field_hy2}
+        <div class="actions">{copy_hy2}</div>
+        <p class="note">{html.escape(host)} · UDP {int(listen_port)}</p>
       </section>
       <section class="card">
         <div class="card-head"><span class="step">02</span><div><h2>Clash 订阅</h2><p>适用于 Clash Meta / Mihomo 内核</p></div></div>
-        {field('clash-subscription', subscription)}
-        <div class="actions">{copy('clash-subscription')}<a class="button" href="clash.yaml" download="clash.yaml">下载配置 ↓</a></div>
+        {field_sub}
+        <div class="actions">{copy_sub}<a class="button" href="clash.yaml" download="clash.yaml">下载配置 ↓</a></div>
         <p class="note">在客户端添加订阅链接即可自动同步。</p>
       </section>
     </div>
   </div>
 </div>
 
-<!-- Tab 2: 多用户与 IP 限制视图 -->
+<!-- Tab 2: 多用户与流量/IP 限制视图 -->
 <div class="tab-pane" id="pane-users">
   <section class="card">
     <div class="user-header">
-      <div><h2>多用户与 IP 限制管理</h2><p style="font-size:13px">实时监控当前节点有效用户、到期状态与在线客户端 IP 限制</p></div>
+      <div><h2>多用户、流量与 IP 限制管理</h2><p style="font-size:13px">实时监控当前节点有效用户、到期时间、实时流量消耗与在线 IP 限制</p></div>
       <div class="user-stats">
         <span class="badge-count">有效用户: {active_count} / {len(users)}</span>
+        <span class="badge-count" style="background:#f0f7f6">总已用流量: {format_bytes(total_used_bytes)}</span>
       </div>
     </div>
 
@@ -788,7 +834,8 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
         <input name="user_id" placeholder="用户标识 (如: user_01)" required>
         <input name="password" placeholder="连接密码 (留空随机生成)">
         <input name="duration_days" type="number" value="30" placeholder="有效天数 (默认30)">
-        <input name="ip_limit" type="number" value="0" placeholder="限制同时在线 IP 数 (0为不限)">
+        <input name="traffic_gb" type="number" step="0.1" value="0" placeholder="流量限额 GB (0为不限)">
+        <input name="ip_limit" type="number" value="0" placeholder="同时在线 IP 限制 (0为不限)">
         <input name="note" placeholder="备注说明 (如: 客户小明)">
         <button class="button primary" type="submit">立即创建用户</button>
       </form>
@@ -796,7 +843,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
 
     <div class="user-table-wrap">
       <table class="user-table">
-        <thead><tr><th>用户标识</th><th>状态</th><th>IP 限制 (实时)</th><th>到期时间</th><th>连接密码</th><th>操作</th></tr></thead>
+        <thead><tr><th>用户标识</th><th>状态</th><th>IP 限制 (实时)</th><th>已用流量 / 配额</th><th>到期时间</th><th>连接密码</th><th>操作</th></tr></thead>
         <tbody>{users_table_html}</tbody>
       </table>
     </div>
@@ -819,7 +866,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
     <div class="api-box">
       <div>
         <div style="font-size:11px;color:var(--muted);font-weight:700">通信鉴权密钥 (Bearer API Key)</div>
-        <div class="api-key-code" id="api-key-val">{api_key_str}</div>
+        <div class="api-key-code" id="api-key-val">{html.escape(api_key or "")}</div>
       </div>
       <button class="button primary" type="button" data-copy="api-key-val" data-orig="复制 Key">复制 Key</button>
     </div>
@@ -830,11 +877,11 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
 
       <div style="display:grid;gap:14px">
         <details class="card" style="padding:16px;box-shadow:none;border-color:#d7e5e2">
-          <summary style="font-size:13px;color:#1e4c56"><strong>1. 创建/开通用户</strong> <code>POST /api/v1/users/create</code></summary>
+          <summary style="font-size:13px;color:#1e4c56"><strong>1. 创建/开通用户 (支持流量与IP配额)</strong> <code>POST /api/v1/users/create</code></summary>
           <div style="margin-top:12px;font-size:12px;color:var(--muted)">
             <p style="margin-bottom:6px"><strong>请求 Header：</strong> <code>Authorization: Bearer &lt;API_KEY&gt;</code> &nbsp;|&nbsp; <code>Content-Type: application/json</code></p>
             <p style="margin-bottom:6px"><strong>请求 Body 参数：</strong></p>
-            <pre style="background:#f4f8f7;padding:10px;border-radius:8px;overflow-x:auto;color:#284850">{{"user_id": "buyer_01", "password": "custom_password", "duration_days": 30, "ip_limit": 1, "note": "客户订单"}}</pre>
+            <pre style="background:#f4f8f7;padding:10px;border-radius:8px;overflow-x:auto;color:#284850">{{"user_id": "buyer_01", "password": "custom_password", "duration_days": 30, "traffic_gb": 100, "ip_limit": 1, "note": "客户订单"}}</pre>
             <p style="margin:8px 0 6px"><strong>响应内容：</strong> 包含 <code>ok: true</code>, 专属 <code>uri</code> 节点直链与 <code>clash</code> 配置片段。</p>
           </div>
         </details>
@@ -842,7 +889,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
         <details class="card" style="padding:16px;box-shadow:none;border-color:#d7e5e2">
           <summary style="font-size:13px;color:#1e4c56"><strong>2. 延长有效期 (续费)</strong> <code>POST /api/v1/users/renew</code></summary>
           <div style="margin-top:12px;font-size:12px;color:var(--muted)">
-            <pre style="background:#f4f8f7;padding:10px;border-radius:8px;overflow-x:auto;color:#284850">{{"user_id": "buyer_01", "extend_days": 30}}</pre>
+            <pre style="background:#f4f8f7;padding:10px;border-radius:8px;overflow-x:auto;color:#284850">{{"user_id": "buyer_01", "extend_days": 30, "add_traffic_gb": 100}}</pre>
           </div>
         </details>
 
@@ -856,13 +903,13 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
         <details class="card" style="padding:16px;box-shadow:none;border-color:#d7e5e2">
           <summary style="font-size:13px;color:#1e4c56"><strong>4. 节点健康状态与用户数</strong> <code>GET /api/v1/node/meta</code></summary>
           <div style="margin-top:12px;font-size:12px;color:var(--muted)">
-            <p>返回当前节点的端口、公网 IP/域名、混淆模式以及当前有效用户数。</p>
+            <p>返回当前节点的端口、公网 IP/域名、混淆模式以及当前有效用户数与总流量统计。</p>
           </div>
         </details>
       </div>
 
       <div style="margin-top:16px;padding:14px;background:#f3f7f6;border-radius:10px;font-size:12px;color:#456972">
-        💡 <strong>通用性说明：</strong>任何自动化系统（如发卡商城、WHMCS、Telegram 机器人、自建 Python/Node.js/Go 后端）只需发送标准 HTTP POST 请求携带 Bearer Token，即可实现全自动集群开户与到期停用。
+        💡 <strong>通用性说明：</strong>任何自动化系统（如发卡商城、WHMCS、Telegram 机器人、自建 Python/Node.js/Go 后端）只需发送标准 HTTP POST 请求携带 Bearer Token，即可实现全自动集群开户、流量限制与到期停用。
       </div>
     </div>
   </section>
@@ -875,13 +922,13 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
     <div class="config-grid">
       <div class="card">
         <div class="card-head"><span class="step">C</span><div><h2>Clash / Mihomo</h2><p>完整配置文件</p></div></div>
-        {field('clash-config', clash, 'config')}
-        <div class="actions">{copy('clash-config')}<a class="button" href="clash.yaml" download="clash.yaml">下载 ↓</a></div>
+        {field_clash_cfg}
+        <div class="actions">{copy_clash_cfg}<a class="button" href="clash.yaml" download="clash.yaml">下载 ↓</a></div>
       </div>
       <div class="card">
         <div class="card-head"><span class="step">S</span><div><h2>Sing-box</h2><p>出站 Outbounds JSON</p></div></div>
-        {field('sing-config', sing, 'config')}
-        <div class="actions">{copy('sing-config')}<a class="button" href="sing-box.json" download="sing-box.json">下载 ↓</a></div>
+        {field_sing_cfg}
+        <div class="actions">{copy_sing_cfg}<a class="button" href="sing-box.json" download="sing-box.json">下载 ↓</a></div>
       </div>
     </div>
   </section>
@@ -890,7 +937,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
 <div class="security">私密提示 · 链接和二维码包含连接凭据，请勿公开分享或发送截图给他人。</div>
 <p id="copy-status" class="status" role="status" aria-live="polite"></p>
 <footer><span>HYSTERIA 2 / CLUSTER AGENT PORTAL</span><span>配置由你的服务器动态生成</span></footer>
-</main><script>{SCRIPT}</script></body></html>'''
+</main><script>{SCRIPT}</script></body></html>"""
 
 
 def login_html(token, error_msg=None):
@@ -973,6 +1020,8 @@ def prepare(meta_path, port, node_api_key=None):
             'password': m['auth_password'],
             'expires_at': 2085974400,
             'ip_limit': 0,
+            'limit_bytes': 0,  # 0 为不限制流量
+            'used_bytes': 0,
             'status': 'active',
             'created_at': int(time.time()),
             'note': 'Master Admin'
@@ -1013,6 +1062,8 @@ def refresh(meta_path):
                 'password': m['auth_password'],
                 'expires_at': 2085974400,
                 'ip_limit': 0,
+                'limit_bytes': 0,
+                'used_bytes': 0,
                 'status': 'active',
                 'created_at': int(time.time()),
                 'note': 'Master Admin'
@@ -1129,7 +1180,7 @@ def serve(path):
                 return self.reply(429, b'Too many requests')
             self.server.requests.append(now)
 
-            # 1. Hysteria 2 本地 HTTP 动态鉴权与 IP 限额拦截端点
+            # 1. Hysteria 2 本地 HTTP 动态鉴权、实时流量统计与 IP 限额拦截端点
             if self.path == '/auth':
                 try:
                     length = int(self.headers.get('Content-Length', 0))
@@ -1137,6 +1188,10 @@ def serve(path):
                     req_data = json.loads(body)
                     client_auth = req_data.get('auth', '').strip()
                     client_addr = req_data.get('addr', '')
+                    # tx (客户端上行/服务器接收), rx (客户端下行/服务器发送) 流量增量统计
+                    tx_bytes = int(req_data.get('tx', 0))
+                    rx_bytes = int(req_data.get('rx', 0))
+                    delta_traffic = tx_bytes + rx_bytes
                     client_ip = client_addr.rsplit(':', 1)[0].strip('[]') if client_addr else ''
                 except Exception:
                     return self.reply_json(200, {'ok': False, 'msg': 'Bad auth request'})
@@ -1158,6 +1213,16 @@ def serve(path):
                 if matched_user.get('expires_at', 0) < now_ts:
                     return self.reply_json(200, {'ok': False, 'msg': 'User account expired'})
 
+                # -------- 流量限额检查与增量累加 -------- #
+                limit_bytes = int(matched_user.get('limit_bytes', 0))
+                used_bytes = int(matched_user.get('used_bytes', 0)) + delta_traffic
+                matched_user['used_bytes'] = used_bytes
+
+                if limit_bytes > 0 and used_bytes >= limit_bytes:
+                    # 流量超额，阻断拒绝连接
+                    return self.reply_json(200, {'ok': False, 'msg': 'Traffic quota exceeded'})
+
+                # -------- 同时在线 IP 限制检查 -------- #
                 ip_limit = int(matched_user.get('ip_limit', 0))
                 if ip_limit > 0 and client_ip:
                     tracker = ip_tracker.setdefault(matched_uid, {})
@@ -1188,11 +1253,14 @@ def serve(path):
                 sub = self.path[len('/api/v1/'):]
                 now_ts = int(time.time())
 
+                # 动态开户 (支持 duration_days, ip_limit, traffic_gb)
                 if sub == 'users/create':
                     user_id = params.get('user_id') or ('hy2_' + secrets.token_hex(6))
                     pwd = params.get('password') or secrets.token_hex(16)
                     days = int(params.get('duration_days', 30))
                     ip_limit = int(params.get('ip_limit', 0))
+                    traffic_gb = float(params.get('traffic_gb', 0))
+                    limit_bytes = int(traffic_gb * (1024**3)) if traffic_gb > 0 else 0
                     expires = int(params.get('expires_at', now_ts + days * 86400))
                     note = params.get('note', '')
 
@@ -1200,6 +1268,8 @@ def serve(path):
                         'password': pwd,
                         'expires_at': expires,
                         'ip_limit': ip_limit,
+                        'limit_bytes': limit_bytes,
+                        'used_bytes': 0,
                         'status': 'active',
                         'created_at': now_ts,
                         'note': note
@@ -1213,6 +1283,7 @@ def serve(path):
                         'user_id': user_id,
                         'password': pwd,
                         'ip_limit': ip_limit,
+                        'traffic_gb': traffic_gb,
                         'expires_at': expires,
                         'uri': uri,
                         'clash': clash_yaml,
@@ -1222,14 +1293,17 @@ def serve(path):
                 elif sub == 'users/renew':
                     user_id = params.get('user_id')
                     days = int(params.get('extend_days', 30))
+                    add_traffic_gb = float(params.get('add_traffic_gb', 0))
                     u = data.get('users', {}).get(user_id)
                     if not u:
                         return self.reply_json(404, {'ok': False, 'error': 'User not found'})
                     base_time = max(u.get('expires_at', 0), now_ts)
                     u['expires_at'] = base_time + days * 86400
+                    if add_traffic_gb > 0:
+                        u['limit_bytes'] = int(u.get('limit_bytes', 0)) + int(add_traffic_gb * (1024**3))
                     u['status'] = 'active'
                     regenerate_page()
-                    return self.reply_json(200, {'ok': True, 'user_id': user_id, 'expires_at': u['expires_at']})
+                    return self.reply_json(200, {'ok': True, 'user_id': user_id, 'expires_at': u['expires_at'], 'limit_bytes': u.get('limit_bytes', 0)})
 
                 elif sub == 'users/delete':
                     user_id = params.get('user_id')
@@ -1260,11 +1334,15 @@ def serve(path):
                         pwd = form.get('password', [''])[0].strip() or secrets.token_hex(16)
                         days = int(form.get('duration_days', ['30'])[0] or 30)
                         ip_limit = int(form.get('ip_limit', ['0'])[0] or 0)
+                        traffic_gb = float(form.get('traffic_gb', ['0'])[0] or 0)
+                        limit_bytes = int(traffic_gb * (1024**3)) if traffic_gb > 0 else 0
                         note = form.get('note', [''])[0].strip()
                         data.setdefault('users', {})[user_id] = {
                             'password': pwd,
                             'expires_at': now_ts + days * 86400,
                             'ip_limit': ip_limit,
+                            'limit_bytes': limit_bytes,
+                            'used_bytes': 0,
                             'status': 'active',
                             'created_at': now_ts,
                             'note': note
