@@ -177,7 +177,7 @@ setup_ports_and_obfs() {
         HOP_START=${HOP_START:-$DEFAULT_HOP_START}
         read -rp "请输入端口跳跃结束范围 [默认: ${DEFAULT_HOP_END}]: " HOP_END
         HOP_END=${HOP_END:-$DEFAULT_HOP_END}
-        HOP_PORT_RANGE="${HOP_START}:${HOP_END}"
+        HOP_PORT_RANGE="${HOP_START}-${HOP_END}"
         setup_iptables_port_hopping "$LISTEN_PORT" "$HOP_START" "$HOP_END"
     fi
 
@@ -191,6 +191,29 @@ setup_ports_and_obfs() {
         RANDOM_OBFS=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 12 || echo "obfs_$(date +%s)")
         read -rp "请输入混淆密码 [默认随机: ${RANDOM_OBFS}]: " OBFS_PASSWORD
         OBFS_PASSWORD=${OBFS_PASSWORD:-$RANDOM_OBFS}
+    fi
+}
+
+setup_system_firewall() {
+    local port="$1"
+    local s_port="$2"
+    local e_port="$3"
+    
+    log_step "自动放行系统内部防火墙 (ufw / firewalld / iptables)..."
+    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "active"; then
+        ufw allow "${port}/udp" >/dev/null 2>&1 || true
+        if [[ -n "$s_port" && -n "$e_port" ]]; then
+            ufw allow "${s_port}:${e_port}/udp" >/dev/null 2>&1 || true
+        fi
+        log_info "已放行 UFW 防火墙端口。"
+    fi
+    if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
+        firewall-cmd --zone=public --add-port="${port}/udp" --permanent >/dev/null 2>&1 || true
+        if [[ -n "$s_port" && -n "$e_port" ]]; then
+            firewall-cmd --zone=public --add-port="${s_port}-${e_port}/udp" --permanent >/dev/null 2>&1 || true
+        fi
+        firewall-cmd --reload >/dev/null 2>&1 || true
+        log_info "已放行 firewalld 端口。"
     fi
 }
 
@@ -240,10 +263,7 @@ auth:
   password: ${AUTH_PASSWORD}
 
 masquerade:
-  type: proxy
-  proxy:
-    url: https://${SERVER_NAME}/
-    rewriteHost: true
+  type: 404
 
 ignoreClientBandwidth: false
 disableUDP: false
@@ -384,7 +404,7 @@ show_client_configs() {
   type: hysteria2
   server: ${ip}
   port: ${port}
-$( [[ -n "$hop" ]] && echo "  ports: ${port},${hop}" )
+$( [[ -n "$hop" ]] && echo "  ports: ${hop}" )
   password: "${pass}"
   sni: ${sni}
   skip-cert-verify: ${insecure}
@@ -514,6 +534,7 @@ menu() {
             setup_certificates
             setup_ports_and_obfs
             generate_server_config
+            setup_system_firewall "$LISTEN_PORT" "$HOP_START" "$HOP_END"
             setup_systemd
             show_client_configs
             ;;
@@ -575,6 +596,7 @@ if [[ $# -gt 0 ]]; then
             setup_certificates
             setup_ports_and_obfs
             generate_server_config
+            setup_system_firewall "$LISTEN_PORT" "$HOP_START" "$HOP_END"
             setup_systemd
             show_client_configs
             ;;
