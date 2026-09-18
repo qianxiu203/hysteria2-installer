@@ -18,6 +18,7 @@
   - 标准 **`hysteria2://`** 节点直链（支持 v2rayN、Nekobox、Shadowrocket、Sing-box 等一键导入）
   - **Clash.Meta / Mihomo** (Clash Verge Rev) 节点配置片段
   - **Sing-box** (SFA / SFI) Outbound 节点配置片段
+  - 安装完成直接显示 v2rayN 可扫描二维码，以及 HTTPS Clash/Mihomo 订阅链接。
 - 🛠️ **全生命周期管理**：Systemd 服务自动守护、开机自启、内核 UDP 缓冲与参数调优、一键升级、实时日志监控与彻底卸载。
 
 ---

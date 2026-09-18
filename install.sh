@@ -22,6 +22,7 @@ HY2_BIN="/usr/local/bin/hysteria"
 HY2_SERVICE="/etc/systemd/system/hysteria-server.service"
 HY2_CERT_DIR="${HY2_DIR}/cert"
 HY2_META_FILE="${HY2_DIR}/client_meta.json"
+HY2_SUB_DIR="${HY2_DIR}/subscription"
 
 log_info() { echo -e "${GREEN}[INFO]${PLAIN} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${PLAIN} $1"; }
@@ -65,13 +66,13 @@ get_public_ip() {
 install_dependencies() {
     log_step "检查并安装基础依赖 (curl, wget, jq, openssl, iptables, tar)..."
     if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -qq && apt-get install -y -qq curl wget jq openssl iptables tar ca-certificates
+        apt-get update -qq && apt-get install -y -qq curl wget jq openssl iptables tar ca-certificates qrencode
     elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y curl wget jq openssl iptables tar ca-certificates
+        dnf install -y curl wget jq openssl iptables tar ca-certificates qrencode
     elif command -v yum >/dev/null 2>&1; then
-        yum install -y curl wget jq openssl iptables tar ca-certificates
+        yum install -y curl wget jq openssl iptables tar ca-certificates qrencode
     elif command -v apk >/dev/null 2>&1; then
-        apk add --no-cache curl wget jq openssl iptables tar ca-certificates bash
+        apk add --no-cache curl wget jq openssl iptables tar ca-certificates bash qrencode
     else
         log_warn "未识别的包管理器，请确认已安装 curl, wget, jq, openssl, iptables"
     fi
@@ -226,6 +227,7 @@ setup_system_firewall() {
         ufw allow "${port}/udp" >/dev/null 2>&1 || true
         if [[ "$CERT_TYPE" == "acme" ]]; then
             ufw allow 80/tcp >/dev/null 2>&1 || true
+            ufw allow 443/tcp >/dev/null 2>&1 || true
         fi
         if [[ -n "$s_port" && -n "$e_port" ]]; then
             ufw allow "${s_port}:${e_port}/udp" >/dev/null 2>&1 || true
@@ -236,6 +238,7 @@ setup_system_firewall() {
         firewall-cmd --zone=public --add-port="${port}/udp" --permanent >/dev/null 2>&1 || true
         if [[ "$CERT_TYPE" == "acme" ]]; then
             firewall-cmd --zone=public --add-port="80/tcp" --permanent >/dev/null 2>&1 || true
+            firewall-cmd --zone=public --add-port="443/tcp" --permanent >/dev/null 2>&1 || true
         fi
         if [[ -n "$s_port" && -n "$e_port" ]]; then
             firewall-cmd --zone=public --add-port="${s_port}-${e_port}/udp" --permanent >/dev/null 2>&1 || true
@@ -286,7 +289,8 @@ setup_iptables_port_hopping() {
 # 5. 生成服务端配置文件与 Systemd 服务
 generate_server_config() {
     log_step "生成 Hysteria 2 服务端配置: ${HY2_CONFIG}..."
-    mkdir -p "$HY2_DIR"
+    mkdir -p "$HY2_DIR" "$HY2_SUB_DIR"
+    SUB_TOKEN=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 32)
 
     cat > "$HY2_CONFIG" <<EOF
 # Hysteria 2 Server Configuration
@@ -316,7 +320,10 @@ auth:
   password: ${AUTH_PASSWORD}
 
 masquerade:
-  type: 404
+  type: file
+  file:
+    dir: ${HY2_SUB_DIR}
+  listenHTTPS: :443
 
 ignoreClientBandwidth: false
 disableUDP: false
@@ -334,6 +341,24 @@ outbounds:
     direct:
       mode: "4"
 EOF
+
+    cat > "${HY2_SUB_DIR}/${SUB_TOKEN}.yaml" <<EOF
+proxies:
+- name: "Hy2-${SERVER_NAME}"
+  type: hysteria2
+  server: ${SERVER_NAME}
+  port: ${LISTEN_PORT}
+  password: "${AUTH_PASSWORD}"
+  sni: ${SERVER_NAME}
+  skip-cert-verify: ${IS_INSECURE}
+  alpn: [h3]
+EOF
+    if [[ -n "$OBFS_PASSWORD" ]]; then
+        cat >> "${HY2_SUB_DIR}/${SUB_TOKEN}.yaml" <<EOF
+  obfs: salamander
+  obfs-password: "${OBFS_PASSWORD}"
+EOF
+    fi
 
     # 写入混淆（如果有）
     if [[ -n "$OBFS_PASSWORD" ]]; then
@@ -355,6 +380,7 @@ EOF
   "server_name": "${SERVER_NAME}",
   "is_insecure": ${IS_INSECURE},
   "cert_type": "${CERT_TYPE}",
+  "subscription_token": "${SUB_TOKEN}",
   "hop_port_range": "${HOP_PORT_RANGE}",
   "obfs_password": "${OBFS_PASSWORD}"
 }
@@ -418,6 +444,8 @@ show_client_configs() {
     local insecure=$(jq -r '.is_insecure' "$HY2_META_FILE")
     local hop=$(jq -r '.hop_port_range' "$HY2_META_FILE")
     local obfs=$(jq -r '.obfs_password' "$HY2_META_FILE")
+    local cert_type=$(jq -r '.cert_type // empty' "$HY2_META_FILE")
+    local sub_token=$(jq -r '.subscription_token // empty' "$HY2_META_FILE")
 
     local connect_ports="${port}"
     local url_ports="${port}"
@@ -458,6 +486,17 @@ show_client_configs() {
     echo -e "${CYAN}----------------------------------------------------------------${PLAIN}"
     echo -e "${GREEN}【标准 Hysteria2 节点链接 (v2rayN, Nekobox, Shadowrocket)】:${PLAIN}"
     echo -e "${CYAN}${hy2_url}${PLAIN}"
+    if command -v qrencode >/dev/null 2>&1; then
+        echo -e "${GREEN}【v2rayN 扫码导入】${PLAIN}"
+        qrencode -t ANSIUTF8 "$hy2_url"
+    else
+        log_warn "未找到 qrencode；重新运行安装脚本会自动安装后显示二维码。"
+    fi
+    if [[ "$cert_type" == "acme" && -n "$sub_token" ]]; then
+        local sub_url="https://${sni}/${sub_token}.yaml"
+        echo -e "${GREEN}【Clash / Mihomo 订阅链接】${PLAIN} ${CYAN}${sub_url}${PLAIN}"
+        echo -e "${YELLOW}请在云安全组放行 TCP 443；此随机链接包含节点配置，请勿公开。${PLAIN}"
+    fi
     echo -e "${CYAN}----------------------------------------------------------------${PLAIN}"
 
     # Clash.Meta / Mihomo 节点配置
