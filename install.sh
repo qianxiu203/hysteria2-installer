@@ -1557,23 +1557,19 @@ setup_portal() {
 [Unit]
 Description=Private HY2 information page (loopback only)
 After=network.target
+
 [Service]
 Type=simple
-DynamicUser=yes
-LoadCredential=portal.json:${HY2_DIR}/portal.json
-ExecStart=/usr/bin/python3 ${HY2_DIR}/portal.py serve %d/portal.json
-Restart=on-failure
+User=root
+WorkingDirectory=${HY2_DIR}
+ExecStart=/usr/bin/python3 ${HY2_DIR}/portal.py serve ${HY2_DIR}/portal.json
+Restart=always
+RestartSec=3
 UMask=0077
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-PrivateDevices=yes
-RestrictAddressFamilies=AF_INET
+
 [Install]
 WantedBy=multi-user.target
 EOF
-    # 程序可读，包含节点密码的数据仅通过 systemd credential 交给动态用户。
     chmod 755 "$HY2_DIR"
     chmod 644 "$HY2_DIR/portal.py"
     chmod 600 "$HY2_DIR/portal.json" "$HY2_DIR/portal-access.json" "$HY2_META_FILE" "$HY2_CONFIG"
