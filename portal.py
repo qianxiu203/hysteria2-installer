@@ -210,6 +210,11 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
     public_ip = m.get("public_ip", server_name)
     host = public_ip if is_insecure else server_name
     sub_port = m.get("subscription_port", 8443)
+    pin_sha256 = m.get("pin_sha256", "")
+    pin_block = (f'<div class="api-box"><div><div style="font-size:11px;color:var(--muted);font-weight:700">'
+                 f'服务端证书 SHA-256 指纹 (仅供人工核对 · 不写入自动导入直链)</div>'
+                 f'<div class="api-key-code" id="api-pin-val">{html.escape(pin_sha256)}</div></div>'
+                 f'<button class="button" type="button" data-copy="api-pin-val" data-orig="复制指纹">复制指纹</button></div>') if pin_sha256 else ''
     listen_port = m.get("listen_port", 19984)
     obfs_pw = m.get("obfs_password", "")
     users = users or {}
@@ -419,6 +424,8 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
       <button class="button primary" type="button" data-copy="api-key-val" data-orig="复制 Key">复制 Key</button>
     </div>
 
+    {pin_block}
+
     <!-- 标准 REST API 接口调用规范与示例 -->
     <div style="margin-top:24px">
       <h3 style="font-size:15px;margin:0 0 12px;color:var(--ink)">📋 标准 REST API 接口规范与代码示例</h3>
@@ -541,13 +548,12 @@ def artifacts(m, auth_override=None, name_override=None):
     listen_port = m.get('listen_port', 19984)
     obfs_password = m.get('obfs_password', '')
     hop_port_range = m.get('hop_port_range', '')
-    pin_sha256 = m.get('pin_sha256', '')
-
+    # 自签证书统一走 insecure=1：这是官方客户端(v2rayNG / NekoBox / sing-box / Clash)都认的信任开关。
+    # 直链不再写入 pinSHA256 —— 该字段官方 hysteria 端要求 base64，而 Xray 内核按 hex 解析，
+    # 一旦写入 base64 就会触发 `encoding/hex: invalid byte`，客户端配置构建直接失败(表现为扫码后连不上)。
     params = {'sni': server_name}
     if is_insecure:
         params['insecure'] = '1'
-    if pin_sha256:
-        params['pinSHA256'] = pin_sha256
     if obfs_password:
         params.update({'obfs': 'salamander', 'obfs-password': obfs_password})
     if hop_port_range:
@@ -556,16 +562,8 @@ def artifacts(m, auth_override=None, name_override=None):
     
     proxy = dict(name=name, type='hysteria2', server=host, port=listen_port,
                  password=password, sni=server_name, **{'skip-cert-verify': is_insecure})
-    if pin_sha256:
-        proxy['ca-sha256'] = pin_sha256
-        proxy['fingerprint'] = pin_sha256
-
-    tls_sing = dict(enabled=True, server_name=server_name, insecure=is_insecure)
-    if pin_sha256:
-        tls_sing['certificate_path'] = ''
-        tls_sing['certificate_pinned_sha256'] = pin_sha256
     sing = dict(type='hysteria2', tag=name, server=host, server_port=listen_port,
-                password=password, tls=tls_sing)
+                password=password, tls=dict(enabled=True, server_name=server_name, insecure=is_insecure))
     if hop_port_range:
         proxy['ports'] = str(listen_port) + ',' + hop_port_range
         sing['server_ports'] = [str(listen_port), hop_port_range.replace('-', ':')]
