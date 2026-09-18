@@ -169,6 +169,7 @@ setup_ports_and_obfs() {
     read -rp "是否开启端口跳跃? [y/N, 默认 N]: " enable_hop
     enable_hop=${enable_hop:-n}
 
+    clear_all_hopping_rules
     HOP_PORT_RANGE=""
     if [[ "$enable_hop" =~ ^[Yy]$ ]]; then
         DEFAULT_HOP_START=20000
@@ -217,21 +218,32 @@ setup_system_firewall() {
     fi
 }
 
+clear_all_hopping_rules() {
+    # 彻底扫描并清理所有历史残留的 REDIRECT 到 hysteria 端口的 iptables 规则，防止旧端口重定向死循环
+    while iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | grep -q "REDIRECT.*udp"; do
+        local line_num=$(iptables -t nat -L PREROUTING -n --line-numbers | grep "REDIRECT.*udp" | head -n 1 | awk '{print $1}')
+        [ -n "$line_num" ] && iptables -t nat -D PREROUTING "$line_num" 2>/dev/null || break
+    done
+    if command -v ip6tables >/dev/null 2>&1; then
+        while ip6tables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | grep -q "REDIRECT.*udp"; do
+            local line_num=$(ip6tables -t nat -L PREROUTING -n --line-numbers | grep "REDIRECT.*udp" | head -n 1 | awk '{print $1}')
+            [ -n "$line_num" ] && ip6tables -t nat -D PREROUTING "$line_num" 2>/dev/null || break
+        done
+    fi
+}
+
 setup_iptables_port_hopping() {
     local l_port="$1"
     local s_port="$2"
     local e_port="$3"
     
-    log_step "配置 iptables 端口跳跃转发规则 (${s_port}:${e_port} -> ${l_port})..."
+    log_step "配置 iptables 端口跳跃转发规则 (${s_port}-${e_port} -> ${l_port})..."
     
-    # 清除旧规则（如果存在）
-    iptables -t nat -D PREROUTING -p udp --dport "${s_port}:${e_port}" -j REDIRECT --to-ports "${l_port}" 2>/dev/null || true
-    # 注入新规则
+    clear_all_hopping_rules
+    
+    # 注入新规则 (IPv4 + IPv6)
     iptables -t nat -A PREROUTING -p udp --dport "${s_port}:${e_port}" -j REDIRECT --to-ports "${l_port}"
-    
-    # IPv6 兼容
     if command -v ip6tables >/dev/null 2>&1; then
-        ip6tables -t nat -D PREROUTING -p udp --dport "${s_port}:${e_port}" -j REDIRECT --to-ports "${l_port}" 2>/dev/null || true
         ip6tables -t nat -A PREROUTING -p udp --dport "${s_port}:${e_port}" -j REDIRECT --to-ports "${l_port}" 2>/dev/null || true
     fi
 
@@ -481,6 +493,7 @@ uninstall_all() {
         log_step "正在停止并删除系统服务..."
         systemctl stop hysteria-server 2>/dev/null || true
         systemctl disable hysteria-server 2>/dev/null || true
+        clear_all_hopping_rules
         rm -f "$HY2_SERVICE"
         systemctl daemon-reload
 
@@ -553,6 +566,7 @@ menu() {
             setup_certificates
             setup_ports_and_obfs
             generate_server_config
+            setup_system_firewall "$LISTEN_PORT" "$HOP_START" "$HOP_END"
             restart_service
             show_client_configs
             ;;
