@@ -109,12 +109,25 @@ bandwidth:
   up: 1 gbps
   down: 1 gbps
 
+# 默认使用 IPv4 直连，避免没有 IPv6 出站路由的 VPS 在访问
+# YouTube 等同时返回 IPv4 / IPv6 地址的网站时连接失败。
+outbounds:
+  - name: direct-ipv4
+    type: direct
+    direct:
+      mode: "4"
+
 # 若开启混淆
 obfs:
   type: salamander
   salamander:
     password: your_obfs_password
 ```
+
+> 脚本默认将 Hysteria 的 direct 出站固定为 IPv4。这可以避免部分仅有 IPv4
+> 出站能力的 VPS 因 DNS 返回 IPv6 地址而出现 `network is unreachable`，进而无法播放
+> YouTube 等双栈网站的视频。若服务器已配置并验证 IPv6 出站，也可将
+> `outbounds[0].direct.mode` 改为 `auto`，恢复双栈 Happy Eyeballs 策略。
 
 ---
 

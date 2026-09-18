@@ -283,6 +283,15 @@ disableUDP: false
 bandwidth:
   up: 1 gbps
   down: 1 gbps
+
+# Some IPv4-only VPS instances still receive IPv6 DNS answers but have no IPv6
+# default route. Use the default direct outbound over IPv4 so those answers do
+# not break requests to dual-stack sites such as YouTube.
+outbounds:
+  - name: direct-ipv4
+    type: direct
+    direct:
+      mode: "4"
 EOF
 
     # 写入混淆（如果有）
