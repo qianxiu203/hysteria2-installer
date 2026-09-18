@@ -23,6 +23,7 @@ HY2_SERVICE="/etc/systemd/system/hysteria-server.service"
 HY2_CERT_DIR="${HY2_DIR}/cert"
 HY2_META_FILE="${HY2_DIR}/client_meta.json"
 HY2_SUB_DIR="${HY2_DIR}/subscription"
+HY2_SUB_PORT="8443"
 
 log_info() { echo -e "${GREEN}[INFO]${PLAIN} $1"; }
 log_warn() { echo -e "${YELLOW}[WARN]${PLAIN} $1"; }
@@ -227,7 +228,7 @@ setup_system_firewall() {
         ufw allow "${port}/udp" >/dev/null 2>&1 || true
         if [[ "$CERT_TYPE" == "acme" ]]; then
             ufw allow 80/tcp >/dev/null 2>&1 || true
-            ufw allow 443/tcp >/dev/null 2>&1 || true
+            ufw allow "${HY2_SUB_PORT}/tcp" >/dev/null 2>&1 || true
         fi
         if [[ -n "$s_port" && -n "$e_port" ]]; then
             ufw allow "${s_port}:${e_port}/udp" >/dev/null 2>&1 || true
@@ -238,7 +239,7 @@ setup_system_firewall() {
         firewall-cmd --zone=public --add-port="${port}/udp" --permanent >/dev/null 2>&1 || true
         if [[ "$CERT_TYPE" == "acme" ]]; then
             firewall-cmd --zone=public --add-port="80/tcp" --permanent >/dev/null 2>&1 || true
-            firewall-cmd --zone=public --add-port="443/tcp" --permanent >/dev/null 2>&1 || true
+            firewall-cmd --zone=public --add-port="${HY2_SUB_PORT}/tcp" --permanent >/dev/null 2>&1 || true
         fi
         if [[ -n "$s_port" && -n "$e_port" ]]; then
             firewall-cmd --zone=public --add-port="${s_port}-${e_port}/udp" --permanent >/dev/null 2>&1 || true
@@ -323,7 +324,7 @@ masquerade:
   type: file
   file:
     dir: ${HY2_SUB_DIR}
-  listenHTTPS: :443
+  listenHTTPS: :${HY2_SUB_PORT}
 
 ignoreClientBandwidth: false
 disableUDP: false
@@ -381,6 +382,7 @@ EOF
   "is_insecure": ${IS_INSECURE},
   "cert_type": "${CERT_TYPE}",
   "subscription_token": "${SUB_TOKEN}",
+  "subscription_port": ${HY2_SUB_PORT},
   "hop_port_range": "${HOP_PORT_RANGE}",
   "obfs_password": "${OBFS_PASSWORD}"
 }
@@ -446,6 +448,7 @@ show_client_configs() {
     local obfs=$(jq -r '.obfs_password' "$HY2_META_FILE")
     local cert_type=$(jq -r '.cert_type // empty' "$HY2_META_FILE")
     local sub_token=$(jq -r '.subscription_token // empty' "$HY2_META_FILE")
+    local sub_port=$(jq -r '.subscription_port // 8443' "$HY2_META_FILE")
 
     local connect_ports="${port}"
     local url_ports="${port}"
@@ -493,9 +496,9 @@ show_client_configs() {
         log_warn "未找到 qrencode；重新运行安装脚本会自动安装后显示二维码。"
     fi
     if [[ "$cert_type" == "acme" && -n "$sub_token" ]]; then
-        local sub_url="https://${sni}/${sub_token}.yaml"
+        local sub_url="https://${sni}:${sub_port}/${sub_token}.yaml"
         echo -e "${GREEN}【Clash / Mihomo 订阅链接】${PLAIN} ${CYAN}${sub_url}${PLAIN}"
-        echo -e "${YELLOW}请在云安全组放行 TCP 443；此随机链接包含节点配置，请勿公开。${PLAIN}"
+        echo -e "${YELLOW}请在云安全组放行 TCP ${sub_port}；此随机链接包含节点配置，请勿公开。${PLAIN}"
     fi
     echo -e "${CYAN}----------------------------------------------------------------${PLAIN}"
 

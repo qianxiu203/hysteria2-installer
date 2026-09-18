@@ -94,7 +94,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/yys9253462-gif/hysteria2-inst
 开始前必须完成以下事项：
 
 - 为域名创建指向服务器公网 IPv4 的 `A` 记录；若设置了 `AAAA` 记录，也必须确保 IPv6 可访问，否则请删除它。
-- 在云厂商安全组中放行 **TCP 80**，并保持该端口未被其他 Web 服务占用。
+- 在云厂商安全组中放行 **TCP 80**；若启用 Clash 订阅，还需放行 **TCP 8443**。
 - 脚本会自动放行本机 UFW/firewalld 的 TCP 80，但云安全组需要自行放行。
 
 成功后客户端会使用该域名作为服务器地址和 SNI，且不再需要开启 `skip-cert-verify` / `insecure`。
