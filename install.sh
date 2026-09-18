@@ -277,10 +277,10 @@ setup_system_firewall() {
 }
 
 select_subscription_port() {
-    local candidate="${HY2_SUB_PORT}"
-    local listener
-    while true; do
-        listener=$(ss -ltnp "sport = :${candidate}" 2>/dev/null || true)
+    local candidate="${HY2_SUB_PORT}" listener attempt
+    command -v ss >/dev/null 2>&1 || { log_warn "未找到 ss，使用默认订阅端口 ${candidate}"; return; }
+    for ((attempt=0; attempt<100; attempt++)); do
+        listener=$(ss -H -ltnp 2>/dev/null | awk -v port=":${candidate}" '$4 ~ (port "$")')
         if [[ -z "$listener" || "$listener" == *"hysteria"* ]]; then
             HY2_SUB_PORT="$candidate"
             log_info "Clash HTTPS 订阅端口: ${HY2_SUB_PORT}"
@@ -288,6 +288,8 @@ select_subscription_port() {
         fi
         candidate=$((RANDOM % 50000 + 10000))
     done
+    log_err "未能在 100 次尝试内找到可用的 Clash 订阅端口。"
+    return 1
 }
 
 clear_all_hopping_rules() {
