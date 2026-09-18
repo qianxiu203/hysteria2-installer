@@ -580,7 +580,7 @@ def artifacts(m, auth_override=None, name_override=None):
 def prepare(meta_path, port, node_api_key=None):
     root = Path(meta_path).parent
     m = json.loads(Path(meta_path).read_text())
-    if 'pin_sha256' not in m or not m['pin_sha256']:
+    if m.get('is_insecure') and not m.get('pin_sha256'):
         m['pin_sha256'] = get_cert_pin_sha256(root)
         Path(meta_path).write_text(json.dumps(m, ensure_ascii=False))
 
@@ -620,7 +620,7 @@ def prepare(meta_path, port, node_api_key=None):
 def refresh(meta_path):
     root = Path(meta_path).parent
     m = json.loads(Path(meta_path).read_text())
-    if 'pin_sha256' not in m or not m['pin_sha256']:
+    if m.get('is_insecure') and not m.get('pin_sha256'):
         m['pin_sha256'] = get_cert_pin_sha256(root)
         Path(meta_path).write_text(json.dumps(m, ensure_ascii=False))
 
