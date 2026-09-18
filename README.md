@@ -73,6 +73,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/yys9253462-gif/hysteria2-inst
 | 快捷命令 | 功能说明 |
 | :--- | :--- |
 | `bash install.sh info` | 再次显示私密信息页地址与登录凭据 |
+| `bash install.sh refresh-page` | 只更新网页外观，保留节点参数、网页路径和账号密码 |
 | `bash install.sh status` | 查看 Systemd 运行状态 |
 | `bash install.sh restart` | 重启 Hysteria 2 服务端 |
 | `bash install.sh update` | 一键检查并更新 Hysteria 官方二进制 |
