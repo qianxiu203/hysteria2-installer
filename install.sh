@@ -214,6 +214,24 @@ setup_ports_and_obfs() {
     read -rsp "请输入连接认证密码 [回车自动生成]: " AUTH_PASSWORD; echo
     AUTH_PASSWORD=${AUTH_PASSWORD:-$RANDOM_PASS}
 
+    # 运行模式选择 (单机私密 vs 商城集群 Agent 模式)
+    echo -e "\n请选择当前 Hysteria 2 节点的运行模式："
+    echo -e "  ${GREEN}1.${PLAIN} 单机私密模式 (默认：单用户/自用，提供 Web 信息中心)"
+    echo -e "  ${GREEN}2.${PLAIN} 商城集群 Agent 模式 (开启 REST API 接口，支持动态开户/续费，对接商城)"
+    read -rp "请输入选项 [1-2, 默认 1]: " node_mode_choice
+    node_mode_choice=${node_mode_choice:-1}
+
+    if [[ "$node_mode_choice" == "2" ]]; then
+        NODE_MODE="agent"
+        RANDOM_API_KEY="hy2_sec_$(openssl rand -hex 16)"
+        read -rsp "请设置节点通信 API Key [回车自动生成]: " NODE_API_KEY; echo
+        NODE_API_KEY=${NODE_API_KEY:-$RANDOM_API_KEY}
+        log_info "当前已选：商城集群 Agent 模式 (Node API Key 已生成)"
+    else
+        NODE_MODE="standalone"
+        NODE_API_KEY=""
+    fi
+
     # 端口跳跃
     echo -e "\n是否启用端口跳跃 (Port Hopping)? 可有效防止运营商对单 UDP 端口的 QoS 限速与阻断。"
     read -rp "是否开启端口跳跃? [y/N, 默认 N]: " enable_hop
@@ -378,10 +396,22 @@ tls:
 EOF
     fi
 
-    cat >> "$HY2_CONFIG" <<EOF
+    if [[ "$NODE_MODE" == "agent" ]]; then
+        cat >> "$HY2_CONFIG" <<EOF
+auth:
+  type: http
+  http:
+    url: http://127.0.0.1:${PORTAL_LOCAL_PORT}/auth
+EOF
+    else
+        cat >> "$HY2_CONFIG" <<EOF
 auth:
   type: password
   password: $(jq -Rn --arg value "$AUTH_PASSWORD" '$value')
+EOF
+    fi
+
+    cat >> "$HY2_CONFIG" <<EOF
 
 masquerade:
   type: proxy
@@ -479,13 +509,19 @@ show_client_configs() {
         return 1
     fi
     jq -r '"私密信息页: " + .url, "用户名: " + .username, "密码: " + .password' "$HY2_DIR/portal-access.json"
+    local key=$(jq -r '.api_key // empty' "$HY2_DIR/portal-access.json")
+    if [[ -n "$key" ]]; then
+        echo -e "${YELLOW}节点通信 API Key (供商城集群对接): ${GREEN}${key}${PLAIN}"
+    fi
     log_info "请在云安全组放行信息页 URL 中的 TCP 端口。"
     log_warn "自签证书模式需核对证书指纹后信任；推荐使用有效域名证书。"
 }
 
 write_portal_program() {
     cat > "$HY2_DIR/portal.py" <<'PYPORTAL'
-"""仅监听回环地址；公网 TLS 由 Hysteria 的 masquerade proxy 提供。"""
+"""仅监听回环地址；公网 TLS 由 Hysteria 的 masquerade proxy 提供。
+新增多租户 Agent 运行模式，支持 REST API 接口与 Hysteria 2 HTTP 动态鉴权。
+"""
 import base64
 import hashlib
 import hmac
@@ -621,36 +657,43 @@ def content_policy(extra_script=None):
             + "; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 
 
-def artifacts(m):
-    host = m['public_ip'] if m['is_insecure'] else m['server_name']
-    name = 'Hy2-' + host
-    params = {'sni': m['server_name']}
-    if m['is_insecure']:
+def artifacts(m, auth_override=None, name_override=None):
+    is_insecure = m.get('is_insecure', False)
+    server_name = m.get('server_name') or m.get('public_ip', 'localhost')
+    public_ip = m.get('public_ip', server_name)
+    host = public_ip if is_insecure else server_name
+    name = name_override or ('Hy2-' + host)
+    password = auth_override or m.get('auth_password', '')
+    listen_port = m.get('listen_port', 19984)
+    obfs_password = m.get('obfs_password', '')
+    hop_port_range = m.get('hop_port_range', '')
+
+    params = {'sni': server_name}
+    if is_insecure:
         params['insecure'] = '1'
-    if m['obfs_password']:
-        params.update({'obfs': 'salamander', 'obfs-password': m['obfs_password']})
-    if m['hop_port_range']:
-        params['mport'] = m['hop_port_range']
-    uri = f"hysteria2://{quote(m['auth_password'], safe='')}@{host}:{m['listen_port']}?{urlencode(params)}#{quote(name)}"
-    proxy = dict(name=name, type='hysteria2', server=host, port=m['listen_port'],
-                 password=m['auth_password'], sni=m['server_name'], **{'skip-cert-verify': m['is_insecure']})
-    sing = dict(type='hysteria2', tag=name, server=host, server_port=m['listen_port'],
-                password=m['auth_password'], tls=dict(enabled=True, server_name=m['server_name'], insecure=m['is_insecure']))
-    if m['hop_port_range']:
-        proxy['ports'] = str(m['listen_port']) + ',' + m['hop_port_range']
-        sing['server_ports'] = [str(m['listen_port']), m['hop_port_range'].replace('-', ':')]
+    if obfs_password:
+        params.update({'obfs': 'salamander', 'obfs-password': obfs_password})
+    if hop_port_range:
+        params['mport'] = hop_port_range
+    uri = f"hysteria2://{quote(password, safe='')}@{host}:{listen_port}?{urlencode(params)}#{quote(name)}"
+    proxy = dict(name=name, type='hysteria2', server=host, port=listen_port,
+                 password=password, sni=server_name, **{'skip-cert-verify': is_insecure})
+    sing = dict(type='hysteria2', tag=name, server=host, server_port=listen_port,
+                password=password, tls=dict(enabled=True, server_name=server_name, insecure=is_insecure))
+    if hop_port_range:
+        proxy['ports'] = str(listen_port) + ',' + hop_port_range
+        sing['server_ports'] = [str(listen_port), hop_port_range.replace('-', ':')]
         del sing['server_port']
-    if m['obfs_password']:
-        proxy.update({'obfs': 'salamander', 'obfs-password': m['obfs_password']})
-        sing['obfs'] = dict(type='salamander', password=m['obfs_password'])
-    # JSON 是 YAML 的子集，避免手拼 YAML 破坏密码中的特殊字符。
+    if obfs_password:
+        proxy.update({'obfs': 'salamander', 'obfs-password': obfs_password})
+        sing['obfs'] = dict(type='salamander', password=obfs_password)
     clash = {'mixed-port': 7890, 'allow-lan': False, 'mode': 'rule', 'proxies': [proxy],
              'proxy-groups': [{'name': 'PROXY', 'type': 'select', 'proxies': [name, 'DIRECT']}],
              'rules': ['MATCH,PROXY']}
     return uri, json.dumps(clash, ensure_ascii=False, indent=2), json.dumps({'outbounds': [sing]}, ensure_ascii=False, indent=2)
 
 
-def prepare(meta_path, port):
+def prepare(meta_path, port, node_api_key=None):
     m = json.loads(Path(meta_path).read_text())
     uri, clash, sing = artifacts(m)
     qr = subprocess.run(['qrencode', '-t', 'SVG', '-o', '-'], input=uri.encode(), capture_output=True, check=True).stdout
@@ -661,10 +704,24 @@ def prepare(meta_path, port):
     page = page_html(m, uri, subscription, clash, sing)
     auth = base64.b64encode(f'{user}:{password}'.encode())
     session_secret = secrets.token_hex(32)
+    api_key = node_api_key or secrets.token_hex(24)
+
+    # 默认将主管理员记录加入本地多租户库
+    users = {
+        'admin_master': {
+            'password': m['auth_password'],
+            'expires_at': 2085974400,  # 永久
+            'status': 'active',
+            'created_at': int(time.time()),
+            'note': 'Master Admin'
+        }
+    }
+
     data = dict(port=int(port), token=token, auth_hash=hashlib.sha256(auth).hexdigest(),
-                session_secret=session_secret, page=page, qr=qr.decode(), clash=clash, sing=sing)
+                session_secret=session_secret, api_key=api_key, users=users,
+                page=page, qr=qr.decode(), clash=clash, sing=sing)
     root = Path(meta_path).parent
-    for filename, value in [('portal.json', data), ('portal-access.json', dict(url=base, username=user, password=password))]:
+    for filename, value in [('portal.json', data), ('portal-access.json', dict(url=base, username=user, password=password, api_key=api_key))]:
         path = root / filename
         path.write_text(json.dumps(value, ensure_ascii=False))
         path.chmod(0o600)
@@ -682,6 +739,20 @@ def refresh(meta_path):
     data['page'] = page_html(m, uri, subscription, clash, sing)
     if 'session_secret' not in data:
         data['session_secret'] = secrets.token_hex(32)
+    if 'api_key' not in data:
+        data['api_key'] = access.get('api_key') or secrets.token_hex(24)
+        access['api_key'] = data['api_key']
+        (root / 'portal-access.json').write_text(json.dumps(access, ensure_ascii=False))
+    if 'users' not in data:
+        data['users'] = {
+            'admin_master': {
+                'password': m['auth_password'],
+                'expires_at': 2085974400,
+                'status': 'active',
+                'created_at': int(time.time()),
+                'note': 'Master Admin'
+            }
+        }
     temporary = path.with_suffix('.tmp')
     temporary.write_text(json.dumps(data, ensure_ascii=False))
     temporary.chmod(0o600)
@@ -689,8 +760,16 @@ def refresh(meta_path):
 
 
 def serve(path):
-    data = json.loads(Path(path).read_text())
+    portal_path = Path(path)
+    data = json.loads(portal_path.read_text())
     session_secret = data.get('session_secret', data['auth_hash'])
+    meta_path = portal_path.parent / 'client_meta.json'
+
+    def save_data():
+        temp = portal_path.with_suffix('.tmp')
+        temp.write_text(json.dumps(data, ensure_ascii=False))
+        temp.chmod(0o600)
+        temp.replace(portal_path)
 
     def sign_session(token):
         sig = hmac.new(session_secret.encode(), f'sess:{token}'.encode(), hashlib.sha256).hexdigest()
@@ -722,6 +801,11 @@ def serve(path):
         def log_message(self, *args):
             pass  # 不把路径、凭据及订阅请求写入日志。
 
+        def verify_api_key(self):
+            auth_header = self.headers.get('Authorization', '')
+            expected = 'Bearer ' + data.get('api_key', '')
+            return hmac.compare_digest(auth_header, expected)
+
         def is_authenticated(self):
             auth = self.headers.get('Authorization', '')
             if auth.startswith('Basic '):
@@ -730,14 +814,113 @@ def serve(path):
                     return True
             return verify_session(self.headers.get('Cookie', ''))
 
+        def reply_json(self, code, payload):
+            body = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+            self.send_response(code)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_POST(self):
             now = time.monotonic()
             self.server.requests[:] = [t for t in self.server.requests if now-t < 1]
             self.server.failures[:] = [t for t in self.server.failures if now-t < 60]
-            if len(self.server.requests) >= 20 or len(self.server.failures) >= 30:
+            if len(self.server.requests) >= 30 or len(self.server.failures) >= 40:
                 return self.reply(429, b'Too many requests')
             self.server.requests.append(now)
 
+            # 1. Hysteria 2 本地 HTTP 动态鉴权通道
+            if self.path == '/auth':
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = self.rfile.read(length).decode('utf-8')
+                    req_data = json.loads(body)
+                    client_auth = req_data.get('auth', '').strip()
+                except Exception:
+                    return self.reply_json(200, {'ok': False, 'msg': 'Bad auth request'})
+
+                now_ts = int(time.time())
+                users = data.get('users', {})
+                for uid, uinfo in users.items():
+                    if uinfo.get('password') == client_auth:
+                        if uinfo.get('status') == 'active' and uinfo.get('expires_at', 0) >= now_ts:
+                            return self.reply_json(200, {'ok': True, 'id': uid})
+                        else:
+                            return self.reply_json(200, {'ok': False, 'msg': 'User expired or inactive'})
+                return self.reply_json(200, {'ok': False, 'msg': 'User not found'})
+
+            # 2. REST API 接口通道（需 Bearer API Key 认证）
+            if self.path.startswith('/api/v1/'):
+                if not self.verify_api_key():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized API key'})
+
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = self.rfile.read(length).decode('utf-8') if length > 0 else '{}'
+                    params = json.loads(body)
+                except Exception:
+                    return self.reply_json(400, {'ok': False, 'error': 'Invalid JSON body'})
+
+                sub = self.path[len('/api/v1/'):]
+                now_ts = int(time.time())
+
+                # 开通/更新用户: /api/v1/users/create
+                if sub == 'users/create':
+                    user_id = params.get('user_id') or ('hy2_' + secrets.token_hex(6))
+                    pwd = params.get('password') or secrets.token_hex(16)
+                    days = int(params.get('duration_days', 30))
+                    expires = int(params.get('expires_at', now_ts + days * 86400))
+                    note = params.get('note', '')
+
+                    data.setdefault('users', {})[user_id] = {
+                        'password': pwd,
+                        'expires_at': expires,
+                        'status': 'active',
+                        'created_at': now_ts,
+                        'note': note
+                    }
+                    save_data()
+
+                    # 生成当前用户的独立节点直链与配置片段
+                    m = json.loads((Path(path).parent / 'client_meta.json').read_text()) if (Path(path).parent / 'client_meta.json').exists() else {}
+                    uri, clash_yaml, sing_json = artifacts(m, auth_override=pwd, name_override=f"Hy2-{user_id}")
+                    return self.reply_json(200, {
+                        'ok': True,
+                        'user_id': user_id,
+                        'password': pwd,
+                        'expires_at': expires,
+                        'uri': uri,
+                        'clash': clash_yaml,
+                        'sing_box': sing_json
+                    })
+
+                # 续费延期: /api/v1/users/renew
+                elif sub == 'users/renew':
+                    user_id = params.get('user_id')
+                    days = int(params.get('extend_days', 30))
+                    u = data.get('users', {}).get(user_id)
+                    if not u:
+                        return self.reply_json(404, {'ok': False, 'error': 'User not found'})
+                    base_time = max(u.get('expires_at', 0), now_ts)
+                    u['expires_at'] = base_time + days * 86400
+                    u['status'] = 'active'
+                    save_data()
+                    return self.reply_json(200, {'ok': True, 'user_id': user_id, 'expires_at': u['expires_at']})
+
+                # 停用/删除用户: /api/v1/users/delete
+                elif sub == 'users/delete':
+                    user_id = params.get('user_id')
+                    if user_id in data.get('users', {}):
+                        del data['users'][user_id]
+                        save_data()
+                        return self.reply_json(200, {'ok': True, 'message': 'User deleted'})
+                    return self.reply_json(404, {'ok': False, 'error': 'User not found'})
+
+                return self.reply_json(404, {'ok': False, 'error': 'API endpoint not found'})
+
+            # 3. 网页版表单登录
             prefix = '/' + data['token'] + '/'
             if self.path != prefix + 'login':
                 return self.reply(404, b'Not found')
@@ -762,7 +945,6 @@ def serve(path):
                 page = login_html(data['token'], error_msg='用户名或密码不正确，请重新输入')
                 return self.reply(200, page.encode('utf-8'), 'text/html; charset=utf-8')
 
-            # 登录成功，颁发签名的安全 Session Cookie 并 302 重定向到首页
             sess_val = sign_session(data['token'])
             max_age = '; Max-Age=2592000' if remember else ''
             cookie = f'hy2_session={sess_val}; Path=/{data["token"]}/; HttpOnly; SameSite=Strict; Secure{max_age}'
@@ -776,16 +958,26 @@ def serve(path):
             now = time.monotonic()
             self.server.requests[:] = [t for t in self.server.requests if now-t < 1]
             self.server.failures[:] = [t for t in self.server.failures if now-t < 60]
-            if len(self.server.requests) >= 20 or len(self.server.failures) >= 30:
+            if len(self.server.requests) >= 30 or len(self.server.failures) >= 40:
                 return self.reply(429, b'Too many requests')
             self.server.requests.append(now)
+
+            # 节点元数据与健康监控 API
+            if self.path.startswith('/api/v1/'):
+                if not self.verify_api_key():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized API key'})
+                sub = self.path[len('/api/v1/'):]
+                if sub == 'node/meta':
+                    m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+                    users_count = len(data.get('users', {}))
+                    return self.reply_json(200, {'ok': True, 'meta': m, 'users_count': users_count, 'time': int(time.time())})
+                return self.reply_json(404, {'ok': False, 'error': 'API endpoint not found'})
+
             prefix = '/' + data['token'] + '/'
             if not self.path.startswith(prefix):
                 return self.reply(404, b'Not found')
 
             subpath = self.path[len(prefix):]
-
-            # 客户端直接请求 clash.yaml / sing-box.json 或带 Basic 凭据，维持标准 Basic Auth 验证
             auth_header = self.headers.get('Authorization', '')
             is_client_api = subpath in ('clash.yaml', 'sing-box.json') or auth_header.startswith('Basic ')
 
@@ -793,7 +985,6 @@ def serve(path):
                 if is_client_api:
                     self.server.failures.append(now)
                     return self.reply(401, b'Authentication required', www_auth=True)
-                # 浏览器访问主页或二维码，返回全新美化的 Web 登录页面
                 page = login_html(data['token'])
                 return self.reply(200, page.encode('utf-8'), 'text/html; charset=utf-8')
 
@@ -829,7 +1020,8 @@ def serve(path):
 
 if __name__ == '__main__':
     if sys.argv[1] == 'prepare':
-        prepare(sys.argv[2], sys.argv[3])
+        api_key = sys.argv[4] if len(sys.argv) > 4 else None
+        prepare(sys.argv[2], sys.argv[3], api_key)
     elif sys.argv[1] == 'refresh':
         refresh(sys.argv[2])
     else:
@@ -848,7 +1040,7 @@ refresh_portal() {
 
 setup_portal() {
     write_portal_program
-    python3 "$HY2_DIR/portal.py" prepare "$HY2_META_FILE" "$PORTAL_LOCAL_PORT"
+    python3 "$HY2_DIR/portal.py" prepare "$HY2_META_FILE" "$PORTAL_LOCAL_PORT" "$NODE_API_KEY"
     cat > /etc/systemd/system/hysteria-portal.service <<EOF
 [Unit]
 Description=Private HY2 information page (loopback only)
