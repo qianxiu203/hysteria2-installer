@@ -448,9 +448,16 @@ obfs:
 EOF
     fi
 
+    # 提取证书 SHA-256 指纹 (pinSHA256)
+    PIN_SHA256=""
+    if [[ -f "$CERT_FILE" ]]; then
+        PIN_SHA256=$(openssl x509 -in "$CERT_FILE" -outform DER 2>/dev/null | openssl dgst -sha256 -binary 2>/dev/null | openssl base64 2>/dev/null || true)
+    fi
+
     jq -n --arg public_ip "$PUBLIC_IP" --arg server_name "$SERVER_NAME" \
         --arg auth_password "$AUTH_PASSWORD" --arg obfs_password "$OBFS_PASSWORD" \
         --arg hop_port_range "$HOP_PORT_RANGE" --arg cert_type "$CERT_TYPE" \
+        --arg pin_sha256 "$PIN_SHA256" \
         --argjson listen_port "$LISTEN_PORT" --argjson is_insecure "$IS_INSECURE" \
         --argjson subscription_port "$HY2_SUB_PORT" \
         '$ARGS.named' > "$HY2_META_FILE"
@@ -1037,6 +1044,21 @@ def content_policy(extra_script=None):
             + "; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 
 
+def get_cert_pin_sha256(root_path):
+    cert_file = Path(root_path) / 'cert' / 'server.crt'
+    if not cert_file.exists():
+        return ''
+    try:
+        p1 = subprocess.Popen(['openssl', 'x509', '-in', str(cert_file), '-outform', 'DER'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        p2 = subprocess.Popen(['openssl', 'dgst', '-sha256', '-binary'], stdin=p1.stdout, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        p3 = subprocess.Popen(['openssl', 'base64'], stdin=p2.stdout, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        p1.stdout.close()
+        p2.stdout.close()
+        return p3.communicate()[0].decode().strip()
+    except Exception:
+        return ''
+
+
 def artifacts(m, auth_override=None, name_override=None):
     is_insecure = m.get('is_insecure', False)
     server_name = m.get('server_name') or m.get('public_ip', 'localhost')
@@ -1047,19 +1069,31 @@ def artifacts(m, auth_override=None, name_override=None):
     listen_port = m.get('listen_port', 19984)
     obfs_password = m.get('obfs_password', '')
     hop_port_range = m.get('hop_port_range', '')
+    pin_sha256 = m.get('pin_sha256', '')
 
     params = {'sni': server_name}
     if is_insecure:
         params['insecure'] = '1'
+    if pin_sha256:
+        params['pinSHA256'] = pin_sha256
     if obfs_password:
         params.update({'obfs': 'salamander', 'obfs-password': obfs_password})
     if hop_port_range:
         params['mport'] = hop_port_range
     uri = f"hysteria2://{quote(password, safe='')}@{host}:{listen_port}?{urlencode(params)}#{quote(name)}"
+    
     proxy = dict(name=name, type='hysteria2', server=host, port=listen_port,
                  password=password, sni=server_name, **{'skip-cert-verify': is_insecure})
+    if pin_sha256:
+        proxy['ca-sha256'] = pin_sha256
+        proxy['fingerprint'] = pin_sha256
+
+    tls_sing = dict(enabled=True, server_name=server_name, insecure=is_insecure)
+    if pin_sha256:
+        tls_sing['certificate_path'] = ''
+        tls_sing['certificate_pinned_sha256'] = pin_sha256
     sing = dict(type='hysteria2', tag=name, server=host, server_port=listen_port,
-                password=password, tls=dict(enabled=True, server_name=server_name, insecure=is_insecure))
+                password=password, tls=tls_sing)
     if hop_port_range:
         proxy['ports'] = str(listen_port) + ',' + hop_port_range
         sing['server_ports'] = [str(listen_port), hop_port_range.replace('-', ':')]
@@ -1074,7 +1108,12 @@ def artifacts(m, auth_override=None, name_override=None):
 
 
 def prepare(meta_path, port, node_api_key=None):
+    root = Path(meta_path).parent
     m = json.loads(Path(meta_path).read_text())
+    if 'pin_sha256' not in m or not m['pin_sha256']:
+        m['pin_sha256'] = get_cert_pin_sha256(root)
+        Path(meta_path).write_text(json.dumps(m, ensure_ascii=False))
+
     uri, clash, sing = artifacts(m)
     qr = subprocess.run(['qrencode', '-t', 'SVG', '-o', '-'], input=uri.encode(), capture_output=True, check=True).stdout
     user, password, token = secrets.token_hex(8), secrets.token_urlsafe(32), secrets.token_hex(32)
@@ -1089,7 +1128,7 @@ def prepare(meta_path, port, node_api_key=None):
             'password': m['auth_password'],
             'expires_at': 2085974400,
             'ip_limit': 0,
-            'limit_bytes': 0,  # 0 为不限制流量
+            'limit_bytes': 0,
             'used_bytes': 0,
             'status': 'active',
             'created_at': int(time.time()),
@@ -1102,7 +1141,6 @@ def prepare(meta_path, port, node_api_key=None):
     data = dict(port=int(port), token=token, auth_hash=hashlib.sha256(auth).hexdigest(),
                 session_secret=session_secret, api_key=api_key, users=users,
                 page=page, qr=qr.decode(), clash=clash, sing=sing)
-    root = Path(meta_path).parent
     for filename, value in [('portal.json', data), ('portal-access.json', dict(url=base, username=user, password=password, api_key=api_key))]:
         path = root / filename
         path.write_text(json.dumps(value, ensure_ascii=False))
@@ -1112,6 +1150,10 @@ def prepare(meta_path, port, node_api_key=None):
 def refresh(meta_path):
     root = Path(meta_path).parent
     m = json.loads(Path(meta_path).read_text())
+    if 'pin_sha256' not in m or not m['pin_sha256']:
+        m['pin_sha256'] = get_cert_pin_sha256(root)
+        Path(meta_path).write_text(json.dumps(m, ensure_ascii=False))
+
     access = json.loads((root / 'portal-access.json').read_text())
     path = root / 'portal.json'
     data = json.loads(path.read_text())
