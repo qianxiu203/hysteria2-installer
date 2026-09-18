@@ -6,6 +6,7 @@
 # ==============================================================================
 
 set -eo pipefail
+umask 077
 
 # 终端色彩
 RED='\033[0;31m'
@@ -22,7 +23,6 @@ HY2_BIN="/usr/local/bin/hysteria"
 HY2_SERVICE="/etc/systemd/system/hysteria-server.service"
 HY2_CERT_DIR="${HY2_DIR}/cert"
 HY2_META_FILE="${HY2_DIR}/client_meta.json"
-HY2_SUB_DIR="${HY2_DIR}/subscription"
 HY2_SUB_PORT="8443"
 
 log_info() { echo -e "${GREEN}[INFO]${PLAIN} $1"; }
@@ -67,13 +67,13 @@ get_public_ip() {
 install_dependencies() {
     log_step "检查并安装基础依赖 (curl, wget, jq, openssl, iptables, tar)..."
     if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -qq && apt-get install -y -qq curl wget jq openssl iptables tar ca-certificates qrencode
+        apt-get update -qq && apt-get install -y -qq curl wget jq openssl iptables tar ca-certificates qrencode python3
     elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y curl wget jq openssl iptables tar ca-certificates qrencode
+        dnf install -y curl wget jq openssl iptables tar ca-certificates qrencode python3
     elif command -v yum >/dev/null 2>&1; then
-        yum install -y curl wget jq openssl iptables tar ca-certificates qrencode
+        yum install -y curl wget jq openssl iptables tar ca-certificates qrencode python3
     elif command -v apk >/dev/null 2>&1; then
-        apk add --no-cache curl wget jq openssl iptables tar ca-certificates bash qrencode
+        apk add --no-cache curl wget jq openssl iptables tar ca-certificates bash qrencode python3
     else
         log_warn "未识别的包管理器，请确认已安装 curl, wget, jq, openssl, iptables"
     fi
@@ -210,8 +210,8 @@ setup_ports_and_obfs() {
     LISTEN_PORT=${LISTEN_PORT:-$DEFAULT_PORT}
 
     # 密码生成
-    RANDOM_PASS=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 16 || echo "hy2_$(date +%s)")
-    read -rp "请输入连接认证密码 [默认随机: ${RANDOM_PASS}]: " AUTH_PASSWORD
+    RANDOM_PASS=$(openssl rand -hex 16)
+    read -rsp "请输入连接认证密码 [回车自动生成]: " AUTH_PASSWORD; echo
     AUTH_PASSWORD=${AUTH_PASSWORD:-$RANDOM_PASS}
 
     # 端口跳跃
@@ -239,8 +239,8 @@ setup_ports_and_obfs() {
 
     OBFS_PASSWORD=""
     if [[ "$enable_obfs" =~ ^[Yy]$ ]]; then
-        RANDOM_OBFS=$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 12 || echo "obfs_$(date +%s)")
-        read -rp "请输入混淆密码 [默认随机: ${RANDOM_OBFS}]: " OBFS_PASSWORD
+        RANDOM_OBFS=$(openssl rand -hex 16)
+        read -rsp "请输入混淆密码 [回车自动生成]: " OBFS_PASSWORD; echo
         OBFS_PASSWORD=${OBFS_PASSWORD:-$RANDOM_OBFS}
     fi
 }
@@ -251,7 +251,8 @@ setup_system_firewall() {
     local e_port="$3"
     
     log_step "自动放行系统内部防火墙 (ufw / firewalld / iptables)..."
-    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "active"; then
+    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
+        ufw allow "${HY2_SUB_PORT}/tcp" >/dev/null 2>&1 || true
         ufw allow "${port}/udp" >/dev/null 2>&1 || true
         if [[ "$CERT_TYPE" == "acme" ]]; then
             ufw allow 80/tcp >/dev/null 2>&1 || true
@@ -263,6 +264,7 @@ setup_system_firewall() {
         log_info "已放行 UFW 防火墙端口。"
     fi
     if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
+        firewall-cmd --zone=public --add-port="${HY2_SUB_PORT}/tcp" --permanent >/dev/null 2>&1 || true
         firewall-cmd --zone=public --add-port="${port}/udp" --permanent >/dev/null 2>&1 || true
         if [[ "$CERT_TYPE" == "acme" ]]; then
             firewall-cmd --zone=public --add-port="80/tcp" --permanent >/dev/null 2>&1 || true
@@ -277,19 +279,29 @@ setup_system_firewall() {
 }
 
 select_subscription_port() {
-    local candidate="${HY2_SUB_PORT}" listener attempt
-    command -v ss >/dev/null 2>&1 || { log_warn "未找到 ss，使用默认订阅端口 ${candidate}"; return; }
-    for ((attempt=0; attempt<100; attempt++)); do
-        listener=$(ss -H -ltnp 2>/dev/null | awk -v port=":${candidate}" '$4 ~ (port "$")')
-        if [[ -z "$listener" || "$listener" == *"hysteria"* ]]; then
-            HY2_SUB_PORT="$candidate"
-            log_info "Clash HTTPS 订阅端口: ${HY2_SUB_PORT}"
-            return
-        fi
-        candidate=$((RANDOM % 50000 + 10000))
-    done
-    log_err "未能在 100 次尝试内找到可用的 Clash 订阅端口。"
-    return 1
+    # bind 实际验证 IPv4 TCP 端口；不解析 ss 标题，不进行无限循环。
+    HY2_SUB_PORT=$(python3 - <<'PYPORT'
+import socket, secrets
+for i in range(100):
+    port = 8443 if i == 0 else 10000 + secrets.randbelow(50000)
+    with socket.socket() as sock:
+        try:
+            sock.bind(('0.0.0.0', port))
+        except OSError:
+            continue
+        print(port)
+        break
+else:
+    raise SystemExit('无法找到可用 TCP 端口')
+PYPORT
+)
+    PORTAL_LOCAL_PORT=$(python3 - <<'PYPORT'
+import socket
+with socket.socket() as sock:
+    sock.bind(('127.0.0.1', 0))
+    print(sock.getsockname()[1])
+PYPORT
+)
 }
 
 clear_all_hopping_rules() {
@@ -333,11 +345,16 @@ setup_iptables_port_hopping() {
 # 5. 生成服务端配置文件与 Systemd 服务
 generate_server_config() {
     log_step "生成 Hysteria 2 服务端配置: ${HY2_CONFIG}..."
-    mkdir -p "$HY2_DIR" "$HY2_SUB_DIR"
+    mkdir -p "$HY2_DIR"
+    command -v python3 >/dev/null && command -v qrencode >/dev/null || install_dependencies
+    python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else "需要 Python 3.9+")'
+    local systemd_version
+    systemd_version=$(systemctl --version | awk 'NR==1 {print $2}')
+    if [[ ! "$systemd_version" =~ ^[0-9]+$ ]] || (( systemd_version < 247 )); then
+        log_err "私密网页需要 systemd 247+ 的凭据隔离功能。"
+        return 1
+    fi
     select_subscription_port
-    # head closes the pipe after enough bytes; tolerate tr's resulting SIGPIPE
-    # when pipefail is enabled.
-    SUB_TOKEN=$( (tr -dc 'a-zA-Z0-9' </dev/urandom | head -c 32) || true )
 
     cat > "$HY2_CONFIG" <<EOF
 # Hysteria 2 Server Configuration
@@ -364,12 +381,13 @@ EOF
     cat >> "$HY2_CONFIG" <<EOF
 auth:
   type: password
-  password: ${AUTH_PASSWORD}
+  password: $(jq -Rn --arg value "$AUTH_PASSWORD" '$value')
 
 masquerade:
-  type: file
-  file:
-    dir: ${HY2_SUB_DIR}
+  type: proxy
+  proxy:
+    url: http://127.0.0.1:${PORTAL_LOCAL_PORT}/
+    rewriteHost: false
   listenHTTPS: :${HY2_SUB_PORT}
 
 ignoreClientBandwidth: false
@@ -389,24 +407,6 @@ outbounds:
       mode: "4"
 EOF
 
-    cat > "${HY2_SUB_DIR}/${SUB_TOKEN}.yaml" <<EOF
-proxies:
-- name: "Hy2-${SERVER_NAME}"
-  type: hysteria2
-  server: ${SERVER_NAME}
-  port: ${LISTEN_PORT}
-  password: "${AUTH_PASSWORD}"
-  sni: ${SERVER_NAME}
-  skip-cert-verify: ${IS_INSECURE}
-  alpn: [h3]
-EOF
-    if [[ -n "$OBFS_PASSWORD" ]]; then
-        cat >> "${HY2_SUB_DIR}/${SUB_TOKEN}.yaml" <<EOF
-  obfs: salamander
-  obfs-password: "${OBFS_PASSWORD}"
-EOF
-    fi
-
     # 写入混淆（如果有）
     if [[ -n "$OBFS_PASSWORD" ]]; then
         cat >> "$HY2_CONFIG" <<EOF
@@ -414,26 +414,17 @@ EOF
 obfs:
   type: salamander
   salamander:
-    password: ${OBFS_PASSWORD}
+    password: $(jq -Rn --arg value "$OBFS_PASSWORD" '$value')
 EOF
     fi
 
-    # 保存元数据供客户端与菜单展示
-    cat > "$HY2_META_FILE" <<EOF
-{
-  "public_ip": "${PUBLIC_IP}",
-  "listen_port": ${LISTEN_PORT},
-  "auth_password": "${AUTH_PASSWORD}",
-  "server_name": "${SERVER_NAME}",
-  "is_insecure": ${IS_INSECURE},
-  "cert_type": "${CERT_TYPE}",
-  "subscription_token": "${SUB_TOKEN}",
-  "subscription_port": ${HY2_SUB_PORT},
-  "hop_port_range": "${HOP_PORT_RANGE}",
-  "obfs_password": "${OBFS_PASSWORD}"
-}
-EOF
-
+    jq -n --arg public_ip "$PUBLIC_IP" --arg server_name "$SERVER_NAME" \
+        --arg auth_password "$AUTH_PASSWORD" --arg obfs_password "$OBFS_PASSWORD" \
+        --arg hop_port_range "$HOP_PORT_RANGE" --arg cert_type "$CERT_TYPE" \
+        --argjson listen_port "$LISTEN_PORT" --argjson is_insecure "$IS_INSECURE" \
+        --argjson subscription_port "$HY2_SUB_PORT" \
+        '$ARGS.named' > "$HY2_META_FILE"
+    setup_portal
     log_info "配置文件写入完成。"
 }
 
@@ -450,6 +441,8 @@ Description=Hysteria 2 Server Service
 Documentation=https://v2.hysteria.network/
 After=network.target network-online.target
 Wants=network-online.target
+After=hysteria-portal.service
+Wants=hysteria-portal.service
 
 [Service]
 Type=simple
@@ -475,122 +468,183 @@ EOF
         log_info "Hysteria 2 服务启动成功！"
     else
         log_err "Hysteria 2 服务启动异常，请运行 'journalctl -u hysteria-server -e' 查看日志！"
+        return 1
     fi
 }
 
-# 6. 生成多客户端连接格式
+# 6. 显示私密信息页的访问凭据，节点数据只在认证后提供。
 show_client_configs() {
-    if [[ ! -f "$HY2_META_FILE" ]]; then
-        log_err "未找到配置元数据，请先安装或重新配置！"
-        return
+    if [[ ! -f "$HY2_DIR/portal-access.json" ]]; then
+        log_err "尚未生成信息页，请重新配置。"
+        return 1
     fi
-
-    local ip=$(jq -r '.public_ip' "$HY2_META_FILE")
-    local port=$(jq -r '.listen_port' "$HY2_META_FILE")
-    local pass=$(jq -r '.auth_password' "$HY2_META_FILE")
-    local sni=$(jq -r '.server_name' "$HY2_META_FILE")
-    local insecure=$(jq -r '.is_insecure' "$HY2_META_FILE")
-    local hop=$(jq -r '.hop_port_range' "$HY2_META_FILE")
-    local obfs=$(jq -r '.obfs_password' "$HY2_META_FILE")
-    local cert_type=$(jq -r '.cert_type // empty' "$HY2_META_FILE")
-    local sub_token=$(jq -r '.subscription_token // empty' "$HY2_META_FILE")
-    local sub_port=$(jq -r '.subscription_port // 8443' "$HY2_META_FILE")
-
-    local connect_ports="${port}"
-    local url_ports="${port}"
-    if [[ -n "$hop" ]]; then
-        connect_ports="${port},${hop}"
-        url_ports="${port},${hop}"
-    fi
-
-    # 标准 Hysteria2 URL
-    # hysteria2://password@host:ports?insecure=1&sni=xxx&obfs=salamander&obfs-password=xxx#Remark
-    local query="sni=${sni}"
-    if [[ "$insecure" == "true" ]]; then
-        query="${query}&insecure=1"
-    fi
-    if [[ -n "$obfs" ]]; then
-        query="${query}&obfs=salamander&obfs-password=${obfs}"
-    fi
-    if [[ -n "$hop" ]]; then
-        query="${query}&mport=${hop}"
-    fi
-
-    local hy2_url="hysteria2://${pass}@${ip}:${port}?${query}#Hy2-${ip}"
-
-    echo -e "\n${CYAN}================================================================${PLAIN}"
-    echo -e "${GREEN}          Hysteria 2 节点配置与订阅信息                         ${PLAIN}"
-    echo -e "${CYAN}================================================================${PLAIN}"
-    echo -e "${YELLOW}服务器地址 (Host):${PLAIN}       ${ip}"
-    echo -e "${YELLOW}主连接端口 (Port):${PLAIN}       ${port}"
-    if [[ -n "$hop" ]]; then
-        echo -e "${YELLOW}端口跳跃范围 (Hop Ports):${PLAIN} ${hop}"
-    fi
-    echo -e "${YELLOW}认证密码 (Password):${PLAIN}     ${pass}"
-    echo -e "${YELLOW}TLS 伪装 SNI:${PLAIN}            ${sni}"
-    echo -e "${YELLOW}跳过证书验证 (Insecure):${PLAIN} ${insecure}"
-    if [[ -n "$obfs" ]]; then
-        echo -e "${YELLOW}Salamander 混淆密码:${PLAIN}     ${obfs}"
-    fi
-    echo -e "${CYAN}----------------------------------------------------------------${PLAIN}"
-    echo -e "${GREEN}【标准 Hysteria2 节点链接 (v2rayN, Nekobox, Shadowrocket)】:${PLAIN}"
-    echo -e "${CYAN}${hy2_url}${PLAIN}"
-    if command -v qrencode >/dev/null 2>&1; then
-        echo -e "${GREEN}【v2rayN 扫码导入】${PLAIN}"
-        qrencode -t ANSIUTF8 "$hy2_url"
-    else
-        log_warn "未找到 qrencode；重新运行安装脚本会自动安装后显示二维码。"
-    fi
-    if [[ "$cert_type" == "acme" && -n "$sub_token" ]]; then
-        local sub_url="https://${sni}:${sub_port}/${sub_token}.yaml"
-        echo -e "${GREEN}【Clash / Mihomo 订阅链接】${PLAIN} ${CYAN}${sub_url}${PLAIN}"
-        echo -e "${YELLOW}请在云安全组放行 TCP ${sub_port}；此随机链接包含节点配置，请勿公开。${PLAIN}"
-    fi
-    echo -e "${CYAN}----------------------------------------------------------------${PLAIN}"
-
-    # Clash.Meta / Mihomo 节点配置
-    echo -e "${GREEN}【Clash.Meta / Mihomo (Clash Verge Rev) 节点配置片断】：${PLAIN}"
-    cat <<EOF
-- name: "Hy2-${ip}"
-  type: hysteria2
-  server: ${ip}
-  port: ${port}
-$( [[ -n "$hop" ]] && echo "  ports: ${hop}" )
-  password: "${pass}"
-  sni: ${sni}
-  skip-cert-verify: ${insecure}
-$( [[ -n "$obfs" ]] && cat <<OBFS_EOF
-  obfs: salamander
-  obfs-password: "${obfs}"
-OBFS_EOF
-)
-  alpn:
-    - h3
-EOF
-    echo -e "${CYAN}----------------------------------------------------------------${PLAIN}"
-
-    # Sing-box 节点配置
-    echo -e "${GREEN}【Sing-box (SFA / SFI) Outbound 节点配置片断】：${PLAIN}"
-    cat <<EOF
-{
-  "type": "hysteria2",
-  "tag": "Hy2-${ip}",
-  "server": "${ip}",
-  "server_port": ${port},
-  "password": "${pass}",
-  "tls": {
-    "enabled": true,
-    "server_name": "${sni}",
-    "insecure": ${insecure},
-    "alpn": ["h3"]
-  }$( [[ -n "$obfs" ]] && echo ',
-  "obfs": {
-    "type": "salamander",
-    "password": "'"${obfs}"'"
-  }' )
+    jq -r '"私密信息页: " + .url, "用户名: " + .username, "密码: " + .password' "$HY2_DIR/portal-access.json"
+    log_info "请在云安全组放行信息页 URL 中的 TCP 端口。"
+    log_warn "自签证书模式需核对证书指纹后信任；推荐使用有效域名证书。"
 }
+
+setup_portal() {
+    cat > "$HY2_DIR/portal.py" <<'PYPORTAL'
+"""仅监听回环地址；公网 TLS 由 Hysteria 的 masquerade proxy 提供。"""
+import base64
+import hashlib
+import hmac
+import html
+import json
+import secrets
+import subprocess
+import sys
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from urllib.parse import quote, urlencode
+
+
+def artifacts(m):
+    host = m['public_ip'] if m['is_insecure'] else m['server_name']
+    name = 'Hy2-' + host
+    params = {'sni': m['server_name']}
+    if m['is_insecure']:
+        params['insecure'] = '1'
+    if m['obfs_password']:
+        params.update({'obfs': 'salamander', 'obfs-password': m['obfs_password']})
+    if m['hop_port_range']:
+        params['mport'] = m['hop_port_range']
+    uri = f"hysteria2://{quote(m['auth_password'], safe='')}@{host}:{m['listen_port']}?{urlencode(params)}#{quote(name)}"
+    proxy = dict(name=name, type='hysteria2', server=host, port=m['listen_port'],
+                 password=m['auth_password'], sni=m['server_name'], **{'skip-cert-verify': m['is_insecure']})
+    sing = dict(type='hysteria2', tag=name, server=host, server_port=m['listen_port'],
+                password=m['auth_password'], tls=dict(enabled=True, server_name=m['server_name'], insecure=m['is_insecure']))
+    if m['hop_port_range']:
+        proxy['ports'] = str(m['listen_port']) + ',' + m['hop_port_range']
+        sing['server_ports'] = [str(m['listen_port']), m['hop_port_range'].replace('-', ':')]
+        del sing['server_port']
+    if m['obfs_password']:
+        proxy.update({'obfs': 'salamander', 'obfs-password': m['obfs_password']})
+        sing['obfs'] = dict(type='salamander', password=m['obfs_password'])
+    # JSON 是 YAML 的子集，避免手拼 YAML 破坏密码中的特殊字符。
+    clash = {'mixed-port': 7890, 'allow-lan': False, 'mode': 'rule', 'proxies': [proxy],
+             'proxy-groups': [{'name': 'PROXY', 'type': 'select', 'proxies': [name, 'DIRECT']}],
+             'rules': ['MATCH,PROXY']}
+    return uri, json.dumps(clash, ensure_ascii=False, indent=2), json.dumps({'outbounds': [sing]}, ensure_ascii=False, indent=2)
+
+
+def prepare(meta_path, port):
+    m = json.loads(Path(meta_path).read_text())
+    uri, clash, sing = artifacts(m)
+    qr = subprocess.run(['qrencode', '-t', 'SVG', '-o', '-'], input=uri.encode(), capture_output=True, check=True).stdout
+    user, password, token = secrets.token_hex(8), secrets.token_urlsafe(32), secrets.token_hex(32)
+    host = m['public_ip'] if m['is_insecure'] else m['server_name']
+    base = f"https://{host}:{m['subscription_port']}/{token}/"
+    subscription = f"https://{user}:{password}@{host}:{m['subscription_port']}/{token}/clash.yaml"
+    sections = [('v2rayN / HY2 节点链接', uri), ('Clash / Mihomo 订阅地址', subscription),
+                ('Clash / Mihomo 完整配置', clash), ('Sing-box 出站配置片段', sing)]
+    page = '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>节点信息</title><body><h1>HY2 节点信息</h1>'
+    page += '<p>订阅地址包含登录凭据，请私密保存。客户端若不支持带账号密码的订阅 URL，可下载配置导入。</p>'
+    page += '<img width="320" alt="HY2 二维码" src="qr.svg">'
+    for title, value in sections:
+        page += '<h2>' + title + '</h2><textarea readonly rows="8" cols="80">' + html.escape(value) + '</textarea>'
+    page += '<p><a href="clash.yaml">下载 Clash 配置</a> · <a href="sing-box.json">下载 Sing-box 片段</a></p></body></html>'
+    auth = base64.b64encode(f'{user}:{password}'.encode())
+    data = dict(port=int(port), token=token, auth_hash=hashlib.sha256(auth).hexdigest(), page=page,
+                qr=qr.decode(), clash=clash, sing=sing)
+    root = Path(meta_path).parent
+    for filename, value in [('portal.json', data), ('portal-access.json', dict(url=base, username=user, password=password))]:
+        path = root / filename
+        path.write_text(json.dumps(value, ensure_ascii=False))
+        path.chmod(0o600)
+
+
+def serve(path):
+    data = json.loads(Path(path).read_text())
+    class Handler(BaseHTTPRequestHandler):
+        server_version = 'Gateway'
+        sys_version = ''
+        def setup(self):
+            super().setup()
+            self.connection.settimeout(5)
+        def log_message(self, *args):
+            pass  # 不把路径、凭据及订阅请求写入日志。
+        def do_GET(self):
+            now = time.monotonic()
+            # 全局限速不信任客户端 X-Forwarded-For；限制所有请求及失败认证。
+            self.server.requests[:] = [t for t in self.server.requests if now-t < 1]
+            self.server.failures[:] = [t for t in self.server.failures if now-t < 60]
+            if len(self.server.requests) >= 20 or len(self.server.failures) >= 30:
+                return self.reply(429, b'Too many requests')
+            self.server.requests.append(now)
+            prefix = '/' + data['token'] + '/'
+            if not self.path.startswith(prefix):
+                return self.reply(404, b'Not found')
+            auth = self.headers.get('Authorization', '')
+            digest = hashlib.sha256(auth.removeprefix('Basic ').encode()).hexdigest()
+            if not auth.startswith('Basic ') or not hmac.compare_digest(digest, data['auth_hash']):
+                self.server.failures.append(now)
+                return self.reply(401, b'Authentication required')
+            routes = {'': ('page', 'text/html; charset=utf-8'), 'qr.svg': ('qr', 'image/svg+xml'),
+                      'clash.yaml': ('clash', 'application/yaml'), 'sing-box.json': ('sing', 'application/json')}
+            route = routes.get(self.path[len(prefix):])
+            if route is None:
+                return self.reply(404, b'Not found')
+            key, mime = route
+            self.reply(200, data[key].encode(), mime)
+        def reply(self, code, body, mime='text/plain'):
+            self.send_response(code)
+            self.send_header('Content-Type', mime)
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.send_header('X-Frame-Options', 'DENY')
+            self.send_header('Referrer-Policy', 'no-referrer')
+            self.send_header('X-Robots-Tag', 'noindex, nofollow, noarchive')
+            self.send_header('Content-Security-Policy', "default-src 'none'; img-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+            if code == 401:
+                self.send_header('WWW-Authenticate', 'Basic realm="Private", charset="UTF-8"')
+            if code == 429:
+                self.send_header('Retry-After', '60')
+            self.end_headers()
+            self.wfile.write(body)
+    server = HTTPServer(('127.0.0.1', data['port']), Handler)
+    server.requests, server.failures = [], []
+    server.serve_forever()
+
+
+if __name__ == '__main__':
+    if sys.argv[1] == 'prepare':
+        prepare(sys.argv[2], sys.argv[3])
+    else:
+        serve(sys.argv[2])
+PYPORTAL
+    python3 "$HY2_DIR/portal.py" prepare "$HY2_META_FILE" "$PORTAL_LOCAL_PORT"
+    cat > /etc/systemd/system/hysteria-portal.service <<EOF
+[Unit]
+Description=Private HY2 information page (loopback only)
+After=network.target
+[Service]
+Type=simple
+DynamicUser=yes
+LoadCredential=portal.json:${HY2_DIR}/portal.json
+ExecStart=/usr/bin/python3 ${HY2_DIR}/portal.py serve %d/portal.json
+Restart=on-failure
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_INET
+[Install]
+WantedBy=multi-user.target
 EOF
-    echo -e "${CYAN}================================================================${PLAIN}\n"
+    # 程序可读，包含节点密码的数据仅通过 systemd credential 交给动态用户。
+    chmod 755 "$HY2_DIR"
+    chmod 644 "$HY2_DIR/portal.py"
+    chmod 600 "$HY2_DIR/portal.json" "$HY2_DIR/portal-access.json" "$HY2_META_FILE" "$HY2_CONFIG"
+    systemctl daemon-reload
+    systemctl enable hysteria-portal >/dev/null
+    systemctl restart hysteria-portal
+    sleep 1
+    systemctl is-active --quiet hysteria-portal || { log_err "信息页服务启动失败"; return 1; }
 }
 
 # 7. 服务状态与管理命令
@@ -632,6 +686,8 @@ uninstall_all() {
         log_step "正在停止并删除系统服务..."
         systemctl stop hysteria-server 2>/dev/null || true
         systemctl disable hysteria-server 2>/dev/null || true
+        systemctl disable --now hysteria-portal 2>/dev/null || true
+        rm -f /etc/systemd/system/hysteria-portal.service
         clear_all_hopping_rules
         rm -f "$HY2_SERVICE"
         systemctl daemon-reload
@@ -648,7 +704,7 @@ uninstall_all() {
 
 # 主控制台菜单
 menu() {
-    clear
+    clear 2>/dev/null || true
     echo -e "${CYAN}================================================================${PLAIN}"
     echo -e "${GREEN}       Hysteria 2 全功能生产级管理脚本 (${HY2_ARCH:-$(uname -m)})         ${PLAIN}"
     echo -e "${BLUE}       GitHub: https://github.com/yys9253462-gif/hysteria2-installer    ${PLAIN}"
@@ -664,7 +720,7 @@ menu() {
     echo -e "${CYAN}----------------------------------------------------------------${PLAIN}"
     echo -e "  ${GREEN}1.${PLAIN} 全新安装 Hysteria 2"
     echo -e "  ${GREEN}2.${PLAIN} 更新 Hysteria 2 核心至最新版"
-    echo -e "  ${GREEN}3.${PLAIN} 查看客户端节点连接信息 (链接/Clash/Sing-box)"
+    echo -e "  ${GREEN}3.${PLAIN} 查看私密信息页地址和登录凭据"
     echo -e "  ${GREEN}4.${PLAIN} 重新修改配置 (端口/密码/证书/域名/混淆)"
     echo -e "${CYAN}----------------------------------------------------------------${PLAIN}"
     echo -e "  ${GREEN}5.${PLAIN} 启动服务"
@@ -706,7 +762,7 @@ menu() {
             setup_ports_and_obfs
             generate_server_config
             setup_system_firewall "$LISTEN_PORT" "$HOP_START" "$HOP_END"
-            restart_service
+            setup_systemd
             show_client_configs
             ;;
         5)

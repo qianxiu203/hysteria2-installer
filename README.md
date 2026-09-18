@@ -18,7 +18,7 @@
   - 标准 **`hysteria2://`** 节点直链（支持 v2rayN、Nekobox、Shadowrocket、Sing-box 等一键导入）
   - **Clash.Meta / Mihomo** (Clash Verge Rev) 节点配置片段
   - **Sing-box** (SFA / SFI) Outbound 节点配置片段
-  - 安装完成直接显示 v2rayN 可扫描二维码，以及 HTTPS Clash/Mihomo 订阅链接。
+  - 安装完成显示私密 HTTPS 信息页地址和随机登录凭据；二维码、订阅和配置统一在登录后的网页查看。
 - 🛠️ **全生命周期管理**：Systemd 服务自动守护、开机自启、内核 UDP 缓冲与参数调优、一键升级、实时日志监控与彻底卸载。
 
 ---
@@ -52,7 +52,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/yys9253462-gif/hysteria2-inst
 ----------------------------------------------------------------
   1. 全新安装 Hysteria 2
   2. 更新 Hysteria 2 核心至最新版
-  3. 查看客户端节点连接信息 (链接/Clash/Sing-box)
+  3. 查看私密信息页地址和登录凭据
   4. 重新修改配置 (端口/密码/证书/混淆)
 ----------------------------------------------------------------
   5. 启动服务
@@ -72,7 +72,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/yys9253462-gif/hysteria2-inst
 
 | 快捷命令 | 功能说明 |
 | :--- | :--- |
-| `bash install.sh info` | 再次打印当前节点的连接链接与配置信息 |
+| `bash install.sh info` | 再次显示私密信息页地址与登录凭据 |
 | `bash install.sh status` | 查看 Systemd 运行状态 |
 | `bash install.sh restart` | 重启 Hysteria 2 服务端 |
 | `bash install.sh update` | 一键检查并更新 Hysteria 官方二进制 |
@@ -147,13 +147,27 @@ obfs:
 ## 📲 客户端配置说明
 
 ### 1. v2rayN / Nekobox / Shadowrocket
-直接复制终端生成的 `hysteria2://...` 格式直链，导入客户端即可秒开。
+打开终端显示的私密信息页，输入账号密码后，扫描二维码或复制 HY2 链接导入。
 
 ### 2. Clash.Meta / Mihomo
-将脚本生成的 YAML 片断粘贴进你的配置 `proxies` 列表中，如果使用自签名证书，请确保包含 `skip-cert-verify: true`。
+复制网页中的带认证订阅地址到客户端。订阅为完整配置，含代理组和路由；JSON 格式也是合法 YAML。若客户端不支持 URL 中的 Basic Auth 用户信息，请在浏览器登录后下载配置导入。
 
 ### 3. Sing-box
 将生成的 JSON 片断添加进 `outbounds` 节点列表中。
+
+## 私密信息页的安全与运行要求
+
+需要 Python 3.9+、qrencode 和 systemd 247+（使用 LoadCredential）。一键脚本内嵌网页程序，不依赖外部二维码网站或第三方 JS。二维码仅在服务器本地生成。
+
+Hysteria 在空闲 TCP 端口上提供 HTTPS，并将请求转发到只监听 127.0.0.1 的独立低权限网页服务。共用 Hysteria 当前证书与续期机制；不占用已有网站的 80/443。使用 ACME HTTP-01 申请证书本身仍需要 TCP 80 可用。自签证书会触发浏览器证书告警；推荐使用受信任的域名证书。
+
+页面路径使用 256-bit 随机值，随机密码同样具有 256-bit 熵。页面、二维码、订阅与下载均验证 Basic Auth；没有免登录订阅后门。随机路径不代表端口不可扫描，认证才是访问控制。请保密 URL 与账号密码，订阅 URL 内含凭据。
+
+只开放四个固定路由，禁止目录浏览；响应带 no-store、CSP、禁止嵌入、禁止索引及禁止 referrer 标头。后端不记录访问路径或密码，使用恒定时间摘要比较验证认证。全局每秒最多 20 个请求，60 秒内 30 次失败认证后临时限流；高频攻击仍可能导致暂时不可用。可在云安全组将网页端口限制为自己的 IP。
+
+每次重新配置都会轮换网页路径和登录凭据，旧链接失效，客户端需更新订阅。菜单 3 仅显示已有访问凭据。卸载时停止并删除 hysteria-portal.service 及其配置。已有旧版安装需重新配置才启用网页；本次仓库更新不会自动部署到服务器。
+
+开发检查：`bash -n install.sh` 和 `python3 -m unittest discover -s tests -v`。维护 portal.py 后须同步 install.sh 的 PYPORTAL 内嵌段；回归测试会验证一致性。
 
 ---
 
