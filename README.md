@@ -11,7 +11,7 @@
 ## ✨ 核心特性
 
 - ⚡ **官方核心保证**：自动检测 CPU 架构（amd64 / arm64 / armv7），直接拉取 Hysteria 官方最新发布版二进制。
-- 🛡️ **高拟真自签 / 自定义证书**：支持一键生成高拟真 ECC (prime256v1) 证书伪装知名站点，或指定已有 acme.sh / certbot 证书。
+- 🛡️ **自签 / 自定义 / 域名证书**：支持一键生成 ECC (prime256v1) 自签证书、指定已有 acme.sh / certbot 证书，或绑定域名并自动申请 Let's Encrypt 证书。
 - 🔀 **端口跳跃 (Port Hopping)**：内置自动化 `iptables` 多端口转发规则配置，有效突破单一 UDP 端口被限速或丢包。
 - 🎭 **Salamander 混淆**：可选开启 Salamander 混淆，将 QUIC 数据报文伪装为完全随机的高熵杂波，彻底免疫 GFW 主动探测。
 - 📱 **多客户端格式全覆盖**：
@@ -85,6 +85,18 @@ bash <(wget -qO- https://raw.githubusercontent.com/yys9253462-gif/hysteria2-inst
 - **自签证书存放目录**：`/etc/hysteria/cert/`
 - **连接元数据备份**：`/etc/hysteria/client_meta.json`
 - **Systemd 服务单元**：`/etc/systemd/system/hysteria-server.service`
+
+### 绑定域名并自动申请证书
+
+安装或菜单中的“重新修改配置”时，在 TLS 证书方式中选择 `3`，输入域名和通知邮箱即可。脚本会让 Hysteria 使用 ACME HTTP-01 自动申请和续期证书。
+
+开始前必须完成以下事项：
+
+- 为域名创建指向服务器公网 IPv4 的 `A` 记录；若设置了 `AAAA` 记录，也必须确保 IPv6 可访问，否则请删除它。
+- 在云厂商安全组中放行 **TCP 80**，并保持该端口未被其他 Web 服务占用。
+- 脚本会自动放行本机 UFW/firewalld 的 TCP 80，但云安全组需要自行放行。
+
+成功后客户端会使用该域名作为服务器地址和 SNI，且不再需要开启 `skip-cert-verify` / `insecure`。
 
 ### 服务端配置模板 (`config.yaml`)
 
