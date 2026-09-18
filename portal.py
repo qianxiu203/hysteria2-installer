@@ -210,7 +210,9 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
     public_ip = m.get("public_ip", server_name)
     host = public_ip if is_insecure else server_name
     sub_port = m.get("subscription_port", 8443)
-    pin_sha256 = m.get("pin_sha256", "")
+    _raw_pin = (m.get("pin_sha256") or "").strip().lower()
+    pin_sha256 = _raw_pin if (is_insecure and len(_raw_pin) == 64
+                              and all(c in "0123456789abcdef" for c in _raw_pin)) else ""
     pin_block = (f'<div class="api-box"><div><div style="font-size:11px;color:var(--muted);font-weight:700">'
                  f'自签证书 SHA-256 指纹 (HEX · 已写入直链 pinSHA256 / Xray 的 pinnedPeerCertSha256)</div>'
                  f'<div class="api-key-code" id="api-pin-val">{html.escape(pin_sha256)}</div></div>'
@@ -593,12 +595,30 @@ def artifacts(m, auth_override=None, name_override=None):
     return uri, json.dumps(clash, ensure_ascii=False, indent=2), json.dumps({'outbounds': [sing]}, ensure_ascii=False, indent=2)
 
 
+def sync_pin(m, root, meta_path):
+    """Align client_meta.json's pin_sha256 with the node's trust model.
+
+    Trusted cert  -> pin wiped entirely (a stale/base64 value must never linger:
+                     Xray reads pinSHA256 as HEX and a base64 char aborts the build).
+    Self-signed   -> a valid lowercase HEX64 pin, recomputed from cert/server.crt
+                     whenever it is missing or malformed.
+    """
+    if m.get('is_insecure'):
+        cur = (m.get('pin_sha256') or '').strip().lower()
+        if len(cur) != 64 or any(c not in '0123456789abcdef' for c in cur):
+            new = get_cert_pin_sha256(root)
+            if new != m.get('pin_sha256'):
+                m['pin_sha256'] = new
+                Path(meta_path).write_text(json.dumps(m, ensure_ascii=False))
+    elif m.get('pin_sha256'):
+        m['pin_sha256'] = ''
+        Path(meta_path).write_text(json.dumps(m, ensure_ascii=False))
+
+
 def prepare(meta_path, port, node_api_key=None):
     root = Path(meta_path).parent
     m = json.loads(Path(meta_path).read_text())
-    if m.get('is_insecure') and not m.get('pin_sha256'):
-        m['pin_sha256'] = get_cert_pin_sha256(root)
-        Path(meta_path).write_text(json.dumps(m, ensure_ascii=False))
+    sync_pin(m, root, meta_path)
 
     uri, clash, sing = artifacts(m)
     qr = subprocess.run(['qrencode', '-t', 'SVG', '-o', '-'], input=uri.encode(), capture_output=True, check=True).stdout
@@ -636,9 +656,7 @@ def prepare(meta_path, port, node_api_key=None):
 def refresh(meta_path):
     root = Path(meta_path).parent
     m = json.loads(Path(meta_path).read_text())
-    if m.get('is_insecure') and not m.get('pin_sha256'):
-        m['pin_sha256'] = get_cert_pin_sha256(root)
-        Path(meta_path).write_text(json.dumps(m, ensure_ascii=False))
+    sync_pin(m, root, meta_path)
 
     access = json.loads((root / 'portal-access.json').read_text())
     path = root / 'portal.json'

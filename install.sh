@@ -127,12 +127,32 @@ setup_certificates() {
             log_err "指定的文件不存在，将回退为自签名证书！"
             generate_self_signed_cert
         else
-            CERT_TYPE="custom"
-            CERT_FILE="$input_cert"
-            KEY_FILE="$input_key"
-            read -rp "请输入证书绑定的域名 (SNI): " SERVER_NAME
-            SERVER_NAME=${SERVER_NAME:-$PUBLIC_IP}
-            IS_INSECURE="false"
+            # 证书链自检：文件里只有 1 张证书 = 叶证书，缺中间证书会让 Go 系客户端连不上。
+            local chain_ok=1 sibling
+            if [[ "$(grep -c 'BEGIN CERTIFICATE' "$input_cert" 2>/dev/null || echo 0)" -lt 2 ]]; then
+                sibling="$(dirname "$input_cert")/fullchain.cer"
+                [[ -f "$sibling" ]] || sibling="$(dirname "$input_cert")/fullchain.pem"
+                if [[ -f "$sibling" ]]; then
+                    log_info "证书文件仅含叶证书，自动改用同目录的 $(basename "$sibling") 以携带完整证书链。"
+                    input_cert="$sibling"
+                else
+                    log_err "警告：$(basename "$input_cert") 仅含叶证书，缺少中间证书。"
+                    log_err "v2rayNG/Xray/hysteria 会报 'certificate signed by unknown authority' 而无法连接。"
+                    read -rp "仍要继续使用该证书吗？(y/N): " force_leaf
+                    [[ "$force_leaf" =~ ^[Yy]$ ]] || chain_ok=0
+                fi
+            fi
+            if [[ "$chain_ok" == "1" ]]; then
+                CERT_TYPE="custom"
+                CERT_FILE="$input_cert"
+                KEY_FILE="$input_key"
+                read -rp "请输入证书绑定的域名 (SNI): " SERVER_NAME
+                SERVER_NAME=${SERVER_NAME:-$PUBLIC_IP}
+                IS_INSECURE="false"
+            else
+                log_err "已取消，回退为自签名证书。"
+                generate_self_signed_cert
+            fi
         fi
     elif [[ "$cert_choice" == "3" ]]; then
         setup_acme_certificate
@@ -144,17 +164,24 @@ setup_certificates() {
 }
 
 select_local_certificate() {
-    local certs=() cert key i choice
+    local certs=() cert key i choice dir
+    # 只接受【完整证书链】文件：fullchain.pem (certbot) / fullchain.cer (acme.sh)。
+    # 不能收 <domain>.cer —— 那是仅含叶证书的文件；Go 系客户端 (v2rayNG/Xray/hysteria)
+    # 不会通过 AIA 补齐中间证书，缺链会直接报 `x509: certificate signed by unknown authority`。
+    # 旧实现扫 `*.cer` 会把叶证书收进来，且给 fullchain.cer 配错 key(fullchain.key) 后丢弃，
+    # 结果只剩叶证书 —— 这正是节点"能连上握手、却验证失败"的根因。
     while IFS= read -r cert; do
-        if [[ "$(basename "$cert")" == "fullchain.pem" ]]; then
-            key="$(dirname "$cert")/privkey.pem"
-        else
-            key="${cert%.cer}.key"
-        fi
+        dir="$(dirname "$cert")"
+        case "$(basename "$cert")" in
+            fullchain.pem) key="$dir/privkey.pem" ;;
+            fullchain.cer) key="$(find "$dir" -maxdepth 1 -name '*.key' -type f 2>/dev/null | head -1)" ;;
+            *) continue ;;
+        esac
         [[ -f "$key" ]] && certs+=("$cert|$key")
-    done < <(find /etc/letsencrypt/live /root/.acme.sh /home -type f \( -name fullchain.pem -o -name '*.cer' \) 2>/dev/null)
+    done < <(find /etc/letsencrypt/live /root/.acme.sh /home -type f \( -name fullchain.pem -o -name fullchain.cer \) 2>/dev/null)
     if [[ ${#certs[@]} -eq 0 ]]; then
-        log_err "未发现可配对的证书和私钥，请选择其他证书方式。"
+        log_err "未发现含完整证书链的证书 (fullchain.pem / fullchain.cer)。"
+        log_err "仅含叶证书的 <domain>.cer 已被跳过，请选择其他证书方式。"
         return 1
     fi
     echo -e "${GREEN}发现以下本机证书：${PLAIN}"
@@ -744,7 +771,9 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
     public_ip = m.get("public_ip", server_name)
     host = public_ip if is_insecure else server_name
     sub_port = m.get("subscription_port", 8443)
-    pin_sha256 = m.get("pin_sha256", "")
+    _raw_pin = (m.get("pin_sha256") or "").strip().lower()
+    pin_sha256 = _raw_pin if (is_insecure and len(_raw_pin) == 64
+                              and all(c in "0123456789abcdef" for c in _raw_pin)) else ""
     pin_block = (f'<div class="api-box"><div><div style="font-size:11px;color:var(--muted);font-weight:700">'
                  f'自签证书 SHA-256 指纹 (HEX · 已写入直链 pinSHA256 / Xray 的 pinnedPeerCertSha256)</div>'
                  f'<div class="api-key-code" id="api-pin-val">{html.escape(pin_sha256)}</div></div>'
@@ -1127,12 +1156,30 @@ def artifacts(m, auth_override=None, name_override=None):
     return uri, json.dumps(clash, ensure_ascii=False, indent=2), json.dumps({'outbounds': [sing]}, ensure_ascii=False, indent=2)
 
 
+def sync_pin(m, root, meta_path):
+    """Align client_meta.json's pin_sha256 with the node's trust model.
+
+    Trusted cert  -> pin wiped entirely (a stale/base64 value must never linger:
+                     Xray reads pinSHA256 as HEX and a base64 char aborts the build).
+    Self-signed   -> a valid lowercase HEX64 pin, recomputed from cert/server.crt
+                     whenever it is missing or malformed.
+    """
+    if m.get('is_insecure'):
+        cur = (m.get('pin_sha256') or '').strip().lower()
+        if len(cur) != 64 or any(c not in '0123456789abcdef' for c in cur):
+            new = get_cert_pin_sha256(root)
+            if new != m.get('pin_sha256'):
+                m['pin_sha256'] = new
+                Path(meta_path).write_text(json.dumps(m, ensure_ascii=False))
+    elif m.get('pin_sha256'):
+        m['pin_sha256'] = ''
+        Path(meta_path).write_text(json.dumps(m, ensure_ascii=False))
+
+
 def prepare(meta_path, port, node_api_key=None):
     root = Path(meta_path).parent
     m = json.loads(Path(meta_path).read_text())
-    if m.get('is_insecure') and not m.get('pin_sha256'):
-        m['pin_sha256'] = get_cert_pin_sha256(root)
-        Path(meta_path).write_text(json.dumps(m, ensure_ascii=False))
+    sync_pin(m, root, meta_path)
 
     uri, clash, sing = artifacts(m)
     qr = subprocess.run(['qrencode', '-t', 'SVG', '-o', '-'], input=uri.encode(), capture_output=True, check=True).stdout
@@ -1170,9 +1217,7 @@ def prepare(meta_path, port, node_api_key=None):
 def refresh(meta_path):
     root = Path(meta_path).parent
     m = json.loads(Path(meta_path).read_text())
-    if m.get('is_insecure') and not m.get('pin_sha256'):
-        m['pin_sha256'] = get_cert_pin_sha256(root)
-        Path(meta_path).write_text(json.dumps(m, ensure_ascii=False))
+    sync_pin(m, root, meta_path)
 
     access = json.loads((root / 'portal-access.json').read_text())
     path = root / 'portal.json'

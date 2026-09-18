@@ -53,4 +53,32 @@ assert "pinSHA256" not in uri_b64, "base64 pin leaked back into the URI"
 assert "insecure=1" in uri_b64, "insecure fallback lost"
 assert "ca-sha256" not in clash_b64 and "certificate_pinned_sha256" not in sing_b64
 
+print("\n-- sync_pin: client_meta.json cleanup (called by prepare/refresh) --")
+import json
+with tempfile.TemporaryDirectory() as td2:
+    root2 = Path(td2)
+    (root2 / "cert").mkdir()
+    subprocess.run(
+        f"openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes "
+        f"-keyout {root2}/cert/server.key -out {root2}/cert/server.crt "
+        f"-subj /CN=example.com -days 365",
+        shell=True, check=True, capture_output=True)
+    good = portal.get_cert_pin_sha256(root2)
+    mp = root2 / "client_meta.json"
+
+    mp.write_text(json.dumps(meta(False, "xY7kQm2pLd9vRt4bNs1gWc6zHf3jKa8eUo5iTr2sQy0=")))
+    portal.sync_pin(json.loads(mp.read_text()), root2, mp)
+    assert json.loads(mp.read_text())["pin_sha256"] == "", "stale pin survived on trusted cert"
+    print("trusted  -> stale pin wiped        : OK")
+
+    mp.write_text(json.dumps(meta(True, "xY7kQm2pLd9vRt4bNs1gWc6zHf3jKa8eUo5iTr2sQy0=")))
+    portal.sync_pin(json.loads(mp.read_text()), root2, mp)
+    assert json.loads(mp.read_text())["pin_sha256"] == good, "self-signed pin not recomputed"
+    print("selfsign -> malformed pin recomputed: OK")
+
+    mp.write_text(json.dumps(meta(True, "")))
+    portal.sync_pin(json.loads(mp.read_text()), root2, mp)
+    assert json.loads(mp.read_text())["pin_sha256"] == good, "missing self-signed pin not filled"
+    print("selfsign -> missing pin filled      : OK")
+
 print("\nALL ASSERTIONS PASSED")
