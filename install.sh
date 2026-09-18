@@ -115,6 +115,7 @@ setup_certificates() {
     echo -e "  ${YELLOW}1.${PLAIN} 使用自动生成的自签名证书 (最简单快捷，客户端需开启 skip-cert-verify / insecure)"
     echo -e "  ${YELLOW}2.${PLAIN} 自定义已有证书文件路径 (例如 acme.sh / certbot 已签发的 fullchain.pem 与 privkey.pem)"
     echo -e "  ${YELLOW}3.${PLAIN} 绑定域名并自动申请 Let's Encrypt 证书 (推荐)"
+    echo -e "  ${YELLOW}4.${PLAIN} 自动扫描并使用本机已有证书 (Let's Encrypt / acme.sh)"
     echo -e "${CYAN}------------------------------------------------------------${PLAIN}"
     read -rp "请选择证书类型 [默认: 1]: " cert_choice
     cert_choice=${cert_choice:-1}
@@ -135,9 +136,35 @@ setup_certificates() {
         fi
     elif [[ "$cert_choice" == "3" ]]; then
         setup_acme_certificate
+    elif [[ "$cert_choice" == "4" ]]; then
+        select_local_certificate
     else
         generate_self_signed_cert
     fi
+}
+
+select_local_certificate() {
+    local certs=() cert key i choice
+    while IFS= read -r cert; do
+        if [[ "$(basename "$cert")" == "fullchain.pem" ]]; then
+            key="$(dirname "$cert")/privkey.pem"
+        else
+            key="${cert%.cer}.key"
+        fi
+        [[ -f "$key" ]] && certs+=("$cert|$key")
+    done < <(find /etc/letsencrypt/live /root/.acme.sh /home -type f \( -name fullchain.pem -o -name '*.cer' \) 2>/dev/null)
+    if [[ ${#certs[@]} -eq 0 ]]; then
+        log_err "未发现可配对的证书和私钥，请选择其他证书方式。"
+        return 1
+    fi
+    echo -e "${GREEN}发现以下本机证书：${PLAIN}"
+    for i in "${!certs[@]}"; do echo -e "  ${YELLOW}$((i+1)).${PLAIN} ${certs[$i]%%|*}"; done
+    read -rp "请选择证书编号: " choice
+    [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#certs[@]} )) || { log_err "无效选择。"; return 1; }
+    cert="${certs[$((choice-1))]%%|*}"; key="${certs[$((choice-1))]#*|}"
+    CERT_TYPE="custom"; CERT_FILE="$cert"; KEY_FILE="$key"; IS_INSECURE="false"
+    read -rp "请输入证书绑定的域名 (SNI): " SERVER_NAME
+    [[ -n "$SERVER_NAME" ]] || { log_err "域名不能为空。"; return 1; }
 }
 
 setup_acme_certificate() {
