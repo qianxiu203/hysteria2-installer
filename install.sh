@@ -766,10 +766,19 @@ def serve(path):
     meta_path = portal_path.parent / 'client_meta.json'
 
     def save_data():
-        temp = portal_path.with_suffix('.tmp')
-        temp.write_text(json.dumps(data, ensure_ascii=False))
-        temp.chmod(0o600)
-        temp.replace(portal_path)
+        try:
+            temp = portal_path.with_suffix('.tmp')
+            temp.write_text(json.dumps(data, ensure_ascii=False))
+            temp.chmod(0o600)
+            temp.replace(portal_path)
+        except OSError:
+            # 在某些 systemd DynamicUser credential 环境中 /run/credentials 为只读，此时直接回写磁盘目录
+            disk_path = Path('/etc/hysteria/portal.json')
+            if disk_path.exists():
+                disk_temp = disk_path.with_suffix('.tmp')
+                disk_temp.write_text(json.dumps(data, ensure_ascii=False))
+                disk_temp.chmod(0o600)
+                disk_temp.replace(disk_path)
 
     def sign_session(token):
         sig = hmac.new(session_secret.encode(), f'sess:{token}'.encode(), hashlib.sha256).hexdigest()
