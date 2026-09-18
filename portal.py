@@ -203,9 +203,15 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
 
     users_table_html = "".join(user_rows) or '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px">暂无多用户数据</td></tr>'
 
+    obfs_badge = 'Salamander' if obfs_pw else 'QUIC'
+    host_display = html.escape(host)
+    sn_display = html.escape(server_name)
+    listen_port_int = int(listen_port)
+    api_key_str = html.escape(api_key or "")
+
     return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>HY2 · 节点与集群中心</title><style>{STYLE}</style></head><body><main>
 <nav class="topbar" aria-label="页面标识"><div class="brand"><span class="logo">H₂</span> HYSTERIA <span> / 控制中心</span></div><span class="private">● 集群运行中</span></nav>
-<header class="hero"><div class="eyebrow">HYSTERIA 2 NODE DASHBOARD</div><h1>{html.escape(server_name)}</h1><p>官方核心驱动 · 极速 QUIC 代理 · 多用户开户与集群调度</p></header>
+<header class="hero"><div class="eyebrow">HYSTERIA 2 NODE DASHBOARD</div><h1>{sn_display}</h1><p>官方核心驱动 · 极速 QUIC 代理 · 多用户开户与集群调度</p></header>
 
 <!-- 顶部 Tab 导航栏 -->
 <div class="tab-bar">
@@ -224,19 +230,19 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
       <p class="hint">适用于支持 Hysteria 2 的客户端</p>
       <div class="qr-frame"><img src="qr.svg" alt="HY2 节点导入二维码" width="260" height="260"></div>
       <p class="hint">打开客户端扫描二维码直接导入</p>
-      <div class="tags"><span class="tag">Hysteria 2</span><span class="tag">TLS</span><span class="tag">''' + ('Salamander' if obfs_pw else 'QUIC') + '''</span></div>
+      <div class="tags"><span class="tag">Hysteria 2</span><span class="tag">TLS</span><span class="tag">{obfs_badge}</span></div>
     </section>
     <div class="stack">
       <section class="card">
         <div class="card-head"><span class="step">01</span><div><h2>节点直链 (URI)</h2><p>v2rayN / Nekobox / Shadowrocket</p></div></div>
-        ''' + field('hy2-link', uri) + '''
-        <div class="actions">''' + copy('hy2-link') + '''</div>
-        <p class="note">''' + html.escape(host) + ' · UDP ' + str(int(listen_port)) + '''</p>
+        {field('hy2-link', uri)}
+        <div class="actions">{copy('hy2-link')}</div>
+        <p class="note">{host_display} · UDP {listen_port_int}</p>
       </section>
       <section class="card">
         <div class="card-head"><span class="step">02</span><div><h2>Clash 订阅</h2><p>适用于 Clash Meta / Mihomo 内核</p></div></div>
-        ''' + field('clash-subscription', subscription) + '''
-        <div class="actions">''' + copy('clash-subscription') + '''<a class="button" href="clash.yaml" download="clash.yaml">下载配置 ↓</a></div>
+        {field('clash-subscription', subscription)}
+        <div class="actions">{copy('clash-subscription')}<a class="button" href="clash.yaml" download="clash.yaml">下载配置 ↓</a></div>
         <p class="note">在客户端添加订阅链接即可自动同步。</p>
       </section>
     </div>
@@ -292,7 +298,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
     <div class="api-box">
       <div>
         <div style="font-size:11px;color:var(--muted);font-weight:700">通信密钥 (Bearer API Key)</div>
-        <div class="api-key-code" id="api-key-val">{html.escape(api_key or "")}</div>
+        <div class="api-key-code" id="api-key-val">{api_key_str}</div>
       </div>
       <button class="button primary" type="button" data-copy="api-key-val" data-orig="复制 Key">复制 Key</button>
     </div>
@@ -313,13 +319,13 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
     <div class="config-grid">
       <div class="card">
         <div class="card-head"><span class="step">C</span><div><h2>Clash / Mihomo</h2><p>完整配置文件</p></div></div>
-        ''' + field('clash-config', clash, 'config') + '''
-        <div class="actions">''' + copy('clash-config') + '''<a class="button" href="clash.yaml" download="clash.yaml">下载 ↓</a></div>
+        {field('clash-config', clash, 'config')}
+        <div class="actions">{copy('clash-config')}<a class="button" href="clash.yaml" download="clash.yaml">下载 ↓</a></div>
       </div>
       <div class="card">
         <div class="card-head"><span class="step">S</span><div><h2>Sing-box</h2><p>出站 Outbounds JSON</p></div></div>
-        ''' + field('sing-config', sing, 'config') + '''
-        <div class="actions">''' + copy('sing-config') + '''<a class="button" href="sing-box.json" download="sing-box.json">下载 ↓</a></div>
+        {field('sing-config', sing, 'config')}
+        <div class="actions">{copy('sing-config')}<a class="button" href="sing-box.json" download="sing-box.json">下载 ↓</a></div>
       </div>
     </div>
   </section>
@@ -328,7 +334,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
 <div class="security">私密提示 · 链接和二维码包含连接凭据，请勿公开分享或发送截图给他人。</div>
 <p id="copy-status" class="status" role="status" aria-live="polite"></p>
 <footer><span>HYSTERIA 2 / CLUSTER AGENT PORTAL</span><span>配置由你的服务器动态生成</span></footer>
-</main><script>''' + SCRIPT + '</script></body></html>'
+</main><script>{SCRIPT}</script></body></html>'''
 
 
 def login_html(token, error_msg=None):
