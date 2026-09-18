@@ -19,6 +19,10 @@
   - **Clash.Meta / Mihomo** (Clash Verge Rev) 节点配置片段
   - **Sing-box** (SFA / SFI) Outbound 节点配置片段
   - 安装完成显示私密 HTTPS 信息页地址和随机登录凭据；二维码、订阅和配置统一在登录后的网页查看。
+- 🏢 **多租户集群 Agent 节点模式（电商/多用户对接）**：
+  - 支持作为分布式集群节点接入发卡商城或统一控制台（如 `pay.isoziyuan.com`）。
+  - 内置高性能 REST API（`/api/v1/users/create`, `renew`, `delete`, `node/meta`）与 Hysteria 2 本地 HTTP 动态鉴权。
+  - 用户开通、续费与注销实时生效，**零中断、无需重启 Hysteria 2 服务**。
 - 🛠️ **全生命周期管理**：Systemd 服务自动守护、开机自启、内核 UDP 缓冲与参数调优、一键升级、实时日志监控与彻底卸载。
 
 ---
