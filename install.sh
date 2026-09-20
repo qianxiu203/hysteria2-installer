@@ -775,7 +775,13 @@ document.querySelectorAll('.btn-user-connect').forEach(btn => {
     uModal.classList.add('show');
     
     try {
-      const res = await fetch('/' + token + '/user-config?user_id=' + encodeURIComponent(uid));
+      const res = await fetch('/' + token + '/user-config?user_id=' + encodeURIComponent(uid), { credentials: 'same-origin' });
+      if (res.status === 401) {
+        throw new Error('登录状态已失效，请刷新页面重新登录');
+      }
+      if (!res.ok) {
+        throw new Error('网络请求异常 (HTTP ' + res.status + ')');
+      }
       const json = await res.json();
       if (!json.ok) throw new Error(json.error || '加载失败');
       
@@ -1329,7 +1335,7 @@ def content_policy(extra_script=None):
     scripts = ["'sha256-" + digest(SCRIPT) + "'", "'sha256-" + digest(LOGIN_SCRIPT) + "'", "'sha256-" + digest(USER_SCRIPT) + "'"]
     if extra_script:
         scripts.append("'sha256-" + digest(extra_script) + "'")
-    return ("default-src 'none'; img-src 'self' data:; style-src 'sha256-" + digest(STYLE)
+    return ("default-src 'none'; connect-src 'self'; img-src 'self' data:; style-src 'sha256-" + digest(STYLE)
             + "'; script-src " + " ".join(scripts)
             + "; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 
