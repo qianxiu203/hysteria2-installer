@@ -54,6 +54,8 @@ assert "test_user_1" in user_page
 assert "VIP 测试用户" in user_page
 assert "u-hy2-uri" in user_page
 assert html.escape(u_uri) in user_page
+assert "u-clash-sub" in user_page
+assert f"clash.yaml?k={k}" in user_page
 assert "clash-test_user_1.yaml" in user_page
 print("[✓] 独立用户个人专属页面渲染正常")
 

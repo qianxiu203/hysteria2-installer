@@ -826,12 +826,17 @@ document.querySelectorAll('.btn-user-connect').forEach(btn => {
               </div>
             </div>
             <div>
-              <div style="font-size:12px;font-weight:700;color:var(--ink);margin-bottom:4px">Clash 专属配置 / 订阅:</div>
-              <textarea id="um-clash" class="link" style="height:75px;font-size:11px" readonly>${json.clash}</textarea>
-              <div style="margin-top:6px;display:flex;gap:8px">
-                <button class="button" style="padding:6px 14px;font-size:11px" type="button" data-modal-copy="um-clash">复制配置</button>
-                <a class="button" style="padding:6px 14px;font-size:11px" href="/${token}/u/${encodeURIComponent(uid)}/clash.yaml?k=${userKey}" download="clash-${uid}.yaml">下载配置 ↓</a>
+              <div style="font-size:12px;font-weight:700;color:var(--ink);margin-bottom:4px">Clash / Mihomo 专属订阅链接:</div>
+              <div class="input-with-action">
+                <input type="text" id="um-clash-sub" value="${location.origin}/${token}/u/${encodeURIComponent(uid)}/clash.yaml?k=${userKey}" readonly style="font-size:11px;height:36px">
+                <button class="button primary" style="padding:0 12px;height:36px;font-size:11px" type="button" data-modal-copy="um-clash-sub">复制订阅</button>
+                <a class="button" style="padding:0 10px;height:36px;font-size:11px" href="/${token}/u/${encodeURIComponent(uid)}/clash.yaml?k=${userKey}" download="clash-${uid}.yaml">下载 ↓</a>
               </div>
+              <details style="margin-top:6px">
+                <summary style="font-size:11px;color:var(--muted)">查看/复制配置文本</summary>
+                <textarea id="um-clash" class="link" style="height:65px;font-size:10px;margin-top:4px" readonly>${json.clash}</textarea>
+                <div style="margin-top:4px"><button class="button" style="padding:2px 8px;font-size:10px" type="button" data-modal-copy="um-clash">复制文本</button></div>
+              </details>
             </div>
           </div>
         </div>
@@ -1264,6 +1269,8 @@ def user_page_html(server_name, host, listen_port, obfs_badge, uid, uinfo, uri, 
         traffic_display = f"""<div>{format_bytes(used_bytes)} <span style="font-size:12px;color:var(--muted)">(不限制总流量)</span></div>"""
 
     note = uinfo.get("note") or "-"
+    sub_port = uinfo.get("subscription_port") or 8443
+    clash_sub_url = f"https://{host}:{sub_port}/{token}/u/{quote(uid)}/clash.yaml?k={user_key}"
 
     return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>个人专属连接 · {html.escape(uid)}</title><style>{STYLE}</style></head><body><main style="max-width:860px">
 <nav class="topbar"><div class="brand"><span class="logo">H₂</span> HYSTERIA <span> / 个人连接中心</span></div><div>{status_html}</div></nav>
@@ -1305,12 +1312,17 @@ def user_page_html(server_name, host, listen_port, obfs_badge, uid, uinfo, uri, 
     </section>
 
     <section class="card">
-      <div class="card-head"><span class="step">02</span><div><h2>Clash / Mihomo 配置与订阅</h2><p>适用于 Clash Verge / Clash.Meta 核心客户端</p></div></div>
-      <textarea id="u-clash-cfg" class="config" style="height:140px" readonly>{html.escape(clash)}</textarea>
+      <div class="card-head"><span class="step">02</span><div><h2>Clash / Mihomo 专属订阅</h2><p>适用于 Clash Verge / Clash.Meta 核心客户端 (一键订阅同步)</p></div></div>
+      <textarea id="u-clash-sub" class="link" style="height:68px" readonly>{html.escape(clash_sub_url)}</textarea>
       <div class="actions">
-        <button class="button primary" type="button" data-copy="u-clash-cfg">复制配置</button>
+        <button class="button primary" type="button" data-copy="u-clash-sub">复制订阅链接</button>
         <a class="button" href="/{token}/u/{quote(uid)}/clash.yaml?k={user_key}" download="clash-{uid}.yaml">下载 clash.yaml ↓</a>
       </div>
+      <details style="margin-top:10px">
+        <summary style="font-size:11px;color:var(--muted)">查看/复制原始配置源码 (备用)</summary>
+        <textarea id="u-clash-cfg" class="config" style="height:110px;margin-top:6px" readonly>{html.escape(clash)}</textarea>
+        <div style="margin-top:4px"><button class="button" type="button" data-copy="u-clash-cfg" style="padding:4px 10px;font-size:11px">复制配置文本</button></div>
+      </details>
     </section>
 
     <section class="card">
