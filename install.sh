@@ -678,6 +678,17 @@ footer{display:flex;justify-content:space-between;margin-top:32px;color:#879996;
   .login-card{padding:28px 20px;border-radius:20px}
   .tab-btn{padding:9px 12px;font-size:13px}
 }
+
+/* 专属连接弹窗与独立页面样式 */
+.modal-backdrop{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(18,43,49,0.48);backdrop-filter:blur(5px);display:none;align-items:center;justify-content:center;z-index:9999;padding:16px}
+.modal-backdrop.show{display:flex;animation:fadeIn .15s ease-out}
+.modal-card{width:100%;max-width:700px;background:#fff;border:1px solid var(--line);border-radius:22px;padding:26px;box-shadow:0 20px 48px rgba(18,43,49,0.18);max-height:90vh;overflow-y:auto;display:flex;flex-direction:column;gap:16px}
+.modal-head{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line);padding-bottom:14px}
+.modal-close{background:none;border:none;font-size:24px;color:var(--muted);cursor:pointer;padding:4px 8px;border-radius:6px;line-height:1}
+.modal-close:hover{background:#f0f5f4;color:var(--ink)}
+.user-connect-grid{display:grid;grid-template-columns:250px minmax(0,1fr);gap:18px;align-items:start}
+@media(max-width:660px){.user-connect-grid{grid-template-columns:1fr}}
+.user-meta-bar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;background:#f7faf9;padding:10px 14px;border-radius:10px;border:1px solid var(--line);font-size:12px}
 """
 
 SCRIPT = """
@@ -733,6 +744,110 @@ document.querySelectorAll('[data-copy]').forEach(button => {
     }
   });
 });
+
+// 专属连接弹窗逻辑
+const uModal = document.getElementById('user-modal');
+const uModalTitle = document.getElementById('um-title');
+const uModalSub = document.getElementById('um-sub');
+const uModalBody = document.getElementById('um-body');
+const uModalClose = document.getElementById('um-close');
+
+function closeUserModal() {
+  if (uModal) uModal.classList.remove('show');
+}
+if (uModalClose) uModalClose.addEventListener('click', closeUserModal);
+if (uModal) {
+  uModal.addEventListener('click', (e) => {
+    if (e.target === uModal) closeUserModal();
+  });
+}
+
+document.querySelectorAll('.btn-user-connect').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const uid = btn.dataset.uid;
+    const token = btn.dataset.token;
+    const userKey = btn.dataset.key;
+    if (!uModal || !uModalBody) return;
+    
+    uModalTitle.textContent = '用户专属连接: ' + uid;
+    uModalSub.textContent = '正在获取专属配置与独立连接页...';
+    uModalBody.innerHTML = '<div style="text-align:center;padding:36px;color:var(--muted)">加载专属数据中...</div>';
+    uModal.classList.add('show');
+    
+    try {
+      const res = await fetch('/' + token + '/user-config?user_id=' + encodeURIComponent(uid));
+      const json = await res.json();
+      if (!json.ok) throw new Error(json.error || '加载失败');
+      
+      uModalSub.textContent = json.note ? ('备注: ' + json.note) : '专属独立配置与下载链接';
+      
+      const shareUrl = location.origin + '/' + token + '/u/' + encodeURIComponent(uid) + '?k=' + userKey;
+      
+      let trafficText = (json.traffic_limit > 0) 
+        ? ((json.traffic_used / (1024**2)).toFixed(1) + ' MB / ' + (json.traffic_limit / (1024**3)).toFixed(1) + ' GB')
+        : ((json.traffic_used / (1024**2)).toFixed(1) + ' MB (不限)');
+      let expireText = (json.expires_at < 2000000000) ? new Date(json.expires_at * 1000).toLocaleString() : '永久有效';
+      let ipText = (json.ip_limit > 0) ? (json.ip_limit + ' IP') : '不限';
+      
+      uModalBody.innerHTML = `
+        <div class="user-meta-bar">
+          <span>📅 到期: <b>${expireText}</b></span>
+          <span>📊 流量: <b>${trafficText}</b></span>
+          <span>📱 IP限制: <b>${ipText}</b></span>
+        </div>
+        
+        <div style="background:#eaf5ef;border:1px solid #c3ddd5;border-radius:12px;padding:12px 14px">
+          <div style="font-size:12px;font-weight:700;color:var(--accent);margin-bottom:6px">🌐 专属独立连接页面 (可直接发给客户):</div>
+          <div class="input-with-action">
+            <input type="text" id="um-share-url" value="${shareUrl}" readonly style="font-size:12px;height:38px">
+            <button class="button primary" style="padding:0 12px;height:38px;font-size:12px" type="button" data-modal-copy="um-share-url">复制页面链接</button>
+            <a class="button" style="padding:0 12px;height:38px;font-size:12px" href="${shareUrl}" target="_blank">打开页面 ↗</a>
+          </div>
+        </div>
+
+        <div class="user-connect-grid">
+          <div style="text-align:center;background:#fff;border:1px solid var(--line);border-radius:14px;padding:14px">
+            <div style="font-size:12px;font-weight:700;color:var(--ink);margin-bottom:8px">专属二维码扫码导入</div>
+            <div class="qr-frame" style="margin:0 auto;max-width:210px;padding:8px">${json.qr_svg || '<p style="color:var(--muted)">二维码生成中...</p>'}</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:8px">Shadowrocket / v2rayNG / Nekobox</div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:12px">
+            <div>
+              <div style="font-size:12px;font-weight:700;color:var(--ink);margin-bottom:4px">专属节点直链 (URI):</div>
+              <textarea id="um-uri" class="link" style="height:65px;font-size:11px" readonly>${json.uri}</textarea>
+              <div style="margin-top:6px;display:flex;gap:8px">
+                <button class="button primary" style="padding:6px 14px;font-size:11px" type="button" data-modal-copy="um-uri">复制直链</button>
+              </div>
+            </div>
+            <div>
+              <div style="font-size:12px;font-weight:700;color:var(--ink);margin-bottom:4px">Clash 专属配置 / 订阅:</div>
+              <textarea id="um-clash" class="link" style="height:75px;font-size:11px" readonly>${json.clash}</textarea>
+              <div style="margin-top:6px;display:flex;gap:8px">
+                <button class="button" style="padding:6px 14px;font-size:11px" type="button" data-modal-copy="um-clash">复制配置</button>
+                <a class="button" style="padding:6px 14px;font-size:11px" href="/${token}/u/${encodeURIComponent(uid)}/clash.yaml?k=${userKey}" download="clash-${uid}.yaml">下载配置 ↓</a>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+      
+      uModalBody.querySelectorAll('[data-modal-copy]').forEach(b => {
+        b.addEventListener('click', async () => {
+          const target = document.getElementById(b.dataset.modalCopy);
+          if (!target) return;
+          const text = target.value || target.textContent || '';
+          await navigator.clipboard.writeText(text);
+          const orig = b.textContent;
+          b.textContent = '已复制 ✓';
+          setTimeout(() => { b.textContent = orig; }, 1800);
+        });
+      });
+      
+    } catch (err) {
+      uModalBody.innerHTML = `<div style="text-align:center;padding:24px;color:var(--danger)">加载失败: ${err.message}</div>`;
+    }
+  });
+});
 """
 
 LOGIN_SCRIPT = """
@@ -748,6 +863,27 @@ function toggleSecret(id, btn) {
 }
 """
 
+USER_SCRIPT = """
+document.querySelectorAll('[data-copy]').forEach(button => {
+  button.addEventListener('click', async () => {
+    const field = document.getElementById(button.dataset.copy);
+    try {
+      const val = field.value || field.textContent || '';
+      await navigator.clipboard.writeText(val);
+      const orig = button.textContent;
+      button.textContent = '已复制 ✓';
+      setTimeout(() => { button.textContent = orig; }, 1800);
+    } catch (_) {
+      if (field.select) { field.focus(); field.select(); }
+    }
+  });
+});
+"""
+
+
+def user_view_key(secret, user_id):
+    return hmac.new(str(secret).encode(), f'uv:{user_id}'.encode(), hashlib.sha256).hexdigest()[:16]
+
 
 def format_bytes(b):
     if b < 1024:
@@ -760,7 +896,7 @@ def format_bytes(b):
         return f"{b/1024**3:.2f} GB"
 
 
-def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token=""):
+def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token="", session_secret=""):
     def field(identifier, value, kind="link"):
         return f'<textarea id="{identifier}" class="{kind}" aria-label="{identifier}" readonly spellcheck="false">{html.escape(value)}</textarea>'
     def copy(identifier):
@@ -824,6 +960,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
             traffic_display = f"""<div>{format_bytes(used_bytes)} <span style="font-size:11px;color:var(--muted)">(不限)</span></div>"""
 
         note = u.get("note") or "-"
+        user_key = user_view_key(session_secret, uid) if session_secret else ""
         
         user_rows.append(f"""<tr>
           <td><strong>{html.escape(uid)}</strong><div style="font-size:11px;color:var(--muted)">{html.escape(note)}</div></td>
@@ -833,6 +970,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
           <td>{expires_str}</td>
           <td><code style="font-size:11px">{html.escape(u.get("password","")[:4] + "****" + u.get("password","")[-4:])}</code></td>
           <td>
+            <button class="button primary btn-user-connect" style="padding:4px 10px;font-size:11px;margin-right:6px" type="button" data-uid="{html.escape(uid)}" data-token="{token}" data-key="{user_key}">专属连接</button>
             <form method="POST" action="/{token}/manage-user" style="display:inline" onsubmit="return confirm('确定注销此用户？')">
               <input type="hidden" name="action" value="delete">
               <input type="hidden" name="user_id" value="{html.escape(uid)}">
@@ -1054,6 +1192,21 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
 
 <div class="security">私密提示 · 链接和二维码包含连接凭据，请勿公开分享或发送截图给他人。</div>
 <p id="copy-status" class="status" role="status" aria-live="polite"></p>
+
+<!-- 专属用户连接模态框 -->
+<div class="modal-backdrop" id="user-modal">
+  <div class="modal-card">
+    <div class="modal-head">
+      <div>
+        <h2 id="um-title" style="margin:0;font-size:18px">专属用户连接</h2>
+        <p id="um-sub" style="font-size:12px;margin-top:2px;color:var(--muted)"></p>
+      </div>
+      <button class="modal-close" type="button" id="um-close">&times;</button>
+    </div>
+    <div id="um-body"></div>
+  </div>
+</div>
+
 <footer><span>HYSTERIA 2 / CLUSTER AGENT PORTAL</span><span>配置由你的服务器动态生成</span></footer>
 </main><script>{SCRIPT}</script></body></html>"""
 
@@ -1075,13 +1228,108 @@ def login_html(token, error_msg=None):
 <script>{LOGIN_SCRIPT}</script></body></html>'''
 
 
+def user_page_html(server_name, host, listen_port, obfs_badge, uid, uinfo, uri, clash, sing, qr_svg, token, user_key):
+    used_bytes = int(uinfo.get("used_bytes", 0))
+    limit_bytes = int(uinfo.get("limit_bytes", 0))
+    now_ts = int(time.time())
+    is_traffic_ok = limit_bytes == 0 or used_bytes < limit_bytes
+    is_time_ok = uinfo.get("expires_at", 0) >= now_ts
+    is_active = uinfo.get("status") == "active" and is_time_ok and is_traffic_ok
+
+    if not is_traffic_ok:
+        status_html = '<span class="status-pill expired">流量已超额</span>'
+    elif not is_time_ok:
+        status_html = '<span class="status-pill expired">服务已到期</span>'
+    elif uinfo.get("status") != "active":
+        status_html = '<span class="status-pill expired">账号已停用</span>'
+    else:
+        status_html = '<span class="status-pill active">运行正常</span>'
+
+    expires_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(uinfo.get("expires_at", 0))) if uinfo.get("expires_at", 0) < 2000000000 else "永久有效"
+    ip_limit = uinfo.get("ip_limit", 0)
+    ip_limit_str = f"{ip_limit} 台设备" if ip_limit > 0 else "不限制"
+
+    if limit_bytes > 0:
+        percent = min(round((used_bytes / limit_bytes) * 100), 100)
+        bar_class = "danger" if percent >= 90 else ""
+        traffic_display = f"""<div>{format_bytes(used_bytes)} / {format_bytes(limit_bytes)} <span style="font-size:12px;color:var(--muted)">({percent}%)</span></div>
+        <div class="traffic-bar" style="width:100%;height:8px"><div class="traffic-fill {bar_class}" style="width:{percent}%"></div></div>"""
+    else:
+        traffic_display = f"""<div>{format_bytes(used_bytes)} <span style="font-size:12px;color:var(--muted)">(不限制总流量)</span></div>"""
+
+    note = uinfo.get("note") or "-"
+
+    return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>个人专属连接 · {html.escape(uid)}</title><style>{STYLE}</style></head><body><main style="max-width:860px">
+<nav class="topbar"><div class="brand"><span class="logo">H₂</span> HYSTERIA <span> / 个人连接中心</span></div><div>{status_html}</div></nav>
+<header class="hero"><div class="eyebrow">HYSTERIA 2 CLIENT ACCESS</div><h1>{html.escape(uid)}</h1><p>专属节点连接凭据与客户端配置 · 备注: {html.escape(note)}</p></header>
+
+<!-- 配额用量卡片 -->
+<section class="card" style="margin-bottom:22px">
+  <div class="user-header" style="margin-bottom:12px">
+    <h2>账号服务状态</h2>
+    <div>{status_html}</div>
+  </div>
+  <div class="user-meta-bar" style="font-size:13px;padding:14px;background:#f8fbfb">
+    <div style="flex:1;min-width:180px">📅 有效期至: <b>{expires_str}</b></div>
+    <div style="flex:1;min-width:180px">📱 同时在线限制: <b>{ip_limit_str}</b></div>
+    <div style="flex:2;min-width:220px">📊 流量消耗: {traffic_display}</div>
+  </div>
+</section>
+
+<div class="layout" style="grid-template-columns:300px minmax(0,1fr)">
+  <!-- 扫码卡片 -->
+  <section class="card qr-card" style="margin-top:0">
+    <div class="eyebrow">QUICK CONNECT</div>
+    <h2>扫码快速导入</h2>
+    <p class="hint">支持 v2rayNG / Shadowrocket / Nekobox</p>
+    <div class="qr-frame" style="margin:16px 0">{qr_svg}</div>
+    <p class="hint">在客户端点击右上角扫描即可直接接入</p>
+    <div class="tags"><span class="tag">Hysteria 2</span><span class="tag">专属认证</span><span class="tag">{obfs_badge}</span></div>
+  </section>
+
+  <!-- 直链与客户端配置 -->
+  <div class="stack">
+    <section class="card">
+      <div class="card-head"><span class="step">01</span><div><h2>节点直链 (URI)</h2><p>全平台通用直链 (点击一键导入/剪贴板导入)</p></div></div>
+      <textarea id="u-hy2-uri" class="link" readonly>{html.escape(uri)}</textarea>
+      <div class="actions">
+        <button class="button primary" type="button" data-copy="u-hy2-uri">复制直链</button>
+      </div>
+      <p class="note">{html.escape(host)} · UDP {int(listen_port)}</p>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><span class="step">02</span><div><h2>Clash / Mihomo 配置与订阅</h2><p>适用于 Clash Verge / Clash.Meta 核心客户端</p></div></div>
+      <textarea id="u-clash-cfg" class="config" style="height:140px" readonly>{html.escape(clash)}</textarea>
+      <div class="actions">
+        <button class="button primary" type="button" data-copy="u-clash-cfg">复制配置</button>
+        <a class="button" href="/{token}/u/{quote(uid)}/clash.yaml?k={user_key}" download="clash-{uid}.yaml">下载 clash.yaml ↓</a>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><span class="step">03</span><div><h2>Sing-box 出站配置</h2><p>适用 SFI / SFA / Sing-box 客户端</p></div></div>
+      <textarea id="u-sing-cfg" class="config" style="height:140px" readonly>{html.escape(sing)}</textarea>
+      <div class="actions">
+        <button class="button primary" type="button" data-copy="u-sing-cfg">复制配置</button>
+        <a class="button" href="/{token}/u/{quote(uid)}/sing-box.json?k={user_key}" download="sing-box-{uid}.json">下载 sing-box.json ↓</a>
+      </div>
+    </section>
+  </div>
+</div>
+
+<div class="security">私密提示 · 该页面为你的个人节点专属连接页面，包含连接密钥，请妥善保管。</div>
+<footer><span>HYSTERIA 2 / PERSONAL PORTAL</span><span>由你的专属服务器动态生成</span></footer>
+</main><script>{USER_SCRIPT}</script></body></html>"""
+
+
 def content_policy(extra_script=None):
     def digest(value):
         return base64.b64encode(hashlib.sha256(value.encode()).digest()).decode()
-    scripts = ["'sha256-" + digest(SCRIPT) + "'", "'sha256-" + digest(LOGIN_SCRIPT) + "'"]
+    scripts = ["'sha256-" + digest(SCRIPT) + "'", "'sha256-" + digest(LOGIN_SCRIPT) + "'", "'sha256-" + digest(USER_SCRIPT) + "'"]
     if extra_script:
         scripts.append("'sha256-" + digest(extra_script) + "'")
-    return ("default-src 'none'; img-src 'self'; style-src 'sha256-" + digest(STYLE)
+    return ("default-src 'none'; img-src 'self' data:; style-src 'sha256-" + digest(STYLE)
             + "'; script-src " + " ".join(scripts)
             + "; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 
@@ -1202,7 +1450,7 @@ def prepare(meta_path, port, node_api_key=None):
             'note': 'Master Admin'
         }
     }
-    page = page_html(m, uri, subscription, clash, sing, users=users, api_key=api_key, token=token)
+    page = page_html(m, uri, subscription, clash, sing, users=users, api_key=api_key, token=token, session_secret=session_secret)
     auth = base64.b64encode(f'{user}:{password}'.encode())
 
     data = dict(port=int(port), token=token, auth_hash=hashlib.sha256(auth).hexdigest(),
@@ -1245,7 +1493,7 @@ def refresh(meta_path):
                 'note': 'Master Admin'
             }
         }
-    data['page'] = page_html(m, uri, subscription, clash, sing, users=data['users'], api_key=data['api_key'], token=data['token'])
+    data['page'] = page_html(m, uri, subscription, clash, sing, users=data['users'], api_key=data['api_key'], token=data['token'], session_secret=data.get('session_secret', ''))
     
     temporary = path.with_suffix('.tmp')
     temporary.write_text(json.dumps(data, ensure_ascii=False))
@@ -1293,7 +1541,7 @@ def serve(path):
             u_copy['online_ips'] = user_ips
             display_users[uid] = u_copy
 
-        data['page'] = page_html(m, uri, subscription, clash, sing, users=display_users, api_key=data.get('api_key'), token=data['token'])
+        data['page'] = page_html(m, uri, subscription, clash, sing, users=display_users, api_key=data.get('api_key'), token=data['token'], session_secret=session_secret)
         save_data()
 
     def sign_session(token):
@@ -1596,6 +1844,85 @@ def serve(path):
             subpath = self.path[len(prefix):]
             auth_header = self.headers.get('Authorization', '')
             is_client_api = subpath in ('clash.yaml', 'sing-box.json') or auth_header.startswith('Basic ')
+
+            # 1. 专属用户独立页面与客户端直连下载路由 (可免管理员登录凭证，支持 ?k= 访问)
+            if subpath.startswith('u/'):
+                user_rest = subpath[2:].split('?', 1)[0]
+                parts = user_rest.split('/', 1)
+                target_uid = parts[0]
+                action_file = parts[1] if len(parts) > 1 else ''
+
+                u = data.get('users', {}).get(target_uid)
+                if not u:
+                    return self.reply(404, b'User not found')
+
+                query = parse_qs(self.path.split('?', 1)[1]) if '?' in self.path else {}
+                k_val = query.get('k', [''])[0]
+                expected_k = user_view_key(session_secret, target_uid)
+
+                if not self.is_authenticated() and not (k_val and hmac.compare_digest(k_val, expected_k)):
+                    return self.reply(403, b'Access denied: invalid key')
+
+                m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+                pwd = u.get('password', '')
+                uri, clash_yaml, sing_json = artifacts(m, auth_override=pwd, name_override=f"Hy2-{target_uid}")
+
+                if action_file == 'clash.yaml':
+                    return self.reply(200, clash_yaml.encode('utf-8'), 'application/yaml')
+                elif action_file == 'sing-box.json':
+                    return self.reply(200, sing_json.encode('utf-8'), 'application/json')
+                elif action_file == 'qr.svg':
+                    try:
+                        qr_bytes = subprocess.run(['qrencode', '-t', 'SVG', '-o', '-'], input=uri.encode(), capture_output=True, check=True).stdout
+                        return self.reply(200, qr_bytes, 'image/svg+xml')
+                    except Exception:
+                        return self.reply(500, b'QR generation failed')
+                elif action_file == '':
+                    try:
+                        qr_svg = subprocess.run(['qrencode', '-t', 'SVG', '-o', '-'], input=uri.encode(), capture_output=True, check=True).stdout.decode('utf-8')
+                    except Exception:
+                        qr_svg = ''
+                    server_name = m.get('server_name') or m.get('public_ip', 'localhost')
+                    host = m.get('public_ip', server_name) if m.get('is_insecure') else server_name
+                    listen_port = m.get('listen_port', 19984)
+                    obfs_badge = "Salamander" if m.get('obfs_password') else "QUIC"
+                    page = user_page_html(server_name, host, listen_port, obfs_badge, target_uid, u, uri, clash_yaml, sing_json, qr_svg, data['token'], expected_k)
+                    return self.reply(200, page.encode('utf-8'), 'text/html; charset=utf-8')
+                else:
+                    return self.reply(404, b'Not found')
+
+            # 2. 用户专属配置 API (供管理后台弹窗使用，需管理员已登录认证)
+            if subpath == 'user-config' or subpath.startswith('user-config?'):
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                query = parse_qs(self.path.split('?', 1)[1]) if '?' in self.path else {}
+                target_uid = query.get('user_id', [''])[0].strip()
+                u = data.get('users', {}).get(target_uid)
+                if not u:
+                    return self.reply_json(404, {'ok': False, 'error': 'User not found'})
+
+                m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+                pwd = u.get('password', '')
+                uri, clash_yaml, sing_json = artifacts(m, auth_override=pwd, name_override=f"Hy2-{target_uid}")
+                qr_svg = ""
+                try:
+                    qr_svg = subprocess.run(['qrencode', '-t', 'SVG', '-o', '-'], input=uri.encode(), capture_output=True, check=True).stdout.decode('utf-8')
+                except Exception:
+                    pass
+
+                return self.reply_json(200, {
+                    'ok': True,
+                    'user_id': target_uid,
+                    'note': u.get('note', ''),
+                    'uri': uri,
+                    'clash': clash_yaml,
+                    'sing_box': sing_json,
+                    'qr_svg': qr_svg,
+                    'expires_at': u.get('expires_at', 0),
+                    'traffic_used': u.get('used_bytes', 0),
+                    'traffic_limit': u.get('limit_bytes', 0),
+                    'ip_limit': u.get('ip_limit', 0),
+                })
 
             if not self.is_authenticated():
                 if is_client_api:
