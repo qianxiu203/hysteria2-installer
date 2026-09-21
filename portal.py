@@ -375,6 +375,35 @@ pollTrafficSpeed();
 const gostBadge = document.getElementById('gost-badge');
 const proxyTbody = document.getElementById('proxy-tbody');
 const proxyForm = document.getElementById('proxy-form');
+const btnInstallGost = document.getElementById('btn-install-gost');
+
+if (btnInstallGost) {
+  btnInstallGost.addEventListener('click', async () => {
+    if (!confirm('确定要一键安装/更新 GOST 服务吗？\n系统将自动检测架构、下载官方核心并配置开机自启。')) return;
+    btnInstallGost.disabled = true;
+    const origText = btnInstallGost.textContent;
+    btnInstallGost.textContent = '⏳ 正在安装 GOST...';
+    try {
+      const res = await fetch(location.pathname + 'install-gost', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+      });
+      const json = await res.json();
+      if (json.ok) {
+        alert(json.message || 'GOST 安装成功！服务已就绪。');
+        loadProxyServices();
+      } else {
+        alert(json.error || '安装失败，请检查服务器网络或日志');
+      }
+    } catch (e) {
+      alert('安装请求异常: ' + e.message);
+    } finally {
+      btnInstallGost.disabled = false;
+      btnInstallGost.textContent = origText;
+    }
+  });
+}
 
 async function loadProxyServices() {
   if (!proxyTbody) return;
@@ -389,14 +418,25 @@ async function loadProxyServices() {
         gostBadge.textContent = '● 未安装 gost';
         gostBadge.style.background = '#fff1f0';
         gostBadge.style.color = '#cf3c3c';
+        if (btnInstallGost) {
+          btnInstallGost.style.display = 'inline-flex';
+          btnInstallGost.textContent = '⚡ 一键安装 GOST';
+        }
       } else if (json.gost_active) {
         gostBadge.textContent = '● gost 运行中';
         gostBadge.style.background = '#eaf3de';
         gostBadge.style.color = '#27500a';
+        if (btnInstallGost) {
+          btnInstallGost.style.display = 'none';
+        }
       } else {
         gostBadge.textContent = '● gost 未启动';
         gostBadge.style.background = '#f1efe8';
         gostBadge.style.color = '#5f5e5a';
+        if (btnInstallGost) {
+          btnInstallGost.style.display = 'inline-flex';
+          btnInstallGost.textContent = '🔄 重启/修复 GOST';
+        }
       }
     }
 
@@ -725,6 +765,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
 <div class="tab-bar">
   <button class="tab-btn active" data-tab="connect">🚀 节点导入 (Connect)</button>
   <button class="tab-btn" data-tab="users">👥 多用户管理 ({active_count}/{len(users)})</button>
+  <button class="tab-btn" data-tab="proxies">🌐 入站代理 & WARP</button>
   <button class="tab-btn" data-tab="cluster">🔑 通用 REST API 对接</button>
   <button class="tab-btn" data-tab="configs">⚙️ 高级配置</button>
 </div>
@@ -787,74 +828,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
     </div>
 
     <!-- 手动添加用户卡片 (结构化字段 + 随机生成辅助) -->
-    <!-- WARP 出口分流全局控制卡片 -->
-    <div class="switch-box" id="warp-box">
-      <div class="switch-info">
-        <div class="switch-title">
-          <span>⚡ Cloudflare WARP 智能分流出口 (AI 加速)</span>
-          <span class="status-pill" id="warp-badge" style="background:#eaf3de;color:#27500a">检测中...</span>
-        </div>
-        <div class="switch-desc">
-          开启后 OpenAI (ChatGPT), Claude, Google Gemini 流量自动经由 Cloudflare 干净网络出口，有效防止封号与验证码；普通网页与下载仍维持 VPS 原生高速直连。
-        </div>
-      </div>
-      <div style="display:flex;gap:10px;align-items:center">
-        <button class="toggle-btn off" id="btn-toggle-warp" type="button">切换中...</button>
-      </div>
-    </div>
 
-    <!-- 入站代理服务管理卡片 (gost 驱动) -->
-    <div class="switch-box proxy-card" id="proxy-box">
-      <div class="switch-info">
-        <div class="switch-title">
-          <span>🌐 入站代理服务 (SOCKS5 / HTTP / HTTPS)</span>
-          <span class="status-pill" id="gost-badge" style="background:#f1efe8;color:#5f5e5a">检测中...</span>
-        </div>
-        <div class="switch-desc">
-          让服务器额外提供 SOCKS5 / HTTP / HTTPS 代理端口，客户端无需安装 Hysteria 也能直接作为普通代理使用（独立账号密码认证）。
-        </div>
-      </div>
-    </div>
-
-    <details style="margin-bottom:18px">
-      <summary class="button" style="margin-bottom:12px;list-style:none">＋ 添加代理服务</summary>
-      <form class="modal-form" id="proxy-form" style="margin-bottom:14px">
-        <div class="form-field">
-          <label for="ptype">协议类型</label>
-          <select id="ptype" name="type" style="height:42px;padding:0 12px;border:1px solid var(--line);border-radius:9px;font-size:13px;background:#fff">
-            <option value="socks5">SOCKS5</option>
-            <option value="http">HTTP</option>
-            <option value="https">HTTPS</option>
-          </select>
-        </div>
-        <div class="form-field">
-          <label for="pport">监听端口</label>
-          <input id="pport" name="port" type="number" min="1" max="65535" placeholder="例如 1080" required>
-        </div>
-        <div class="form-field">
-          <label for="puser">账号 <span>留空自动生成</span></label>
-          <input id="puser" name="username" placeholder="留空自动生成">
-        </div>
-        <div class="form-field">
-          <label for="ppass">密码 <span>留空自动生成</span></label>
-          <input id="ppass" name="password" placeholder="留空自动生成">
-        </div>
-        <div class="form-field-full">
-          <label for="pnote">备注 <span>选填</span></label>
-          <input id="pnote" name="note" placeholder="例如: 备用HTTP代理 / 给某客户">
-        </div>
-        <div class="form-field-full" style="margin-top:6px">
-          <button class="button primary" style="width:100%;height:44px;font-size:14px" type="submit">立即创建代理服务 →</button>
-        </div>
-      </form>
-    </details>
-
-    <div class="user-table-wrap" style="margin-bottom:20px">
-      <table class="proxy-table">
-        <thead><tr><th>类型</th><th>端口</th><th>账号</th><th>密码</th><th>备注</th><th>操作</th></tr></thead>
-        <tbody id="proxy-tbody"><tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px">正在加载代理服务...</td></tr></tbody>
-      </table>
-    </div>
 
     <details style="margin-bottom:18px">
       <summary class="button" style="margin-bottom:12px;list-style:none">＋ 手动添加/开通新用户</summary>
@@ -914,6 +888,85 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
         <thead><tr><th>用户标识</th><th>状态</th><th>IP 限制 (实时)</th><th>已用流量 / 配额</th><th>到期时间</th><th>连接密码</th><th>操作</th></tr></thead>
         <tbody>{users_table_html}</tbody>
       </table>
+    </div>
+  </section>
+</div>
+
+<!-- Tab 3: 入站代理与 WARP 扩展服务视图 (独立专区) -->
+<div class="tab-pane" id="pane-proxies">
+  <!-- 区块 1: 入站代理服务 (GOST 驱动) -->
+  <section class="card" style="margin-bottom:22px">
+    <div class="user-header">
+      <div>
+        <h2>🌐 入站代理服务 (GOST 驱动)</h2>
+        <p style="font-size:13px">让服务器额外提供独立 SOCKS5 / HTTP / HTTPS 代理端口，普通客户端直连即可使用</p>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <span class="status-pill" id="gost-badge" style="background:#f1efe8;color:#5f5e5a">检测中...</span>
+        <button class="button primary" id="btn-install-gost" type="button" style="padding:6px 14px;font-size:12px;display:none">⚡ 一键安装 GOST</button>
+      </div>
+    </div>
+
+    <details style="margin-bottom:18px">
+      <summary class="button" style="margin-bottom:12px;list-style:none">＋ 添加代理服务</summary>
+      <form class="modal-form" id="proxy-form" style="margin-bottom:14px">
+        <div class="form-field">
+          <label for="ptype">协议类型</label>
+          <select id="ptype" name="type" style="height:42px;padding:0 12px;border:1px solid var(--line);border-radius:9px;font-size:13px;background:#fff">
+            <option value="socks5">SOCKS5</option>
+            <option value="http">HTTP</option>
+            <option value="https">HTTPS</option>
+          </select>
+        </div>
+        <div class="form-field">
+          <label for="pport">监听端口</label>
+          <input id="pport" name="port" type="number" min="1" max="65535" placeholder="例如 1080" required>
+        </div>
+        <div class="form-field">
+          <label for="puser">账号 <span>留空自动生成</span></label>
+          <input id="puser" name="username" placeholder="留空自动生成">
+        </div>
+        <div class="form-field">
+          <label for="ppass">密码 <span>留空自动生成</span></label>
+          <input id="ppass" name="password" placeholder="留空自动生成">
+        </div>
+        <div class="form-field-full">
+          <label for="pnote">备注 <span>选填</span></label>
+          <input id="pnote" name="note" placeholder="例如: 备用HTTP代理 / 专属代理">
+        </div>
+        <div class="form-field-full" style="margin-top:6px">
+          <button class="button primary" style="width:100%;height:44px;font-size:14px" type="submit">立即创建代理服务 →</button>
+        </div>
+      </form>
+    </details>
+
+    <div class="user-table-wrap">
+      <table class="proxy-table">
+        <thead><tr><th>类型</th><th>端口</th><th>账号</th><th>密码</th><th>备注</th><th>操作</th></tr></thead>
+        <tbody id="proxy-tbody"><tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px">正在加载代理服务...</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 区块 2: Cloudflare WARP 智能分流出口 -->
+  <section class="card">
+    <div class="user-header">
+      <div>
+        <h2>⚡ Cloudflare WARP 智能分流出口 (AI 加速)</h2>
+        <p style="font-size:13px">智能分流主流 AI 大模型流量（ChatGPT、Claude、Gemini），普通网页直连保持原生高速</p>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <span class="status-pill" id="warp-badge" style="background:#eaf3de;color:#27500a">检测中...</span>
+        <button class="toggle-btn off" id="btn-toggle-warp" type="button">切换中...</button>
+      </div>
+    </div>
+    <div class="switch-box" id="warp-box" style="margin-bottom:0">
+      <div class="switch-info">
+        <div class="switch-title"><span>🛡️ 防封号与验证码保护机制</span></div>
+        <div class="switch-desc">
+          开启后，针对 OpenAI (chatgpt.com / openai.com / ai.com)、Anthropic (claude.ai)、Google (gemini.google.com / aistudio.google.com) 的出站流量将经由 Cloudflare 干净网络出口，有效避开数据中心 IP 拦截与高频 Cloudflare 盾；其余全球流量均维持 VPS 原生网卡直连。
+        </div>
+      </div>
     </div>
   </section>
 </div>
@@ -1798,6 +1851,66 @@ def serve(path):
                 except Exception as e:
                     return self.reply_json(500, {'ok': False, 'error': str(e)})
 
+            if self.path == prefix + 'install-gost':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                try:
+                    import platform
+                    machine = platform.machine().lower()
+                    if 'x86_64' in machine or 'amd64' in machine:
+                        arch = 'linux_amd64'
+                    elif 'aarch64' in machine or 'arm64' in machine:
+                        arch = 'linux_arm64'
+                    elif 'armv7' in machine:
+                        arch = 'linux_armv7'
+                    else:
+                        arch = 'linux_amd64'
+
+                    # 自动检测并下载 gost 最新稳定版
+                    install_cmd = f'''
+                    set -e
+                    ARCH="{arch}"
+                    TMP_DIR=$(mktemp -d)
+                    cd "$TMP_DIR"
+                    # 下载官方 release
+                    curl -sSL -m 60 "https://github.com/go-gost/gost/releases/download/v3.0.0-nightly.20240128/gost_3.0.0-nightly.20240128_${{ARCH}}.tar.gz" -o gost.tar.gz || \
+                    curl -sSL -m 60 "https://ghproxy.com/https://github.com/go-gost/gost/releases/download/v3.0.0-nightly.20240128/gost_3.0.0-nightly.20240128_${{ARCH}}.tar.gz" -o gost.tar.gz
+                    tar -xzf gost.tar.gz
+                    install -m 755 gost /usr/local/bin/gost
+                    rm -rf "$TMP_DIR"
+
+                    # 确保 systemd 服务存在
+                    cat > /etc/systemd/system/gost.service << 'SERVICE_EOF'
+[Unit]
+Description=GOST Proxy Service (SOCKS5/HTTP/HTTPS inbound)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/gost -C /etc/hysteria/gost.yml
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+                    systemctl daemon-reload
+                    systemctl enable gost
+                    '''
+                    res = subprocess.run(['bash', '-c', install_cmd], capture_output=True, text=True, timeout=120)
+                    if res.returncode != 0:
+                        err_detail = (res.stderr or res.stdout or '下载或安装失败').strip()
+                        return self.reply_json(500, {'ok': False, 'error': f'安装失败: {err_detail}'})
+
+                    # 重新生成 gost.yml 并启动服务
+                    write_gost_config()
+                    subprocess.run(['systemctl', 'restart', 'gost'], capture_output=True, timeout=10)
+
+                    return self.reply_json(200, {'ok': True, 'message': 'GOST 官方核心安装成功，服务已自动配置并启动！'})
+                except Exception as e:
+                    return self.reply_json(500, {'ok': False, 'error': f'执行异常: {str(e)}'})
+
             if self.path == prefix + 'manage-warp':
                 if not self.is_authenticated():
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
@@ -2190,3 +2303,4 @@ if __name__ == '__main__':
         refresh(sys.argv[2])
     else:
         serve(sys.argv[2])
+
