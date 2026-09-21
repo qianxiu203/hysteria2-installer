@@ -174,6 +174,39 @@ footer{display:flex;justify-content:space-between;margin-top:32px;color:#879996;
 .pm-code-box{display:flex;gap:6px;align-items:center;background:#fff;border:1px solid var(--line);border-radius:8px;padding:4px 6px 4px 10px;transition:border-color .15s}
 .pm-code-box:focus-within{border-color:var(--accent);box-shadow:0 0 0 2px rgba(8,127,116,0.1)}
 .pm-code-input{flex:1;min-width:0;border:none;background:transparent;font:11px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;color:#284d56;outline:none}
+
+/* WARP 与自定义分流模块高阶专业排版 */
+.warp-section { margin-top: 10px; }
+.warp-switch-card { background: #f6faf9; border: 1px solid #d3e7e2; border-radius: 14px; padding: 16px 20px; margin-bottom: 20px; }
+.warp-desc-title { font-size: 13.5px; font-weight: 750; color: #11342d; display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.warp-desc-text { font-size: 12.5px; color: #496861; line-height: 1.6; margin: 0; }
+
+.warp-rules-card { background: #ffffff; border: 1px solid var(--line); border-radius: 16px; padding: 22px; box-shadow: 0 4px 16px rgba(18, 43, 49, 0.03); }
+.warp-rules-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 10px; }
+.warp-rules-title-box { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.warp-rules-title { font-size: 14px; font-weight: 800; color: var(--ink); margin: 0; }
+.warp-count-badge { background: #eaf5ef; color: var(--accent); border: 1px solid #c0ded4; border-radius: 20px; padding: 3px 10px; font-size: 11.5px; font-weight: 700; }
+.warp-reset-btn { background: #fff; border: 1px solid var(--line); color: var(--muted); border-radius: 8px; padding: 5px 12px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all .15s ease; }
+.warp-reset-btn:hover { background: #f0f5f4; color: var(--ink); border-color: #b0d0c8; }
+
+.warp-add-form { display: flex; gap: 10px; margin-bottom: 14px; }
+@media(max-width: 600px) { .warp-add-form { flex-direction: column; } }
+.warp-domain-input { flex: 1; height: 42px; padding: 0 14px; border: 1.5px solid var(--line); border-radius: 10px; font-size: 13px; color: var(--ink); background: #fdfefe; outline: none; transition: all .15s ease; }
+.warp-domain-input:focus { border-color: var(--accent); background: #fff; box-shadow: 0 0 0 3px rgba(8, 127, 116, 0.12); }
+.warp-add-btn { height: 42px; padding: 0 20px; font-size: 13px; font-weight: 700; border-radius: 10px; background: var(--accent); color: #fff; border: none; cursor: pointer; white-space: nowrap; transition: all .15s ease; }
+.warp-add-btn:hover { filter: brightness(0.92); }
+
+.warp-presets-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 18px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.warp-preset-chip { display: inline-flex; align-items: center; gap: 4px; background: #f3f7f6; color: #2e554d; border: 1px solid #d4e5e1; border-radius: 14px; padding: 3px 10px; text-decoration: none; font-size: 11.5px; font-weight: 600; transition: all .15s ease; }
+.warp-preset-chip:hover { background: #e6f3ef; border-color: var(--accent); color: var(--accent); transform: translateY(-1px); }
+
+.warp-tags-wrap { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px; background: #fafcfb; border: 1px solid var(--line); border-radius: 12px; min-height: 48px; align-items: center; }
+.warp-tag-item { display: inline-flex; align-items: center; gap: 6px; background: #ffffff; border: 1.5px solid #cfe0dc; color: #184239; border-radius: 20px; padding: 5px 12px; font-size: 12.5px; font-weight: 650; box-shadow: 0 2px 6px rgba(18, 43, 49, 0.03); transition: all .15s ease; }
+.warp-tag-item:hover { border-color: #a8cfc6; box-shadow: 0 3px 8px rgba(18, 43, 49, 0.06); }
+.warp-tag-text { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: -0.01em; }
+.warp-tag-del { color: #d64545; text-decoration: none; font-size: 15px; line-height: 1; padding: 0 2px; font-weight: 800; cursor: pointer; border-radius: 50%; }
+.warp-tag-del:hover { color: #a82020; transform: scale(1.2); }
+
 """
 
 SCRIPT = """
@@ -281,9 +314,9 @@ function renderWarpRules(rules) {
     return;
   }
   warpTagsCloud.innerHTML = rules.map(d => {
-    return `<span style="display:inline-flex;align-items:center;gap:6px;background:#fff;border:1px solid #c9ded9;color:#184239;border-radius:20px;padding:4px 12px;font-size:12px;font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,0.03)">
-      <span>${d}</span>
-      <a href="javascript:void(0)" onclick="delWarpRule('${d}')" style="color:#cf3c3c;text-decoration:none;font-size:13px;font-weight:800;padding:0 2px" title="移除此域名">×</a>
+    return `<span class="warp-tag-item">
+      <span class="warp-tag-text">${d}</span>
+      <a href="javascript:void(0)" class="warp-tag-del" onclick="delWarpRule('${d}')" title="移除此域名">×</a>
     </span>`;
   }).join('');
 }
@@ -1166,7 +1199,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
   </section>
 
   <!-- 区块 2: Cloudflare WARP 智能分流出口 -->
-  <section class="card">
+  <section class="card warp-section">
     <div class="user-header">
       <div>
         <h2>⚡ Cloudflare WARP 智能分流出口 (AI 加速)</h2>
@@ -1174,49 +1207,47 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
       </div>
       <div style="display:flex;gap:10px;align-items:center">
         <span class="status-pill" id="warp-badge" style="background:#eaf3de;color:#27500a">检测中...</span>
-        <button class="button primary" id="btn-install-warp" type="button" style="padding:6px 14px;font-size:12px;display:none">⚡ 一键安装 WARP</button>
+        <button class="button primary" id="btn-install-warp" type="button" style="display:none">⚡ 一键安装 WARP</button>
         <button class="toggle-btn off" id="btn-toggle-warp" type="button">切换中...</button>
       </div>
     </div>
-    <div class="switch-box" id="warp-box" style="margin-bottom:16px">
-      <div class="switch-info">
-        <div class="switch-title"><span>🛡️ 出口路由与防封号保护机制</span></div>
-        <div class="switch-desc">
-          开启后，名单内的目标网站出站流量将经由 Cloudflare WARP 干净网络出口分流；其余全球网站维持原生网卡直连。
-        </div>
-      </div>
+
+    <!-- 机制说明卡片 -->
+    <div class="warp-switch-card">
+      <div class="warp-desc-title">🛡️ 出口路由与防封号保护机制</div>
+      <p class="warp-desc-text">
+        开启后，名单内的目标网站出站流量将由 Cloudflare WARP 干净网络出口分流，有效避开数据中心 IP 拦截与高频验证码挑战；其余全球网站维持原生网卡直连。
+      </p>
     </div>
 
-    <!-- 自定义分流规则管理专区 (标签云 + 快速增删) -->
-    <div style="background:#f8fbfb;border:1px solid var(--line);border-radius:14px;padding:18px">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">
-        <div style="font-size:13px;font-weight:700;color:var(--ink);display:flex;align-items:center;gap:6px">
-          <span>🎯 自定义分流域名列表 (WARP 出口)</span>
-          <span class="status-pill" id="warp-rules-count" style="font-size:11px;padding:2px 8px">加载中...</span>
+    <!-- 自定义分流规则管理面板 (类名化高阶质感) -->
+    <div class="warp-rules-card">
+      <div class="warp-rules-head">
+        <div class="warp-rules-title-box">
+          <span class="warp-rules-title">🎯 自定义分流域名列表 (走 WARP 出口)</span>
+          <span class="warp-count-badge" id="warp-rules-count">加载中...</span>
         </div>
-        <div style="display:flex;gap:6px">
-          <button class="button" id="btn-reset-warp-rules" type="button" style="padding:4px 10px;font-size:11px" title="恢复为系统推荐的常用 AI 域名规则">恢复预设</button>
-        </div>
+        <button class="warp-reset-btn" id="btn-reset-warp-rules" type="button" title="恢复为系统推荐的常用 AI 域名规则">恢复预设</button>
       </div>
 
       <!-- 添加新域名输入栏 -->
-      <form id="form-add-warp-rule" style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">
-        <input id="input-warp-domain" type="text" placeholder="输入要走 WARP 的域名，例如 netflix.com / bing.com" required style="flex:1;min-width:240px;height:36px;padding:0 12px;border:1px solid var(--line);border-radius:8px;font-size:13px;outline:none">
-        <button class="button primary" type="submit" style="padding:0 16px;height:36px;font-size:12px">＋ 添加分流域名</button>
+      <form class="warp-add-form" id="form-add-warp-rule">
+        <input class="warp-domain-input" id="input-warp-domain" type="text" placeholder="输入要走 WARP 的域名，例如 netflix.com / bing.com" required>
+        <button class="warp-add-btn" type="submit">＋ 添加分流域名</button>
       </form>
 
       <!-- 快捷预设一键添加 -->
-      <div style="font-size:11px;color:var(--muted);margin-bottom:12px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+      <div class="warp-presets-bar">
         <span>常用推荐快捷添加:</span>
-        <a href="javascript:void(0)" class="preset-rule" data-domain="netflix.com" style="color:var(--accent);text-decoration:none">+ Netflix</a>
-        <a href="javascript:void(0)" class="preset-rule" data-domain="disneyplus.com" style="color:var(--accent);text-decoration:none">+ Disney+</a>
-        <a href="javascript:void(0)" class="preset-rule" data-domain="spotify.com" style="color:var(--accent);text-decoration:none">+ Spotify</a>
-        <a href="javascript:void(0)" class="preset-rule" data-domain="bing.com" style="color:var(--accent);text-decoration:none">+ Bing/Copilot</a>
-        <a href="javascript:void(0)" class="preset-rule" data-domain="twitter.com" style="color:var(--accent);text-decoration:none">+ Twitter/X</a>
+        <a href="javascript:void(0)" class="warp-preset-chip preset-rule" data-domain="netflix.com">+ Netflix</a>
+        <a href="javascript:void(0)" class="warp-preset-chip preset-rule" data-domain="disneyplus.com">+ Disney+</a>
+        <a href="javascript:void(0)" class="warp-preset-chip preset-rule" data-domain="spotify.com">+ Spotify</a>
+        <a href="javascript:void(0)" class="warp-preset-chip preset-rule" data-domain="bing.com">+ Bing/Copilot</a>
+        <a href="javascript:void(0)" class="warp-preset-chip preset-rule" data-domain="twitter.com">+ Twitter/X</a>
       </div>
 
       <!-- 动态标签云容器 -->
-      <div id="warp-tags-cloud" style="display:flex;flex-wrap:wrap;gap:8px;min-height:38px;align-items:center">
+      <div class="warp-tags-wrap" id="warp-tags-cloud">
         <span style="font-size:12px;color:var(--muted)">正在拉取规则...</span>
       </div>
     </div>
