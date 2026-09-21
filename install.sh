@@ -462,7 +462,41 @@ outbounds:
     type: direct
     direct:
       mode: "4"
+  - name: warp-socks
+    type: socks5
+    socks5:
+      addr: 127.0.0.1:40000
+
+acl:
+  inline:
+    - block(geoip:private)
+    - block(geosite:private)
+    - direct-ipv4(all)
 EOF
+
+    # 写入 toggle_warp.sh 控制脚本，供 portal.py 或命令行无感知调用
+    cat > "$HY2_DIR/toggle_warp.sh" <<'EOTW'
+#!/usr/bin/env bash
+ACTION="$1" # 1: enable, 0: disable
+CONFIG="/etc/hysteria/config.yaml"
+[[ -f "$CONFIG" ]] || exit 1
+
+if [[ "$ACTION" == "1" ]]; then
+    which warp-cli >/dev/null 2>&1 && {
+        warp-cli status 2>/dev/null | grep -qi "connected" || warp-cli connect >/dev/null 2>&1 || true
+    }
+    if ! grep -q "warp-socks(domain:openai.com)" "$CONFIG"; then
+        sed -i '/block(geosite:private)/a \    - warp-socks(domain:openai.com)\n    - warp-socks(domain:chatgpt.com)\n    - warp-socks(domain:oaistatic.com)\n    - warp-socks(domain:oaiusercontent.com)\n    - warp-socks(domain:ai.com)\n    - warp-socks(domain:gemini.google.com)\n    - warp-socks(domain:aistudio.google.com)\n    - warp-socks(domain:generativelanguage.googleapis.com)\n    - warp-socks(domain:anthropic.com)\n    - warp-socks(domain:claude.ai)' "$CONFIG"
+        systemctl reload-or-restart hysteria-server 2>/dev/null || systemctl restart hysteria-server 2>/dev/null || true
+    fi
+else
+    if grep -q "warp-socks(domain:" "$CONFIG"; then
+        sed -i '/warp-socks(domain:/d' "$CONFIG"
+        systemctl reload-or-restart hysteria-server 2>/dev/null || systemctl restart hysteria-server 2>/dev/null || true
+    fi
+fi
+EOTW
+    chmod +x "$HY2_DIR/toggle_warp.sh"
 
     # 写入混淆（如果有）
     if [[ -n "$OBFS_PASSWORD" ]]; then
@@ -616,6 +650,14 @@ footer{display:flex;justify-content:space-between;margin-top:32px;color:#879996;
 /* 多用户与集群专属卡片样式 */
 .user-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;flex-wrap:wrap;gap:12px}
 .badge-count{background:var(--brand-bg);color:var(--accent);border:1px solid #c3ddd5;border-radius:20px;padding:4px 12px;font-size:12px;font-weight:700}
+.switch-box{display:flex;align-items:center;gap:12px;background:#f8fbfb;border:1px solid var(--line);border-radius:14px;padding:16px 20px;margin-bottom:20px;justify-content:space-between;flex-wrap:wrap}
+.switch-info{display:flex;flex-direction:column;gap:4px}
+.switch-title{font-size:14px;font-weight:700;color:var(--ink);display:flex;align-items:center;gap:8px}
+.switch-desc{font-size:12px;color:var(--muted)}
+.toggle-btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:8px 18px;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;border:1px solid transparent;transition:all .15s ease}
+.toggle-btn.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+.toggle-btn.off{background:#fff;color:var(--muted);border-color:var(--line)}
+.toggle-btn:hover{filter:brightness(.92)}
 .user-table-wrap{width:100%;overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:#fff}
 .user-table{width:100%;border-collapse:collapse;text-align:left;font-size:13px}
 .user-table th{background:#f8fbfb;padding:12px 14px;color:var(--muted);font-weight:700;border-bottom:1px solid var(--line);white-space:nowrap}
@@ -754,6 +796,56 @@ const uModalTitle = document.getElementById('um-title');
 const uModalSub = document.getElementById('um-sub');
 const uModalBody = document.getElementById('um-body');
 const uModalClose = document.getElementById('um-close');
+
+// WARP 状态与一键开关逻辑
+const warpBadge = document.getElementById('warp-badge');
+const btnToggleWarp = document.getElementById('btn-toggle-warp');
+
+async function checkWarpStatus() {
+  if (!warpBadge || !btnToggleWarp) return;
+  try {
+    const res = await fetch(location.pathname + 'warp-status', { credentials: 'same-origin' });
+    if (!res.ok) return;
+    const json = await res.json();
+    if (!json.ok) return;
+    if (json.enabled) {
+      warpBadge.textContent = json.connected ? ('● 运行中 (' + (json.ip || '已连通') + ')') : '● 正在连接 / 异常';
+      warpBadge.style.background = json.connected ? '#eaf3de' : '#fff1f0';
+      warpBadge.style.color = json.connected ? '#27500a' : '#cf3c3c';
+      btnToggleWarp.textContent = '已开启 (点击关闭)';
+      btnToggleWarp.className = 'toggle-btn on';
+    } else {
+      warpBadge.textContent = '○ 已停用 (直连模式)';
+      warpBadge.style.background = '#f1efe8';
+      warpBadge.style.color = '#5f5e5a';
+      btnToggleWarp.textContent = '已关闭 (点击开启)';
+      btnToggleWarp.className = 'toggle-btn off';
+    }
+  } catch (_) {}
+}
+
+if (btnToggleWarp) {
+  checkWarpStatus();
+  btnToggleWarp.addEventListener('click', async () => {
+    btnToggleWarp.disabled = true;
+    btnToggleWarp.textContent = '正在切换...';
+    try {
+      const res = await fetch(location.pathname + 'manage-warp', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'action=toggle'
+      });
+      const json = await res.json();
+      if (!json.ok) alert(json.error || '切换失败');
+    } catch (e) {
+      alert('操作失败: ' + e.message);
+    } finally {
+      btnToggleWarp.disabled = false;
+      checkWarpStatus();
+    }
+  });
+}
 
 function closeUserModal() {
   if (uModal) uModal.classList.remove('show');
@@ -1056,6 +1148,22 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
     </div>
 
     <!-- 手动添加用户卡片 (结构化字段 + 随机生成辅助) -->
+    <!-- WARP 出口分流全局控制卡片 -->
+    <div class="switch-box" id="warp-box">
+      <div class="switch-info">
+        <div class="switch-title">
+          <span>⚡ Cloudflare WARP 智能分流出口 (AI 加速)</span>
+          <span class="status-pill" id="warp-badge" style="background:#eaf3de;color:#27500a">检测中...</span>
+        </div>
+        <div class="switch-desc">
+          开启后 OpenAI (ChatGPT), Claude, Google Gemini 流量自动经由 Cloudflare 干净网络出口，有效防止封号与验证码；普通网页与下载仍维持 VPS 原生高速直连。
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <button class="toggle-btn off" id="btn-toggle-warp" type="button">切换中...</button>
+      </div>
+    </div>
+
     <details style="margin-bottom:18px">
       <summary class="button" style="margin-bottom:12px;list-style:none">＋ 手动添加/开通新用户</summary>
       <form class="modal-form" method="POST" action="/{token}/manage-user">
@@ -1810,8 +1918,27 @@ def serve(path):
             if not self.check_rate_limit(bucket='web'):
                 return self.reply(429, b'Too many requests')
 
-            # 3. Web 网页版直接增删用户通道
+            # 3. Web 网页版管理通道 (用户管理 / WARP 开关)
             prefix = '/' + data['token'] + '/'
+            if self.path == prefix + 'manage-warp':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                try:
+                    with data_lock:
+                        curr = data.get('warp_enabled', False)
+                        data['warp_enabled'] = not curr
+                        new_state = data['warp_enabled']
+                    save_data()
+                    # 触发后台更新 Hysteria 2 ACL 规则并重载
+                    try:
+                        subprocess.Popen(['bash', '/etc/hysteria/toggle_warp.sh', '1' if new_state else '0'],
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except Exception:
+                        pass
+                    return self.reply_json(200, {'ok': True, 'enabled': new_state})
+                except Exception as e:
+                    return self.reply_json(500, {'ok': False, 'error': str(e)})
+
             if self.path == prefix + 'manage-user':
                 if not self.is_authenticated():
                     return self.reply(401, b'Unauthorized')
@@ -1970,6 +2097,29 @@ def serve(path):
                     return self.reply(404, b'Not found')
 
             # 2. 用户专属配置 API (供管理后台弹窗使用，需管理员已登录认证)
+            if subpath == 'warp-status':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                with data_lock:
+                    enabled = data.get('warp_enabled', False)
+                # 简单本地探测 40000 端口连通性
+                connected = False
+                outbound_ip = ''
+                if enabled:
+                    try:
+                        import urllib.request
+                        proxy_handler = urllib.request.ProxyHandler({'http': 'socks5h://127.0.0.1:40000',
+                                                                     'https': 'socks5h://127.0.0.1:40000'})
+                        opener = urllib.request.build_opener(proxy_handler)
+                        req = urllib.request.Request('https://api4.ipify.org', headers={'User-Agent': 'curl/7.88.1'})
+                        with opener.open(req, timeout=3) as resp:
+                            if resp.status == 200:
+                                outbound_ip = resp.read().decode('utf-8').strip()
+                                connected = True
+                    except Exception:
+                        connected = False
+                return self.reply_json(200, {'ok': True, 'enabled': enabled, 'connected': connected, 'ip': outbound_ip})
+
             if subpath == 'user-config' or subpath.startswith('user-config?'):
                 if not self.is_authenticated():
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
@@ -2103,6 +2253,77 @@ EOF
 }
 
 # 7. 服务状态与管理命令
+install_warp_local_proxy() {
+    log_step "准备安装并配置 Cloudflare WARP Local Proxy (端口 40000)..."
+    if ! which gpg >/dev/null 2>&1 || ! which lsb_release >/dev/null 2>&1; then
+        apt-get update && apt-get install -y gnupg lsb-release curl 2>/dev/null || yum install -y gnupg2 curl 2>/dev/null || true
+    fi
+
+    if which apt-get >/dev/null 2>&1; then
+        curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+        echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null
+        apt-get update && apt-get install -y cloudflare-warp
+    elif which yum >/dev/null 2>&1; then
+        yum-config-manager --add-repo https://pkg.cloudflareclient.com/cloudflare-warp-ascii.repo 2>/dev/null || true
+        yum install -y cloudflare-warp
+    fi
+
+    if ! which warp-cli >/dev/null 2>&1; then
+        log_err "Cloudflare WARP 客户端安装失败，请检查系统发行版支持情况。"
+        return 1
+    fi
+
+    log_step "注册并配置 WARP Proxy 模式 (MASQUE · 127.0.0.1:40000)..."
+    warp-cli registration new 2>/dev/null || true
+    warp-cli tunnel protocol set MASQUE 2>/dev/null || true
+    warp-cli mode proxy 2>/dev/null || true
+    warp-cli proxy port 40000 2>/dev/null || true
+    warp-cli connect 2>/dev/null || true
+    sleep 3
+
+    # 配置 Watchdog 探活与自愈守护
+    cat > /usr/local/bin/hy2-warp-watchdog.sh <<'EOWD'
+#!/usr/bin/env bash
+set -u
+TEST_URL="https://api4.ipify.org"
+if ! curl --proxy socks5h://127.0.0.1:40000 --silent --fail --max-time 6 "$TEST_URL" >/dev/null 2>&1; then
+    logger -t hy2-warp-watchdog "WARP local proxy failed. Restarting warp..."
+    warp-cli disconnect >/dev/null 2>&1 || true
+    sleep 2
+    warp-cli connect >/dev/null 2>&1 || true
+fi
+EOWD
+    chmod 755 /usr/local/bin/hy2-warp-watchdog.sh
+
+    cat > /etc/systemd/system/hy2-warp-watchdog.service <<EOF
+[Unit]
+Description=Cloudflare WARP Watchdog for Hysteria 2
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/hy2-warp-watchdog.sh
+EOF
+
+    cat > /etc/systemd/system/hy2-warp-watchdog.timer <<EOF
+[Unit]
+Description=Run WARP Watchdog every 3 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=3min
+Unit=hy2-warp-watchdog.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now hy2-warp-watchdog.timer >/dev/null 2>&1 || true
+    log_info "Cloudflare WARP Local Proxy 与 3 分钟探活自愈 Watchdog 安装完成！"
+    log_info "你现在可以在 Web 控制台一键启闭 AI 专线分流。"
+}
+
 status_service() {
     if [[ ! -f "$HY2_BIN" ]]; then
         log_err "Hysteria 2 未安装！"
@@ -2177,15 +2398,16 @@ menu() {
     echo -e "  ${GREEN}2.${PLAIN} 更新 Hysteria 2 核心至最新版"
     echo -e "  ${GREEN}3.${PLAIN} 查看私密信息页地址和登录凭据"
     echo -e "  ${GREEN}4.${PLAIN} 重新修改配置 (端口/密码/证书/域名/混淆)"
+    echo -e "  ${GREEN}5.${PLAIN} 一键安装并配置 Cloudflare WARP 出口 (AI解锁)"
     echo -e "${CYAN}----------------------------------------------------------------${PLAIN}"
-    echo -e "  ${GREEN}5.${PLAIN} 启动服务"
-    echo -e "  ${GREEN}6.${PLAIN} 停止服务"
-    echo -e "  ${GREEN}7.${PLAIN} 重启服务"
-    echo -e "  ${GREEN}8.${PLAIN} 查看实时运行日志"
-    echo -e "  ${GREEN}9.${PLAIN} 彻底卸载 Hysteria 2"
+    echo -e "  ${GREEN}6.${PLAIN} 启动服务"
+    echo -e "  ${GREEN}7.${PLAIN} 停止服务"
+    echo -e "  ${GREEN}8.${PLAIN} 重启服务"
+    echo -e "  ${GREEN}9.${PLAIN} 查看实时运行日志"
+    echo -e "  ${GREEN}10.${PLAIN} 彻底卸载 Hysteria 2"
     echo -e "  ${GREEN}0.${PLAIN} 退出脚本"
     echo -e "${CYAN}================================================================${PLAIN}"
-    read -rp "请输入选项 [0-9]: " choice
+    read -rp "请输入选项 [0-10]: " choice
 
     case "$choice" in
         1)
@@ -2221,18 +2443,22 @@ menu() {
             show_client_configs
             ;;
         5)
-            start_service
+            check_root
+            install_warp_local_proxy
             ;;
         6)
-            stop_service
+            start_service
             ;;
         7)
-            restart_service
+            stop_service
             ;;
         8)
-            view_logs
+            restart_service
             ;;
         9)
+            view_logs
+            ;;
+        10)
             check_root
             uninstall_all
             ;;

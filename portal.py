@@ -55,6 +55,14 @@ footer{display:flex;justify-content:space-between;margin-top:32px;color:#879996;
 /* 多用户与集群专属卡片样式 */
 .user-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;flex-wrap:wrap;gap:12px}
 .badge-count{background:var(--brand-bg);color:var(--accent);border:1px solid #c3ddd5;border-radius:20px;padding:4px 12px;font-size:12px;font-weight:700}
+.switch-box{display:flex;align-items:center;gap:12px;background:#f8fbfb;border:1px solid var(--line);border-radius:14px;padding:16px 20px;margin-bottom:20px;justify-content:space-between;flex-wrap:wrap}
+.switch-info{display:flex;flex-direction:column;gap:4px}
+.switch-title{font-size:14px;font-weight:700;color:var(--ink);display:flex;align-items:center;gap:8px}
+.switch-desc{font-size:12px;color:var(--muted)}
+.toggle-btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:8px 18px;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;border:1px solid transparent;transition:all .15s ease}
+.toggle-btn.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+.toggle-btn.off{background:#fff;color:var(--muted);border-color:var(--line)}
+.toggle-btn:hover{filter:brightness(.92)}
 .user-table-wrap{width:100%;overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:#fff}
 .user-table{width:100%;border-collapse:collapse;text-align:left;font-size:13px}
 .user-table th{background:#f8fbfb;padding:12px 14px;color:var(--muted);font-weight:700;border-bottom:1px solid var(--line);white-space:nowrap}
@@ -193,6 +201,56 @@ const uModalTitle = document.getElementById('um-title');
 const uModalSub = document.getElementById('um-sub');
 const uModalBody = document.getElementById('um-body');
 const uModalClose = document.getElementById('um-close');
+
+// WARP 状态与一键开关逻辑
+const warpBadge = document.getElementById('warp-badge');
+const btnToggleWarp = document.getElementById('btn-toggle-warp');
+
+async function checkWarpStatus() {
+  if (!warpBadge || !btnToggleWarp) return;
+  try {
+    const res = await fetch(location.pathname + 'warp-status', { credentials: 'same-origin' });
+    if (!res.ok) return;
+    const json = await res.json();
+    if (!json.ok) return;
+    if (json.enabled) {
+      warpBadge.textContent = json.connected ? ('● 运行中 (' + (json.ip || '已连通') + ')') : '● 正在连接 / 异常';
+      warpBadge.style.background = json.connected ? '#eaf3de' : '#fff1f0';
+      warpBadge.style.color = json.connected ? '#27500a' : '#cf3c3c';
+      btnToggleWarp.textContent = '已开启 (点击关闭)';
+      btnToggleWarp.className = 'toggle-btn on';
+    } else {
+      warpBadge.textContent = '○ 已停用 (直连模式)';
+      warpBadge.style.background = '#f1efe8';
+      warpBadge.style.color = '#5f5e5a';
+      btnToggleWarp.textContent = '已关闭 (点击开启)';
+      btnToggleWarp.className = 'toggle-btn off';
+    }
+  } catch (_) {}
+}
+
+if (btnToggleWarp) {
+  checkWarpStatus();
+  btnToggleWarp.addEventListener('click', async () => {
+    btnToggleWarp.disabled = true;
+    btnToggleWarp.textContent = '正在切换...';
+    try {
+      const res = await fetch(location.pathname + 'manage-warp', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'action=toggle'
+      });
+      const json = await res.json();
+      if (!json.ok) alert(json.error || '切换失败');
+    } catch (e) {
+      alert('操作失败: ' + e.message);
+    } finally {
+      btnToggleWarp.disabled = false;
+      checkWarpStatus();
+    }
+  });
+}
 
 function closeUserModal() {
   if (uModal) uModal.classList.remove('show');
@@ -495,6 +553,22 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
     </div>
 
     <!-- 手动添加用户卡片 (结构化字段 + 随机生成辅助) -->
+    <!-- WARP 出口分流全局控制卡片 -->
+    <div class="switch-box" id="warp-box">
+      <div class="switch-info">
+        <div class="switch-title">
+          <span>⚡ Cloudflare WARP 智能分流出口 (AI 加速)</span>
+          <span class="status-pill" id="warp-badge" style="background:#eaf3de;color:#27500a">检测中...</span>
+        </div>
+        <div class="switch-desc">
+          开启后 OpenAI (ChatGPT), Claude, Google Gemini 流量自动经由 Cloudflare 干净网络出口，有效防止封号与验证码；普通网页与下载仍维持 VPS 原生高速直连。
+        </div>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <button class="toggle-btn off" id="btn-toggle-warp" type="button">切换中...</button>
+      </div>
+    </div>
+
     <details style="margin-bottom:18px">
       <summary class="button" style="margin-bottom:12px;list-style:none">＋ 手动添加/开通新用户</summary>
       <form class="modal-form" method="POST" action="/{token}/manage-user">
@@ -1249,8 +1323,27 @@ def serve(path):
             if not self.check_rate_limit(bucket='web'):
                 return self.reply(429, b'Too many requests')
 
-            # 3. Web 网页版直接增删用户通道
+            # 3. Web 网页版管理通道 (用户管理 / WARP 开关)
             prefix = '/' + data['token'] + '/'
+            if self.path == prefix + 'manage-warp':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                try:
+                    with data_lock:
+                        curr = data.get('warp_enabled', False)
+                        data['warp_enabled'] = not curr
+                        new_state = data['warp_enabled']
+                    save_data()
+                    # 触发后台更新 Hysteria 2 ACL 规则并重载
+                    try:
+                        subprocess.Popen(['bash', '/etc/hysteria/toggle_warp.sh', '1' if new_state else '0'],
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except Exception:
+                        pass
+                    return self.reply_json(200, {'ok': True, 'enabled': new_state})
+                except Exception as e:
+                    return self.reply_json(500, {'ok': False, 'error': str(e)})
+
             if self.path == prefix + 'manage-user':
                 if not self.is_authenticated():
                     return self.reply(401, b'Unauthorized')
@@ -1409,6 +1502,29 @@ def serve(path):
                     return self.reply(404, b'Not found')
 
             # 2. 用户专属配置 API (供管理后台弹窗使用，需管理员已登录认证)
+            if subpath == 'warp-status':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                with data_lock:
+                    enabled = data.get('warp_enabled', False)
+                # 简单本地探测 40000 端口连通性
+                connected = False
+                outbound_ip = ''
+                if enabled:
+                    try:
+                        import urllib.request
+                        proxy_handler = urllib.request.ProxyHandler({'http': 'socks5h://127.0.0.1:40000',
+                                                                     'https': 'socks5h://127.0.0.1:40000'})
+                        opener = urllib.request.build_opener(proxy_handler)
+                        req = urllib.request.Request('https://api4.ipify.org', headers={'User-Agent': 'curl/7.88.1'})
+                        with opener.open(req, timeout=3) as resp:
+                            if resp.status == 200:
+                                outbound_ip = resp.read().decode('utf-8').strip()
+                                connected = True
+                    except Exception:
+                        connected = False
+                return self.reply_json(200, {'ok': True, 'enabled': enabled, 'connected': connected, 'ip': outbound_ip})
+
             if subpath == 'user-config' or subpath.startswith('user-config?'):
                 if not self.is_authenticated():
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
