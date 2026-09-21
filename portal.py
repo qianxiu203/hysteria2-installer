@@ -261,7 +261,105 @@ async function checkWarpStatus() {
       btnToggleWarp.textContent = '已关闭 (点击开启)';
       btnToggleWarp.className = 'toggle-btn off';
     }
+    if (Array.isArray(json.rules)) {
+      renderWarpRules(json.rules);
+    }
   } catch (_) {}
+}
+
+const warpTagsCloud = document.getElementById('warp-tags-cloud');
+const warpRulesCount = document.getElementById('warp-rules-count');
+const formAddWarpRule = document.getElementById('form-add-warp-rule');
+const inputWarpDomain = document.getElementById('input-warp-domain');
+const btnResetWarpRules = document.getElementById('btn-reset-warp-rules');
+
+function renderWarpRules(rules) {
+  if (!warpTagsCloud) return;
+  if (warpRulesCount) warpRulesCount.textContent = rules.length + ' 个生效中';
+  if (rules.length === 0) {
+    warpTagsCloud.innerHTML = '<span style="font-size:12px;color:var(--muted)">暂无分流域名，上方输入即可快速添加</span>';
+    return;
+  }
+  warpTagsCloud.innerHTML = rules.map(d => {
+    return `<span style="display:inline-flex;align-items:center;gap:6px;background:#fff;border:1px solid #c9ded9;color:#184239;border-radius:20px;padding:4px 12px;font-size:12px;font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,0.03)">
+      <span>${d}</span>
+      <a href="javascript:void(0)" onclick="delWarpRule('${d}')" style="color:#cf3c3c;text-decoration:none;font-size:13px;font-weight:800;padding:0 2px" title="移除此域名">×</a>
+    </span>`;
+  }).join('');
+}
+
+async function addWarpRule(domain) {
+  if (!domain) return;
+  try {
+    const res = await fetch(location.pathname + 'manage-warp', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'action=add_rule&domain=' + encodeURIComponent(domain)
+    });
+    const json = await res.json();
+    if (json.ok) {
+      if (inputWarpDomain) inputWarpDomain.value = '';
+      if (Array.isArray(json.rules)) renderWarpRules(json.rules);
+    } else {
+      alert(json.error || '添加失败');
+    }
+  } catch (e) {
+    alert('请求异常: ' + e.message);
+  }
+}
+
+async function delWarpRule(domain) {
+  if (!confirm('确定将 ' + domain + ' 从 WARP 分流列表中移除吗？')) return;
+  try {
+    const res = await fetch(location.pathname + 'manage-warp', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'action=del_rule&domain=' + encodeURIComponent(domain)
+    });
+    const json = await res.json();
+    if (json.ok && Array.isArray(json.rules)) {
+      renderWarpRules(json.rules);
+    }
+  } catch (e) {
+    alert('请求异常: ' + e.message);
+  }
+}
+window.delWarpRule = delWarpRule;
+
+if (formAddWarpRule) {
+  formAddWarpRule.addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (inputWarpDomain) addWarpRule(inputWarpDomain.value.trim());
+  });
+}
+
+document.querySelectorAll('.preset-rule').forEach(el => {
+  el.addEventListener('click', () => {
+    const dom = el.getAttribute('data-domain');
+    if (dom) addWarpRule(dom);
+  });
+});
+
+if (btnResetWarpRules) {
+  btnResetWarpRules.addEventListener('click', async () => {
+    if (!confirm('确定重置为系统默认推荐的 AI 域名规则列表吗？')) return;
+    try {
+      const res = await fetch(location.pathname + 'manage-warp', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'action=reset_rules'
+      });
+      const json = await res.json();
+      if (json.ok && Array.isArray(json.rules)) {
+        renderWarpRules(json.rules);
+      }
+    } catch (e) {
+      alert('请求异常: ' + e.message);
+    }
+  });
 }
 
 if (btnToggleWarp) {
@@ -1080,12 +1178,46 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
         <button class="toggle-btn off" id="btn-toggle-warp" type="button">切换中...</button>
       </div>
     </div>
-    <div class="switch-box" id="warp-box" style="margin-bottom:0">
+    <div class="switch-box" id="warp-box" style="margin-bottom:16px">
       <div class="switch-info">
-        <div class="switch-title"><span>🛡️ 防封号与验证码保护机制</span></div>
+        <div class="switch-title"><span>🛡️ 出口路由与防封号保护机制</span></div>
         <div class="switch-desc">
-          开启后，针对 OpenAI (chatgpt.com / openai.com / ai.com)、Anthropic (claude.ai)、Google (gemini.google.com / aistudio.google.com) 的出站流量将经由 Cloudflare 干净网络出口，有效避开数据中心 IP 拦截与高频 Cloudflare 盾；其余全球流量均维持 VPS 原生网卡直连。
+          开启后，名单内的目标网站出站流量将经由 Cloudflare WARP 干净网络出口分流；其余全球网站维持原生网卡直连。
         </div>
+      </div>
+    </div>
+
+    <!-- 自定义分流规则管理专区 (标签云 + 快速增删) -->
+    <div style="background:#f8fbfb;border:1px solid var(--line);border-radius:14px;padding:18px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+        <div style="font-size:13px;font-weight:700;color:var(--ink);display:flex;align-items:center;gap:6px">
+          <span>🎯 自定义分流域名列表 (WARP 出口)</span>
+          <span class="status-pill" id="warp-rules-count" style="font-size:11px;padding:2px 8px">加载中...</span>
+        </div>
+        <div style="display:flex;gap:6px">
+          <button class="button" id="btn-reset-warp-rules" type="button" style="padding:4px 10px;font-size:11px" title="恢复为系统推荐的常用 AI 域名规则">恢复预设</button>
+        </div>
+      </div>
+
+      <!-- 添加新域名输入栏 -->
+      <form id="form-add-warp-rule" style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">
+        <input id="input-warp-domain" type="text" placeholder="输入要走 WARP 的域名，例如 netflix.com / bing.com" required style="flex:1;min-width:240px;height:36px;padding:0 12px;border:1px solid var(--line);border-radius:8px;font-size:13px;outline:none">
+        <button class="button primary" type="submit" style="padding:0 16px;height:36px;font-size:12px">＋ 添加分流域名</button>
+      </form>
+
+      <!-- 快捷预设一键添加 -->
+      <div style="font-size:11px;color:var(--muted);margin-bottom:12px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+        <span>常用推荐快捷添加:</span>
+        <a href="javascript:void(0)" class="preset-rule" data-domain="netflix.com" style="color:var(--accent);text-decoration:none">+ Netflix</a>
+        <a href="javascript:void(0)" class="preset-rule" data-domain="disneyplus.com" style="color:var(--accent);text-decoration:none">+ Disney+</a>
+        <a href="javascript:void(0)" class="preset-rule" data-domain="spotify.com" style="color:var(--accent);text-decoration:none">+ Spotify</a>
+        <a href="javascript:void(0)" class="preset-rule" data-domain="bing.com" style="color:var(--accent);text-decoration:none">+ Bing/Copilot</a>
+        <a href="javascript:void(0)" class="preset-rule" data-domain="twitter.com" style="color:var(--accent);text-decoration:none">+ Twitter/X</a>
+      </div>
+
+      <!-- 动态标签云容器 -->
+      <div id="warp-tags-cloud" style="display:flex;flex-wrap:wrap;gap:8px;min-height:38px;align-items:center">
+        <span style="font-size:12px;color:var(--muted)">正在拉取规则...</span>
       </div>
     </div>
   </section>
@@ -2183,18 +2315,76 @@ WantedBy=multi-user.target
                 if not self.is_authenticated():
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
                 try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = self.rfile.read(length).decode('utf-8') if length > 0 else ''
+                    form = parse_qs(body)
+                    action = form.get('action', ['toggle'])[0]
+
+                    # 经典内置默认规则列表
+                    DEFAULT_WARP_DOMAINS = [
+                        'ipify.org', 'cloudflare.com',
+                        'openai.com', 'chatgpt.com', 'oaistatic.com', 'oaiusercontent.com', 'ai.com',
+                        'anthropic.com', 'claude.ai',
+                        'gemini.google.com', 'aistudio.google.com', 'generativelanguage.googleapis.com'
+                    ]
+
                     with data_lock:
-                        curr = data.get('warp_enabled', False)
-                        data['warp_enabled'] = not curr
-                        new_state = data['warp_enabled']
+                        if 'warp_rules' not in data:
+                            data['warp_rules'] = list(DEFAULT_WARP_DOMAINS)
+
+                        if action == 'toggle':
+                            curr = data.get('warp_enabled', False)
+                            data['warp_enabled'] = not curr
+                        elif action == 'add_rule':
+                            raw_domain = form.get('domain', [''])[0].strip().lower()
+                            # 清洗输入：移除协议头、端口与路径
+                            cleaned = re.sub(r'^[a-zA-Z]+://', '', raw_domain).split('/')[0].split(':')[0].strip('.')
+                            if cleaned and cleaned not in data['warp_rules'] and re.match(r'^[a-zA-Z0-9.\-]+$', cleaned):
+                                data['warp_rules'].append(cleaned)
+                        elif action == 'del_rule':
+                            target_domain = form.get('domain', [''])[0].strip().lower()
+                            if target_domain in data['warp_rules']:
+                                data['warp_rules'].remove(target_domain)
+                        elif action == 'reset_rules':
+                            data['warp_rules'] = list(DEFAULT_WARP_DOMAINS)
+
+                        new_state = data.get('warp_enabled', False)
+                        current_rules = list(data.get('warp_rules', []))
+
                     save_data()
-                    # 触发后台更新 Hysteria 2 ACL 规则并重载
-                    try:
-                        subprocess.Popen(['bash', '/etc/hysteria/toggle_warp.sh', '1' if new_state else '0'],
-                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    except Exception:
-                        pass
-                    return self.reply_json(200, {'ok': True, 'enabled': new_state})
+
+                    # 动态重新写回 /etc/hysteria/config.yaml 并重启 hysteria-server
+                    def apply_hy2_acl():
+                        cfg_path = Path('/etc/hysteria/config.yaml')
+                        if not cfg_path.exists():
+                            return
+                        lines = cfg_path.read_text(encoding='utf-8').splitlines()
+                        clean_lines = []
+                        in_acl = False
+                        for line in lines:
+                            if line.strip().startswith('acl:'):
+                                in_acl = True
+                                continue
+                            if not in_acl:
+                                clean_lines.append(line)
+
+                        if new_state:
+                            clean_lines.append('acl:')
+                            clean_lines.append('  inline:')
+                            for d in current_rules:
+                                clean_lines.append(f'    - warp_socks(suffix:{d})')
+                            clean_lines.append('    - direct_ipv4(all)')
+
+                        cfg_path.write_text('\n'.join(clean_lines) + '\n', encoding='utf-8')
+                        subprocess.run(['systemctl', 'restart', 'hysteria-server'], capture_output=True, timeout=10)
+
+                    threading.Thread(target=apply_hy2_acl, daemon=True).start()
+
+                    return self.reply_json(200, {
+                        'ok': True,
+                        'enabled': new_state,
+                        'rules': current_rules
+                    })
                 except Exception as e:
                     return self.reply_json(500, {'ok': False, 'error': str(e)})
 
@@ -2483,12 +2673,20 @@ WantedBy=multi-user.target
                                 connected = True
                     except Exception:
                         connected = False
+                with data_lock:
+                    rules = list(data.get('warp_rules', [
+                        'ipify.org', 'cloudflare.com',
+                        'openai.com', 'chatgpt.com', 'oaistatic.com', 'oaiusercontent.com', 'ai.com',
+                        'anthropic.com', 'claude.ai',
+                        'gemini.google.com', 'aistudio.google.com', 'generativelanguage.googleapis.com'
+                    ]))
                 return self.reply_json(200, {
                     'ok': True,
                     'installed': is_installed,
                     'enabled': enabled,
                     'connected': connected,
-                    'ip': outbound_ip
+                    'ip': outbound_ip,
+                    'rules': rules
                 })
 
             if self.path == prefix + 'install-warp':
