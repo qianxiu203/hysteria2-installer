@@ -228,10 +228,94 @@ footer{display:flex;justify-content:space-between;margin-top:32px;color:#879996;
 .bbr-stat-val { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--accent); font-weight: 800; font-size: 14px; }
 .bbr-sub-text { font-size: 12px; color: var(--muted); margin-top: 3px; }
 
+/* 全局自定义高颜值确认弹窗与 Toast 样式 */
+.confirm-card { width: 100%; max-width: 440px; background: #ffffff; border: 1.5px solid var(--line); border-radius: 20px; padding: 24px; box-shadow: 0 20px 50px rgba(18, 43, 49, 0.22); animation: scaleUp .18s cubic-bezier(0.16, 1, 0.3, 1); }
+@keyframes scaleUp { from { opacity: 0; transform: scale(0.94); } to { opacity: 1; transform: scale(1); } }
+.confirm-icon-box { width: 48px; height: 48px; border-radius: 14px; background: #eaf5ef; color: var(--accent); display: flex; align-items: center; justify-content: center; font-size: 24px; margin-bottom: 14px; }
+.confirm-icon-box.danger { background: #fdf2f2; color: var(--danger); }
+.confirm-icon-box.warn { background: #fff8e6; color: #d46b08; }
+.confirm-title { font-size: 17px; font-weight: 800; color: var(--ink); margin-bottom: 8px; }
+.confirm-text { font-size: 13px; color: var(--muted); line-height: 1.6; margin-bottom: 22px; }
+.confirm-actions { display: flex; gap: 10px; justify-content: flex-end; }
+.confirm-btn { height: 40px; padding: 0 18px; border-radius: 10px; font-size: 13px; font-weight: 700; cursor: pointer; transition: all .15s ease; border: 1px solid transparent; }
+.confirm-btn.cancel { background: #f3f7f6; color: var(--ink); border-color: #d8e5e2; }
+.confirm-btn.cancel:hover { background: #e5eeec; }
+.confirm-btn.primary { background: var(--accent); color: #fff; }
+.confirm-btn.primary:hover { filter: brightness(0.92); }
+.confirm-btn.danger { background: var(--danger); color: #fff; }
+.confirm-btn.danger:hover { filter: brightness(0.92); }
+
+/* 全局 Toast 通知栏 */
+.toast-container { position: fixed; top: 24px; right: 24px; z-index: 99999; display: flex; flex-direction: column; gap: 10px; pointer-events: none; }
+.toast-item { background: #122b31; color: #ffffff; border-radius: 12px; padding: 12px 20px; font-size: 13px; font-weight: 650; box-shadow: 0 10px 30px rgba(0,0,0,0.18); display: flex; align-items: center; gap: 10px; pointer-events: auto; animation: toastIn .2s cubic-bezier(0.16, 1, 0.3, 1); }
+.toast-item.success { background: #087f74; }
+.toast-item.error { background: #cf3c3c; }
+@keyframes toastIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+
+
 
 """
 
 SCRIPT = """
+
+// 全局高颜值 Promise 确认框与 Toast 机制
+function showToast(msg, type = 'info') {
+  const container = document.getElementById('toast-container');
+  if (!container) { alert(msg); return; }
+  const toast = document.createElement('div');
+  toast.className = 'toast-item ' + type;
+  const icon = type === 'success' ? '✓ ' : (type === 'error' ? '✕ ' : 'ℹ ');
+  toast.textContent = icon + msg;
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.style.transition = 'all .25s ease';
+    toast.style.opacity = '0';
+    toast.style.transform = 'translateY(-8px)';
+    setTimeout(() => toast.remove(), 250);
+  }, 2800);
+}
+
+function showConfirm(options = {}) {
+  return new Promise((resolve) => {
+    const modal = document.getElementById('custom-confirm-modal');
+    const titleEl = document.getElementById('confirm-title');
+    const textEl = document.getElementById('confirm-text');
+    const iconEl = document.getElementById('confirm-icon');
+    const okBtn = document.getElementById('confirm-btn-ok');
+    const cancelBtn = document.getElementById('confirm-btn-cancel');
+
+    if (!modal || !titleEl || !textEl || !okBtn || !cancelBtn) {
+      resolve(confirm(options.text || '确定执行吗？'));
+      return;
+    }
+
+    titleEl.textContent = options.title || '操作确认';
+    textEl.textContent = options.text || '确定要继续执行吗？';
+    if (iconEl) {
+      iconEl.textContent = options.icon || '💡';
+      iconEl.className = 'confirm-icon-box ' + (options.isDanger ? 'danger' : (options.isWarn ? 'warn' : ''));
+    }
+
+    okBtn.textContent = options.confirmText || '确定执行';
+    okBtn.className = 'confirm-btn ' + (options.isDanger ? 'danger' : 'primary');
+
+    modal.classList.add('show');
+
+    function cleanup(result) {
+      modal.classList.remove('show');
+      okBtn.removeEventListener('click', onOk);
+      cancelBtn.removeEventListener('click', onCancel);
+      resolve(result);
+    }
+
+    function onOk() { cleanup(true); }
+    function onCancel() { cleanup(false); }
+
+    okBtn.addEventListener('click', onOk);
+    cancelBtn.addEventListener('click', onCancel);
+  });
+}
+
 function switchTab(tabId) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
@@ -693,7 +777,13 @@ document.querySelectorAll('.btn-apply-bbr').forEach(btn => {
   btn.addEventListener('click', async () => {
     const ver = btn.getAttribute('data-version') || 'v1';
     const label = { v1: 'BBR V1 (经典官方)', v2: 'BBR V2 (低丢包)', v3: 'BBR V3 (极限吞吐)' }[ver];
-    if (!confirm('确定要一键配置 ' + label + ' 加速引擎吗？系统将自动写入内核持久化配置，部分环境重启后生效。')) return;
+    const confirmed = await showConfirm({
+      title: '开启 ' + label + ' 加速引擎',
+      text: '系统将自动将拥塞控制与排队规则写入 Linux 内核持久化配置（/etc/sysctl.d/99-bbr.conf）。配置后可能需要安全重启服务器以完成生效。',
+      icon: '🚀',
+      confirmText: '立即开启 ' + ver.toUpperCase()
+    });
+    if (!confirmed) return;
 
     btn.disabled = true;
     const orig = btn.textContent;
@@ -707,10 +797,10 @@ document.querySelectorAll('.btn-apply-bbr').forEach(btn => {
       });
       const json = await res.json();
       if (json.ok) {
-        alert(json.message || '配置成功！');
+        showToast(json.message || '配置成功！', 'success');
         await checkBbrStatus();
       } else {
-        alert(json.error || '配置失败');
+        showToast(json.error || '配置失败', 'error');
       }
     } catch (e) {
       alert('请求异常: ' + e.message);
@@ -723,7 +813,14 @@ document.querySelectorAll('.btn-apply-bbr').forEach(btn => {
 
 if (btnRebootServer) {
   btnRebootServer.addEventListener('click', async () => {
-    if (!confirm("确定要立即安全重启服务器以生效新 BBR 内核网络参数吗？服务器将在 10 秒后完成重启，页面将自动重连。")) return;
+    const confirmed = await showConfirm({
+      title: '安全重启服务器',
+      text: '确定要立即重启服务器以完成新 BBR 内核网络参数生效吗？服务器将在 10 秒内安全完成重启，页面将自动发起 25 秒倒计时并在就绪后重连。',
+      icon: '🔄',
+      confirmText: '确定立即重启',
+      isWarn: true
+    });
+    if (!confirmed) return;
     btnRebootServer.disabled = true;
     btnRebootServer.textContent = '⏳ 重启指令已发送...';
     try {
@@ -1866,6 +1963,21 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
     </div>
   </div>
 </div>
+
+
+<!-- 全局高颜值自定义确认弹窗 -->
+<div class="modal-backdrop" id="custom-confirm-modal">
+  <div class="confirm-card">
+    <div class="confirm-icon-box" id="confirm-icon">🚀</div>
+    <div class="confirm-title" id="confirm-title">请确认操作</div>
+    <div class="confirm-text" id="confirm-text">确定要执行此操作吗？</div>
+    <div class="confirm-actions">
+      <button class="confirm-btn cancel" id="confirm-btn-cancel" type="button">取消</button>
+      <button class="confirm-btn primary" id="confirm-btn-ok" type="button">确定执行</button>
+    </div>
+  </div>
+</div>
+<div class="toast-container" id="toast-container"></div>
 
 <!-- 专属用户连接模态框 -->
 <div class="modal-backdrop" id="user-modal">
