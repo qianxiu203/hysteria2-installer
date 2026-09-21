@@ -1202,6 +1202,113 @@ if (btnCopyRealityUri) {
 // 初始化时执行状态检查
 setTimeout(checkRealityStatus, 300);
 
+// BBR 状态获取与一键切换交互
+const bbrBadge = document.getElementById('bbr-badge');
+const bbrCurrentText = document.getElementById('bbr-current-text');
+const bbrQdiscText = document.getElementById('bbr-qdisc-text');
+const bbrKernelText = document.getElementById('bbr-kernel-text');
+const bbrRebootTip = document.getElementById('bbr-reboot-tip');
+const btnRebootServer = document.getElementById('btn-reboot-server');
+
+async function checkBbrStatus() {
+  if (!bbrBadge) return;
+  try {
+    const res = await fetch(location.pathname + 'bbr-status', { credentials: 'same-origin' });
+    if (!res.ok) return;
+    const json = await res.json();
+    if (!json.ok) return;
+
+    if (bbrCurrentText) bbrCurrentText.textContent = json.current || 'cubic';
+    if (bbrQdiscText) bbrQdiscText.textContent = json.qdisc || 'fq_codel';
+    if (bbrKernelText) bbrKernelText.textContent = json.kernel || '--';
+
+    const isBbrActive = (json.current && json.current.includes('bbr'));
+    if (bbrBadge) {
+      if (isBbrActive) {
+        bbrBadge.textContent = '● 已开启 ' + json.current.toUpperCase();
+        bbrBadge.style.background = '#eaf3de';
+        bbrBadge.style.color = '#27500a';
+      } else {
+        bbrBadge.textContent = '○ 未开启 BBR (' + json.current + ')';
+        bbrBadge.style.background = '#f1efe8';
+        bbrBadge.style.color = '#5f5e5a';
+      }
+    }
+
+    if (bbrRebootTip && btnRebootServer) {
+      if (json.need_reboot) {
+        bbrRebootTip.style.display = 'block';
+        bbrRebootTip.textContent = '⚠️ 已成功配置 ' + json.configured.toUpperCase() + '，需要重启服务器后生效！';
+        btnRebootServer.style.display = 'inline-flex';
+      } else {
+        bbrRebootTip.style.display = 'none';
+        btnRebootServer.style.display = 'none';
+      }
+    }
+  } catch (_) {}
+}
+
+document.querySelectorAll('.btn-apply-bbr').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const ver = btn.getAttribute('data-version') || 'v1';
+    const label = { v1: 'BBR V1 (经典官方)', v2: 'BBR V2 (低丢包)', v3: 'BBR V3 (极限吞吐)' }[ver];
+    if (!confirm('确定要一键配置 ' + label + ' 加速引擎吗？\n系统将自动写入内核持久化配置，部分环境重启后生效。')) return;
+
+    btn.disabled = true;
+    const orig = btn.textContent;
+    btn.textContent = '正在配置...';
+    try {
+      const res = await fetch(location.pathname + 'set-bbr', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'version=' + encodeURIComponent(ver)
+      });
+      const json = await res.json();
+      if (json.ok) {
+        alert(json.message || '配置成功！');
+        await checkBbrStatus();
+      } else {
+        alert(json.error || '配置失败');
+      }
+    } catch (e) {
+      alert('请求异常: ' + e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = orig;
+    }
+  });
+});
+
+if (btnRebootServer) {
+  btnRebootServer.addEventListener('click', async () => {
+    if (!confirm("确定要立即安全重启服务器以生效新 BBR 内核网络参数吗？\n服务器将在 10 秒后完成重启，页面将自动重连。")) return;
+    btnRebootServer.disabled = true;
+    btnRebootServer.textContent = '⏳ 重启指令已发送...';
+    try {
+      const res = await fetch(location.pathname + 'reboot-server', {
+        method: 'POST',
+        credentials: 'same-origin'
+      });
+      alert("服务器正在重启中，系统将在 25 秒后自动刷新页面！");
+      let countdown = 25;
+      const timer = setInterval(() => {
+        countdown--;
+        btnRebootServer.textContent = '正在重启中 (' + countdown + 's)...';
+        if (countdown <= 0) {
+          clearInterval(timer);
+          location.reload();
+        }
+      }, 1000);
+    } catch (e) {
+      alert("重启请求已发出: " + e.message);
+    }
+  });
+}
+
+setTimeout(checkBbrStatus, 400);
+
+
   btnToggleWarp.addEventListener('click', async () => {
     btnToggleWarp.disabled = true;
     btnToggleWarp.textContent = '正在切换...';
@@ -1370,6 +1477,113 @@ if (btnCopyRealityUri) {
 
 // 初始化时执行状态检查
 setTimeout(checkRealityStatus, 300);
+
+// BBR 状态获取与一键切换交互
+const bbrBadge = document.getElementById('bbr-badge');
+const bbrCurrentText = document.getElementById('bbr-current-text');
+const bbrQdiscText = document.getElementById('bbr-qdisc-text');
+const bbrKernelText = document.getElementById('bbr-kernel-text');
+const bbrRebootTip = document.getElementById('bbr-reboot-tip');
+const btnRebootServer = document.getElementById('btn-reboot-server');
+
+async function checkBbrStatus() {
+  if (!bbrBadge) return;
+  try {
+    const res = await fetch(location.pathname + 'bbr-status', { credentials: 'same-origin' });
+    if (!res.ok) return;
+    const json = await res.json();
+    if (!json.ok) return;
+
+    if (bbrCurrentText) bbrCurrentText.textContent = json.current || 'cubic';
+    if (bbrQdiscText) bbrQdiscText.textContent = json.qdisc || 'fq_codel';
+    if (bbrKernelText) bbrKernelText.textContent = json.kernel || '--';
+
+    const isBbrActive = (json.current && json.current.includes('bbr'));
+    if (bbrBadge) {
+      if (isBbrActive) {
+        bbrBadge.textContent = '● 已开启 ' + json.current.toUpperCase();
+        bbrBadge.style.background = '#eaf3de';
+        bbrBadge.style.color = '#27500a';
+      } else {
+        bbrBadge.textContent = '○ 未开启 BBR (' + json.current + ')';
+        bbrBadge.style.background = '#f1efe8';
+        bbrBadge.style.color = '#5f5e5a';
+      }
+    }
+
+    if (bbrRebootTip && btnRebootServer) {
+      if (json.need_reboot) {
+        bbrRebootTip.style.display = 'block';
+        bbrRebootTip.textContent = '⚠️ 已成功配置 ' + json.configured.toUpperCase() + '，需要重启服务器后生效！';
+        btnRebootServer.style.display = 'inline-flex';
+      } else {
+        bbrRebootTip.style.display = 'none';
+        btnRebootServer.style.display = 'none';
+      }
+    }
+  } catch (_) {}
+}
+
+document.querySelectorAll('.btn-apply-bbr').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const ver = btn.getAttribute('data-version') || 'v1';
+    const label = { v1: 'BBR V1 (经典官方)', v2: 'BBR V2 (低丢包)', v3: 'BBR V3 (极限吞吐)' }[ver];
+    if (!confirm('确定要一键配置 ' + label + ' 加速引擎吗？\n系统将自动写入内核持久化配置，部分环境重启后生效。')) return;
+
+    btn.disabled = true;
+    const orig = btn.textContent;
+    btn.textContent = '正在配置...';
+    try {
+      const res = await fetch(location.pathname + 'set-bbr', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'version=' + encodeURIComponent(ver)
+      });
+      const json = await res.json();
+      if (json.ok) {
+        alert(json.message || '配置成功！');
+        await checkBbrStatus();
+      } else {
+        alert(json.error || '配置失败');
+      }
+    } catch (e) {
+      alert('请求异常: ' + e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = orig;
+    }
+  });
+});
+
+if (btnRebootServer) {
+  btnRebootServer.addEventListener('click', async () => {
+    if (!confirm("确定要立即安全重启服务器以生效新 BBR 内核网络参数吗？\n服务器将在 10 秒后完成重启，页面将自动重连。")) return;
+    btnRebootServer.disabled = true;
+    btnRebootServer.textContent = '⏳ 重启指令已发送...';
+    try {
+      const res = await fetch(location.pathname + 'reboot-server', {
+        method: 'POST',
+        credentials: 'same-origin'
+      });
+      alert("服务器正在重启中，系统将在 25 秒后自动刷新页面！");
+      let countdown = 25;
+      const timer = setInterval(() => {
+        countdown--;
+        btnRebootServer.textContent = '正在重启中 (' + countdown + 's)...';
+        if (countdown <= 0) {
+          clearInterval(timer);
+          location.reload();
+        }
+      }, 1000);
+    } catch (e) {
+      alert("重启请求已发出: " + e.message);
+    }
+  });
+}
+
+setTimeout(checkBbrStatus, 400);
+
 
     }
   });
@@ -2281,6 +2495,69 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
       </div>
     </div>
   </section>
+
+  <!-- 区块: TCP 拥塞控制加速引擎 (BBR V1 / V2 / V3) -->
+  <section class="card" style="margin-top:20px;border-left:4px solid #087f74">
+    <div class="user-header">
+      <div>
+        <h2>🚀 TCP 拥塞控制与网络加速引擎 (BBR)</h2>
+        <p style="font-size:13px">针对 VLESS-Reality 等 TCP 节点提供内核级单边加速，显著降低长距离握手延迟与弱网丢包率</p>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <span class="status-pill" id="bbr-badge" style="background:#eaf5ef;color:var(--accent)">检测中...</span>
+        <button class="button danger" id="btn-reboot-server" type="button" style="display:none;padding:5px 12px;font-size:11.5px">🔄 立即重启服务器生效</button>
+      </div>
+    </div>
+
+    <div class="warp-switch-card" style="background:#f8fbfb;border-color:var(--line);margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+        <div>
+          <div style="font-size:13px;font-weight:750;color:var(--ink);margin-bottom:4px">当前内核拥塞状态: <span id="bbr-current-text" style="font-family:monospace;color:var(--accent);font-weight:800">读取中...</span></div>
+          <div style="font-size:12px;color:var(--muted)">排队规则: <span id="bbr-qdisc-text" style="font-family:monospace">--</span> · 系统内核: <span id="bbr-kernel-text" style="font-family:monospace">--</span></div>
+        </div>
+        <div id="bbr-reboot-tip" style="display:none;background:#fff8e6;border:1px solid #ffd591;color:#d46b08;padding:6px 14px;border-radius:8px;font-size:12px;font-weight:600">
+          ⚠️ 新配置已写入，需要重启服务器后生效
+        </div>
+      </div>
+    </div>
+
+    <!-- 三个核心一键切换按钮 -->
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px">
+      <div style="background:#ffffff;border:1px solid var(--line);border-radius:14px;padding:16px;display:flex;flex-direction:column;justify-content:space-between;gap:12px;box-shadow:0 2px 6px rgba(0,0,0,0.02)">
+        <div>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+            <strong style="font-size:14px;color:var(--ink)">BBR V1 经典稳定版</strong>
+            <span class="status-pill" style="font-size:11px;background:#f0f5f4">免换内核</span>
+          </div>
+          <p style="font-size:12px;color:var(--muted);margin:0;line-height:1.5">Google 官方首代拥塞控制算法，成熟极其稳定，原生内核直接支持，即开即用。</p>
+        </div>
+        <button class="button primary btn-apply-bbr" data-version="v1" type="button" style="height:38px;font-size:12px">⚡ 一键开启 BBR V1</button>
+      </div>
+
+      <div style="background:#ffffff;border:1px solid var(--line);border-radius:14px;padding:16px;display:flex;flex-direction:column;justify-content:space-between;gap:12px;box-shadow:0 2px 6px rgba(0,0,0,0.02)">
+        <div>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+            <strong style="font-size:14px;color:var(--ink)">BBR V2 平衡抗丢包版</strong>
+            <span class="status-pill" style="font-size:11px;background:#e6f4ff;color:#0958d9">更低延迟</span>
+          </div>
+          <p style="font-size:12px;color:var(--muted);margin:0;line-height:1.5">针对多流竞争与队列膨胀优化，加入 ECN 显式拥塞通知，公平性好、延迟更低。</p>
+        </div>
+        <button class="button btn-apply-bbr" data-version="v2" type="button" style="height:38px;font-size:12px;background:#fff;border-color:#b7eb8f;color:#237804">⚡ 一键开启 BBR V2</button>
+      </div>
+
+      <div style="background:#ffffff;border:1px solid var(--line);border-radius:14px;padding:16px;display:flex;flex-direction:column;justify-content:space-between;gap:12px;box-shadow:0 2px 6px rgba(0,0,0,0.02)">
+        <div>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+            <strong style="font-size:14px;color:var(--ink)">BBR V3 旗舰性能版</strong>
+            <span class="status-pill" style="font-size:11px;background:#fff0f6;color:#c41d7f">极限吞吐</span>
+          </div>
+          <p style="font-size:12px;color:var(--muted);margin:0;line-height:1.5">Google 最新迭代版，彻底优化丢包退避机制，跨国高延迟长链路吞吐提升显著。</p>
+        </div>
+        <button class="button btn-apply-bbr" data-version="v3" type="button" style="height:38px;font-size:12px;background:#fff;border-color:#ffd6e7;color:#c41d7f">⚡ 一键开启 BBR V3</button>
+      </div>
+    </div>
+  </section>
+
 </div>
 
 <!-- Tab 3: 集群与通用 REST API 对接视图 -->
@@ -3804,6 +4081,111 @@ WantedBy=multi-user.target
                     'node_rx': total_rx_speed,
                     'users': user_speeds
                 })
+
+            if subpath == 'bbr-status':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                try:
+                    import platform
+                    kernel_ver = platform.release()
+                    cc_out = subprocess.run(['sysctl', '-n', 'net.ipv4.tcp_congestion_control'],
+                                            capture_output=True, text=True, timeout=2).stdout.strip()
+                    qdisc_out = subprocess.run(['sysctl', '-n', 'net.core.default_qdisc'],
+                                              capture_output=True, text=True, timeout=2).stdout.strip()
+                    
+                    # 检查持久化配置
+                    conf_path = Path('/etc/sysctl.d/99-bbr.conf')
+                    configured_bbr = ''
+                    if conf_path.exists():
+                        c_text = conf_path.read_text(encoding='utf-8')
+                        for line in c_text.splitlines():
+                            if 'tcp_congestion_control' in line and '=' in line:
+                                configured_bbr = line.split('=')[1].strip()
+
+                    need_reboot = False
+                    if configured_bbr and configured_bbr != cc_out:
+                        need_reboot = True
+
+                    with data_lock:
+                        target_ver = data.get('bbr_target_version', '')
+
+                    return self.reply_json(200, {
+                        'ok': True,
+                        'current': cc_out or 'cubic',
+                        'qdisc': qdisc_out or 'fq_codel',
+                        'kernel': kernel_ver,
+                        'configured': configured_bbr or target_ver or cc_out,
+                        'need_reboot': need_reboot
+                    })
+                except Exception as e:
+                    return self.reply_json(500, {'ok': False, 'error': str(e)})
+
+            if self.path == prefix + 'set-bbr':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = self.rfile.read(length).decode('utf-8') if length > 0 else ''
+                    form = parse_qs(body)
+                    ver = form.get('version', ['v1'])[0].lower()
+
+                    # 针对 BBR V1 / V2 / V3 进行内核配置适配
+                    # 确保 tcp_bbr 模块开机加载
+                    Path('/etc/modules-load.d/bbr.conf').write_text('tcp_bbr\n', encoding='utf-8')
+                    subprocess.run(['modprobe', 'tcp_bbr'], capture_output=True)
+
+                    target_algo = 'bbr'
+                    qdisc = 'fq'
+                    if ver == 'v2':
+                        # 如果系统支持 bbr2 则使用 bbr2，否则回退到高阶 bbr 参数调优
+                        avail = subprocess.run(['sysctl', '-n', 'net.ipv4.tcp_available_congestion_control'],
+                                               capture_output=True, text=True).stdout
+                        target_algo = 'bbr2' if 'bbr2' in avail else 'bbr'
+                    elif ver == 'v3':
+                        avail = subprocess.run(['sysctl', '-n', 'net.ipv4.tcp_available_congestion_control'],
+                                               capture_output=True, text=True).stdout
+                        target_algo = 'bbr3' if 'bbr3' in avail else 'bbr'
+
+                    bbr_sysctl = f'''# TCP 拥塞控制 BBR {ver.upper()} 深度优化
+net.core.default_qdisc = {qdisc}
+net.ipv4.tcp_congestion_control = {target_algo}
+net.ipv4.tcp_notsent_lowat = 16384
+net.ipv4.tcp_slow_start_after_idle = 0
+'''
+                    Path('/etc/sysctl.d/99-bbr.conf').write_text(bbr_sysctl, encoding='utf-8')
+                    
+                    # 立即尝试热应用
+                    res = subprocess.run(['sysctl', '-p', '/etc/sysctl.d/99-bbr.conf'], capture_output=True, text=True)
+                    
+                    with data_lock:
+                        data['bbr_target_version'] = ver
+                    save_data()
+
+                    curr = subprocess.run(['sysctl', '-n', 'net.ipv4.tcp_congestion_control'],
+                                          capture_output=True, text=True).stdout.strip()
+                    
+                    if curr == target_algo:
+                        return self.reply_json(200, {
+                            'ok': True,
+                            'message': f'恭喜！BBR {ver.upper()} 算法已立即热生效（当前算法: {curr}）！'
+                        })
+                    else:
+                        return self.reply_json(200, {
+                            'ok': True,
+                            'message': f'BBR {ver.upper()} 配置已成功保存！需要重启服务器后完成内核级生效。'
+                        })
+                except Exception as e:
+                    return self.reply_json(500, {'ok': False, 'error': str(e)})
+
+            if self.path == prefix + 'reboot-server':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                try:
+                    # 异步延迟 1 秒后执行安全重启，确保先给前端返回 HTTP 200
+                    subprocess.Popen(['bash', '-c', 'sleep 1 && reboot'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return self.reply_json(200, {'ok': True, 'message': '服务器正在重启中'})
+                except Exception as e:
+                    return self.reply_json(500, {'ok': False, 'error': str(e)})
 
             if subpath == 'reality-status':
                 if not self.is_authenticated():
