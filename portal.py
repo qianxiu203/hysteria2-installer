@@ -379,7 +379,7 @@ const btnInstallGost = document.getElementById('btn-install-gost');
 
 if (btnInstallGost) {
   btnInstallGost.addEventListener('click', async () => {
-    if (!confirm('确定要一键安装/更新 GOST 服务吗？\n系统将自动检测架构、下载官方核心并配置开机自启。')) return;
+    if (!confirm("确定要一键安装或更新 GOST 代理服务吗？系统将自动匹配架构并配置自启。")) return;
     btnInstallGost.disabled = true;
     const origText = btnInstallGost.textContent;
     btnInstallGost.textContent = '⏳ 正在安装 GOST...';
