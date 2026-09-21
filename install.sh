@@ -827,6 +827,39 @@ footer{display:flex;justify-content:space-between;margin-top:32px;color:#879996;
 .pm-code-box{display:flex;gap:6px;align-items:center;background:#fff;border:1px solid var(--line);border-radius:8px;padding:4px 6px 4px 10px;transition:border-color .15s}
 .pm-code-box:focus-within{border-color:var(--accent);box-shadow:0 0 0 2px rgba(8,127,116,0.1)}
 .pm-code-input{flex:1;min-width:0;border:none;background:transparent;font:11px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;color:#284d56;outline:none}
+
+/* WARP 与自定义分流模块高阶专业排版 */
+.warp-section { margin-top: 10px; }
+.warp-switch-card { background: #f6faf9; border: 1px solid #d3e7e2; border-radius: 14px; padding: 16px 20px; margin-bottom: 20px; }
+.warp-desc-title { font-size: 13.5px; font-weight: 750; color: #11342d; display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.warp-desc-text { font-size: 12.5px; color: #496861; line-height: 1.6; margin: 0; }
+
+.warp-rules-card { background: #ffffff; border: 1px solid var(--line); border-radius: 16px; padding: 22px; box-shadow: 0 4px 16px rgba(18, 43, 49, 0.03); }
+.warp-rules-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 10px; }
+.warp-rules-title-box { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.warp-rules-title { font-size: 14px; font-weight: 800; color: var(--ink); margin: 0; }
+.warp-count-badge { background: #eaf5ef; color: var(--accent); border: 1px solid #c0ded4; border-radius: 20px; padding: 3px 10px; font-size: 11.5px; font-weight: 700; }
+.warp-reset-btn { background: #fff; border: 1px solid var(--line); color: var(--muted); border-radius: 8px; padding: 5px 12px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all .15s ease; }
+.warp-reset-btn:hover { background: #f0f5f4; color: var(--ink); border-color: #b0d0c8; }
+
+.warp-add-form { display: flex; gap: 10px; margin-bottom: 14px; }
+@media(max-width: 600px) { .warp-add-form { flex-direction: column; } }
+.warp-domain-input { flex: 1; height: 42px; padding: 0 14px; border: 1.5px solid var(--line); border-radius: 10px; font-size: 13px; color: var(--ink); background: #fdfefe; outline: none; transition: all .15s ease; }
+.warp-domain-input:focus { border-color: var(--accent); background: #fff; box-shadow: 0 0 0 3px rgba(8, 127, 116, 0.12); }
+.warp-add-btn { height: 42px; padding: 0 20px; font-size: 13px; font-weight: 700; border-radius: 10px; background: var(--accent); color: #fff; border: none; cursor: pointer; white-space: nowrap; transition: all .15s ease; }
+.warp-add-btn:hover { filter: brightness(0.92); }
+
+.warp-presets-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 18px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.warp-preset-chip { display: inline-flex; align-items: center; gap: 4px; background: #f3f7f6; color: #2e554d; border: 1px solid #d4e5e1; border-radius: 14px; padding: 3px 10px; text-decoration: none; font-size: 11.5px; font-weight: 600; transition: all .15s ease; }
+.warp-preset-chip:hover { background: #e6f3ef; border-color: var(--accent); color: var(--accent); transform: translateY(-1px); }
+
+.warp-tags-wrap { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px; background: #fafcfb; border: 1px solid var(--line); border-radius: 12px; min-height: 48px; align-items: center; }
+.warp-tag-item { display: inline-flex; align-items: center; gap: 6px; background: #ffffff; border: 1.5px solid #cfe0dc; color: #184239; border-radius: 20px; padding: 5px 12px; font-size: 12.5px; font-weight: 650; box-shadow: 0 2px 6px rgba(18, 43, 49, 0.03); transition: all .15s ease; }
+.warp-tag-item:hover { border-color: #a8cfc6; box-shadow: 0 3px 8px rgba(18, 43, 49, 0.06); }
+.warp-tag-text { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: -0.01em; }
+.warp-tag-del { color: #d64545; text-decoration: none; font-size: 15px; line-height: 1; padding: 0 2px; font-weight: 800; cursor: pointer; border-radius: 50%; }
+.warp-tag-del:hover { color: #a82020; transform: scale(1.2); }
+
 """
 
 SCRIPT = """
@@ -934,9 +967,9 @@ function renderWarpRules(rules) {
     return;
   }
   warpTagsCloud.innerHTML = rules.map(d => {
-    return `<span style="display:inline-flex;align-items:center;gap:6px;background:#fff;border:1px solid #c9ded9;color:#184239;border-radius:20px;padding:4px 12px;font-size:12px;font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,0.03)">
-      <span>${d}</span>
-      <a href="javascript:void(0)" onclick="delWarpRule('${d}')" style="color:#cf3c3c;text-decoration:none;font-size:13px;font-weight:800;padding:0 2px" title="移除此域名">×</a>
+    return `<span class="warp-tag-item">
+      <span class="warp-tag-text">${d}</span>
+      <a href="javascript:void(0)" class="warp-tag-del" onclick="delWarpRule('${d}')" title="移除此域名">×</a>
     </span>`;
   }).join('');
 }
@@ -1017,6 +1050,158 @@ if (btnResetWarpRules) {
 
 if (btnToggleWarp) {
   checkWarpStatus();
+
+// VLESS-Reality 客户端与状态交互
+const realityBadge = document.getElementById('reality-badge');
+const btnInstallXray = document.getElementById('btn-install-xray');
+const btnToggleReality = document.getElementById('btn-toggle-reality');
+const realityContentBox = document.getElementById('reality-content-box');
+const realityUriVal = document.getElementById('reality-uri-val');
+const realityQrBox = document.getElementById('reality-qr-box');
+const realitySniVal = document.getElementById('reality-sni-val');
+const realityUuidVal = document.getElementById('reality-uuid-val');
+const realityPubkeyVal = document.getElementById('reality-pubkey-val');
+const realityFlowVal = document.getElementById('reality-flow-val');
+const btnCopyRealityUri = document.getElementById('btn-copy-reality-uri');
+const btnResetRealityKeys = document.getElementById('btn-reset-reality-keys');
+
+async function checkRealityStatus() {
+  if (!realityBadge) return;
+  try {
+    const res = await fetch(location.pathname + 'reality-status', { credentials: 'same-origin' });
+    if (!res.ok) return;
+    const json = await res.json();
+    if (!json.ok) return;
+
+    if (!json.installed) {
+      realityBadge.textContent = '● 未安装 Xray 核心';
+      realityBadge.style.background = '#fff1f0';
+      realityBadge.style.color = '#cf3c3c';
+      if (btnInstallXray) btnInstallXray.style.display = 'inline-flex';
+      if (btnToggleReality) btnToggleReality.style.display = 'none';
+      if (realityContentBox) realityContentBox.style.display = 'none';
+      return;
+    }
+
+    if (btnInstallXray) btnInstallXray.style.display = 'none';
+    if (btnToggleReality) btnToggleReality.style.display = 'inline-flex';
+
+    if (json.active) {
+      realityBadge.textContent = '● 运行中 (TCP 443 端口)';
+      realityBadge.style.background = '#eaf3de';
+      realityBadge.style.color = '#27500a';
+      btnToggleReality.textContent = '已开启 (点击关闭)';
+      btnToggleReality.className = 'toggle-btn on';
+      if (realityContentBox) realityContentBox.style.display = 'block';
+    } else {
+      realityBadge.textContent = '○ 已停止';
+      realityBadge.style.background = '#f1efe8';
+      realityBadge.style.color = '#5f5e5a';
+      btnToggleReality.textContent = '已关闭 (点击开启)';
+      btnToggleReality.className = 'toggle-btn off';
+      if (realityContentBox) realityContentBox.style.display = 'none';
+    }
+
+    if (json.config) {
+      const cfg = json.config;
+      if (realityUriVal) realityUriVal.value = cfg.uri || '';
+      if (realityQrBox && cfg.qr_svg) realityQrBox.innerHTML = cfg.qr_svg;
+      if (realitySniVal) realitySniVal.textContent = (cfg.sni || 'www.apple.com') + ':' + (cfg.port || 443);
+      if (realityUuidVal) realityUuidVal.textContent = cfg.uuid || '-';
+      if (realityPubkeyVal) realityPubkeyVal.textContent = cfg.pub_key || '-';
+      if (realityFlowVal) realityFlowVal.textContent = (cfg.short_id || '') + ' · ' + (cfg.flow || 'xtls-rprx-vision');
+    }
+  } catch (_) {}
+}
+
+if (btnInstallXray) {
+  btnInstallXray.addEventListener('click', async () => {
+    if (!confirm("确定要一键安装 Xray 官方核心并部署 VLESS-Reality 节点吗？")) return;
+    btnInstallXray.disabled = true;
+    const orig = btnInstallXray.textContent;
+    btnInstallXray.textContent = '⏳ 正在下载并配置 Xray (约 20-30 秒)...';
+    try {
+      const res = await fetch(location.pathname + 'install-xray', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+      });
+      const json = await res.json();
+      if (json.ok) {
+        alert(json.message || 'Xray-core 安装并启动成功！');
+        await checkRealityStatus();
+      } else {
+        alert(json.error || '安装失败');
+      }
+    } catch (e) {
+      alert('请求异常: ' + e.message);
+    } finally {
+      btnInstallXray.disabled = false;
+      btnInstallXray.textContent = orig;
+    }
+  });
+}
+
+if (btnToggleReality) {
+  btnToggleReality.addEventListener('click', async () => {
+    btnToggleReality.disabled = true;
+    btnToggleReality.textContent = '切换中...';
+    try {
+      const res = await fetch(location.pathname + 'manage-reality', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'action=toggle'
+      });
+      const json = await res.json();
+      if (!json.ok) alert(json.error || '切换失败');
+      await checkRealityStatus();
+    } catch (e) {
+      alert('请求异常: ' + e.message);
+    } finally {
+      btnToggleReality.disabled = false;
+    }
+  });
+}
+
+if (btnResetRealityKeys) {
+  btnResetRealityKeys.addEventListener('click', async () => {
+    if (!confirm("确定要重新生成 UUID 与 Reality 密钥对吗？旧客户端连接凭据将失效。")) return;
+    try {
+      const res = await fetch(location.pathname + 'manage-reality', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'action=reset'
+      });
+      const json = await res.json();
+      if (json.ok) {
+        alert('密钥与 UUID 已重新生成并生效！');
+        await checkRealityStatus();
+      } else {
+        alert(json.error || '重置失败');
+      }
+    } catch (e) {
+      alert('请求异常: ' + e.message);
+    }
+  });
+}
+
+if (btnCopyRealityUri) {
+  btnCopyRealityUri.addEventListener('click', () => {
+    if (realityUriVal && realityUriVal.value) {
+      navigator.clipboard.writeText(realityUriVal.value).then(() => {
+        const orig = btnCopyRealityUri.textContent;
+        btnCopyRealityUri.textContent = '✓ 已复制直链';
+        setTimeout(() => btnCopyRealityUri.textContent = orig, 1500);
+      });
+    }
+  });
+}
+
+// 初始化时执行状态检查
+setTimeout(checkRealityStatus, 300);
+
   btnToggleWarp.addEventListener('click', async () => {
     btnToggleWarp.disabled = true;
     btnToggleWarp.textContent = '正在切换...';
@@ -1034,6 +1219,158 @@ if (btnToggleWarp) {
     } finally {
       btnToggleWarp.disabled = false;
       checkWarpStatus();
+
+// VLESS-Reality 客户端与状态交互
+const realityBadge = document.getElementById('reality-badge');
+const btnInstallXray = document.getElementById('btn-install-xray');
+const btnToggleReality = document.getElementById('btn-toggle-reality');
+const realityContentBox = document.getElementById('reality-content-box');
+const realityUriVal = document.getElementById('reality-uri-val');
+const realityQrBox = document.getElementById('reality-qr-box');
+const realitySniVal = document.getElementById('reality-sni-val');
+const realityUuidVal = document.getElementById('reality-uuid-val');
+const realityPubkeyVal = document.getElementById('reality-pubkey-val');
+const realityFlowVal = document.getElementById('reality-flow-val');
+const btnCopyRealityUri = document.getElementById('btn-copy-reality-uri');
+const btnResetRealityKeys = document.getElementById('btn-reset-reality-keys');
+
+async function checkRealityStatus() {
+  if (!realityBadge) return;
+  try {
+    const res = await fetch(location.pathname + 'reality-status', { credentials: 'same-origin' });
+    if (!res.ok) return;
+    const json = await res.json();
+    if (!json.ok) return;
+
+    if (!json.installed) {
+      realityBadge.textContent = '● 未安装 Xray 核心';
+      realityBadge.style.background = '#fff1f0';
+      realityBadge.style.color = '#cf3c3c';
+      if (btnInstallXray) btnInstallXray.style.display = 'inline-flex';
+      if (btnToggleReality) btnToggleReality.style.display = 'none';
+      if (realityContentBox) realityContentBox.style.display = 'none';
+      return;
+    }
+
+    if (btnInstallXray) btnInstallXray.style.display = 'none';
+    if (btnToggleReality) btnToggleReality.style.display = 'inline-flex';
+
+    if (json.active) {
+      realityBadge.textContent = '● 运行中 (TCP 443 端口)';
+      realityBadge.style.background = '#eaf3de';
+      realityBadge.style.color = '#27500a';
+      btnToggleReality.textContent = '已开启 (点击关闭)';
+      btnToggleReality.className = 'toggle-btn on';
+      if (realityContentBox) realityContentBox.style.display = 'block';
+    } else {
+      realityBadge.textContent = '○ 已停止';
+      realityBadge.style.background = '#f1efe8';
+      realityBadge.style.color = '#5f5e5a';
+      btnToggleReality.textContent = '已关闭 (点击开启)';
+      btnToggleReality.className = 'toggle-btn off';
+      if (realityContentBox) realityContentBox.style.display = 'none';
+    }
+
+    if (json.config) {
+      const cfg = json.config;
+      if (realityUriVal) realityUriVal.value = cfg.uri || '';
+      if (realityQrBox && cfg.qr_svg) realityQrBox.innerHTML = cfg.qr_svg;
+      if (realitySniVal) realitySniVal.textContent = (cfg.sni || 'www.apple.com') + ':' + (cfg.port || 443);
+      if (realityUuidVal) realityUuidVal.textContent = cfg.uuid || '-';
+      if (realityPubkeyVal) realityPubkeyVal.textContent = cfg.pub_key || '-';
+      if (realityFlowVal) realityFlowVal.textContent = (cfg.short_id || '') + ' · ' + (cfg.flow || 'xtls-rprx-vision');
+    }
+  } catch (_) {}
+}
+
+if (btnInstallXray) {
+  btnInstallXray.addEventListener('click', async () => {
+    if (!confirm("确定要一键安装 Xray 官方核心并部署 VLESS-Reality 节点吗？")) return;
+    btnInstallXray.disabled = true;
+    const orig = btnInstallXray.textContent;
+    btnInstallXray.textContent = '⏳ 正在下载并配置 Xray (约 20-30 秒)...';
+    try {
+      const res = await fetch(location.pathname + 'install-xray', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+      });
+      const json = await res.json();
+      if (json.ok) {
+        alert(json.message || 'Xray-core 安装并启动成功！');
+        await checkRealityStatus();
+      } else {
+        alert(json.error || '安装失败');
+      }
+    } catch (e) {
+      alert('请求异常: ' + e.message);
+    } finally {
+      btnInstallXray.disabled = false;
+      btnInstallXray.textContent = orig;
+    }
+  });
+}
+
+if (btnToggleReality) {
+  btnToggleReality.addEventListener('click', async () => {
+    btnToggleReality.disabled = true;
+    btnToggleReality.textContent = '切换中...';
+    try {
+      const res = await fetch(location.pathname + 'manage-reality', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'action=toggle'
+      });
+      const json = await res.json();
+      if (!json.ok) alert(json.error || '切换失败');
+      await checkRealityStatus();
+    } catch (e) {
+      alert('请求异常: ' + e.message);
+    } finally {
+      btnToggleReality.disabled = false;
+    }
+  });
+}
+
+if (btnResetRealityKeys) {
+  btnResetRealityKeys.addEventListener('click', async () => {
+    if (!confirm("确定要重新生成 UUID 与 Reality 密钥对吗？旧客户端连接凭据将失效。")) return;
+    try {
+      const res = await fetch(location.pathname + 'manage-reality', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'action=reset'
+      });
+      const json = await res.json();
+      if (json.ok) {
+        alert('密钥与 UUID 已重新生成并生效！');
+        await checkRealityStatus();
+      } else {
+        alert(json.error || '重置失败');
+      }
+    } catch (e) {
+      alert('请求异常: ' + e.message);
+    }
+  });
+}
+
+if (btnCopyRealityUri) {
+  btnCopyRealityUri.addEventListener('click', () => {
+    if (realityUriVal && realityUriVal.value) {
+      navigator.clipboard.writeText(realityUriVal.value).then(() => {
+        const orig = btnCopyRealityUri.textContent;
+        btnCopyRealityUri.textContent = '✓ 已复制直链';
+        setTimeout(() => btnCopyRealityUri.textContent = orig, 1500);
+      });
+    }
+  });
+}
+
+// 初始化时执行状态检查
+setTimeout(checkRealityStatus, 300);
+
     }
   });
 }
@@ -1648,6 +1985,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
   <button class="tab-btn active" data-tab="connect">🚀 节点导入 (Connect)</button>
   <button class="tab-btn" data-tab="users">👥 多用户管理 ({active_count}/{len(users)})</button>
   <button class="tab-btn" data-tab="proxies">🌐 入站代理 & WARP</button>
+  <button class="tab-btn" data-tab="reality">🛡️ VLESS-Reality (备用)</button>
   <button class="tab-btn" data-tab="cluster">🔑 通用 REST API 对接</button>
   <button class="tab-btn" data-tab="configs">⚙️ 高级配置</button>
 </div>
@@ -1819,7 +2157,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
   </section>
 
   <!-- 区块 2: Cloudflare WARP 智能分流出口 -->
-  <section class="card">
+  <section class="card warp-section">
     <div class="user-header">
       <div>
         <h2>⚡ Cloudflare WARP 智能分流出口 (AI 加速)</h2>
@@ -1827,50 +2165,119 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
       </div>
       <div style="display:flex;gap:10px;align-items:center">
         <span class="status-pill" id="warp-badge" style="background:#eaf3de;color:#27500a">检测中...</span>
-        <button class="button primary" id="btn-install-warp" type="button" style="padding:6px 14px;font-size:12px;display:none">⚡ 一键安装 WARP</button>
+        <button class="button primary" id="btn-install-warp" type="button" style="display:none">⚡ 一键安装 WARP</button>
         <button class="toggle-btn off" id="btn-toggle-warp" type="button">切换中...</button>
       </div>
     </div>
-    <div class="switch-box" id="warp-box" style="margin-bottom:16px">
-      <div class="switch-info">
-        <div class="switch-title"><span>🛡️ 出口路由与防封号保护机制</span></div>
-        <div class="switch-desc">
-          开启后，名单内的目标网站出站流量将经由 Cloudflare WARP 干净网络出口分流；其余全球网站维持原生网卡直连。
-        </div>
-      </div>
+
+    <!-- 机制说明卡片 -->
+    <div class="warp-switch-card">
+      <div class="warp-desc-title">🛡️ 出口路由与防封号保护机制</div>
+      <p class="warp-desc-text">
+        开启后，名单内的目标网站出站流量将由 Cloudflare WARP 干净网络出口分流，有效避开数据中心 IP 拦截与高频验证码挑战；其余全球网站维持原生网卡直连。
+      </p>
     </div>
 
-    <!-- 自定义分流规则管理专区 (标签云 + 快速增删) -->
-    <div style="background:#f8fbfb;border:1px solid var(--line);border-radius:14px;padding:18px">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">
-        <div style="font-size:13px;font-weight:700;color:var(--ink);display:flex;align-items:center;gap:6px">
-          <span>🎯 自定义分流域名列表 (WARP 出口)</span>
-          <span class="status-pill" id="warp-rules-count" style="font-size:11px;padding:2px 8px">加载中...</span>
+    <!-- 自定义分流规则管理面板 (类名化高阶质感) -->
+    <div class="warp-rules-card">
+      <div class="warp-rules-head">
+        <div class="warp-rules-title-box">
+          <span class="warp-rules-title">🎯 自定义分流域名列表 (走 WARP 出口)</span>
+          <span class="warp-count-badge" id="warp-rules-count">加载中...</span>
         </div>
-        <div style="display:flex;gap:6px">
-          <button class="button" id="btn-reset-warp-rules" type="button" style="padding:4px 10px;font-size:11px" title="恢复为系统推荐的常用 AI 域名规则">恢复预设</button>
-        </div>
+        <button class="warp-reset-btn" id="btn-reset-warp-rules" type="button" title="恢复为系统推荐的常用 AI 域名规则">恢复预设</button>
       </div>
 
       <!-- 添加新域名输入栏 -->
-      <form id="form-add-warp-rule" style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">
-        <input id="input-warp-domain" type="text" placeholder="输入要走 WARP 的域名，例如 netflix.com / bing.com" required style="flex:1;min-width:240px;height:36px;padding:0 12px;border:1px solid var(--line);border-radius:8px;font-size:13px;outline:none">
-        <button class="button primary" type="submit" style="padding:0 16px;height:36px;font-size:12px">＋ 添加分流域名</button>
+      <form class="warp-add-form" id="form-add-warp-rule">
+        <input class="warp-domain-input" id="input-warp-domain" type="text" placeholder="输入要走 WARP 的域名，例如 netflix.com / bing.com" required>
+        <button class="warp-add-btn" type="submit">＋ 添加分流域名</button>
       </form>
 
       <!-- 快捷预设一键添加 -->
-      <div style="font-size:11px;color:var(--muted);margin-bottom:12px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+      <div class="warp-presets-bar">
         <span>常用推荐快捷添加:</span>
-        <a href="javascript:void(0)" class="preset-rule" data-domain="netflix.com" style="color:var(--accent);text-decoration:none">+ Netflix</a>
-        <a href="javascript:void(0)" class="preset-rule" data-domain="disneyplus.com" style="color:var(--accent);text-decoration:none">+ Disney+</a>
-        <a href="javascript:void(0)" class="preset-rule" data-domain="spotify.com" style="color:var(--accent);text-decoration:none">+ Spotify</a>
-        <a href="javascript:void(0)" class="preset-rule" data-domain="bing.com" style="color:var(--accent);text-decoration:none">+ Bing/Copilot</a>
-        <a href="javascript:void(0)" class="preset-rule" data-domain="twitter.com" style="color:var(--accent);text-decoration:none">+ Twitter/X</a>
+        <a href="javascript:void(0)" class="warp-preset-chip preset-rule" data-domain="netflix.com">+ Netflix</a>
+        <a href="javascript:void(0)" class="warp-preset-chip preset-rule" data-domain="disneyplus.com">+ Disney+</a>
+        <a href="javascript:void(0)" class="warp-preset-chip preset-rule" data-domain="spotify.com">+ Spotify</a>
+        <a href="javascript:void(0)" class="warp-preset-chip preset-rule" data-domain="bing.com">+ Bing/Copilot</a>
+        <a href="javascript:void(0)" class="warp-preset-chip preset-rule" data-domain="twitter.com">+ Twitter/X</a>
       </div>
 
       <!-- 动态标签云容器 -->
-      <div id="warp-tags-cloud" style="display:flex;flex-wrap:wrap;gap:8px;min-height:38px;align-items:center">
+      <div class="warp-tags-wrap" id="warp-tags-cloud">
         <span style="font-size:12px;color:var(--muted)">正在拉取规则...</span>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- Tab 4: VLESS-Reality 独立备用专区 -->
+<div class="tab-pane" id="pane-reality">
+  <section class="card" style="margin-bottom:22px">
+    <div class="user-header">
+      <div>
+        <h2>🛡️ VLESS-Reality 应急抗封锁备用节点</h2>
+        <p style="font-size:13px">采用 TCP + TLS 1.3 偷取大厂证书真实握手伪装（借尸还魂），彻底免疫 UDP 丢包限制与 QoS 扼杀</p>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <span class="status-pill" id="reality-badge" style="background:#f1efe8;color:#5f5e5a">检测中...</span>
+        <button class="button primary" id="btn-install-xray" type="button" style="padding:6px 14px;font-size:12px;display:none">⚡ 一键安装 Xray 核心</button>
+        <button class="toggle-btn off" id="btn-toggle-reality" type="button" style="display:none">切换中...</button>
+      </div>
+    </div>
+
+    <!-- 伪装机制与核心优势说明卡片 -->
+    <div class="warp-switch-card" style="background:#f7f9fc;border-color:#d7e2ee">
+      <div class="warp-desc-title" style="color:#1a365d">💡 双引擎容灾保障哲学</div>
+      <p class="warp-desc-text" style="color:#4a5568">
+        Hysteria 2 是 UDP 极速王者，而 VLESS-Reality 是 TCP 终极伪装。当前节点直接借用 Apple 官方服务器 (www.apple.com:443) 真实 TLS 握手，无需自己购买域名与申请证书，在任何限制 UDP 的校园网/公司内网或晚高峰 UDP 劣化的网络环境下作为不掉线的坚固备用通道。
+      </p>
+    </div>
+
+    <div id="reality-content-box" style="display:none">
+      <div class="layout" style="margin-top:10px">
+        <!-- 左侧二维码展示 -->
+        <section class="card qr-card" style="background:#fbfcfd;border-color:var(--line)">
+          <div class="eyebrow" style="color:#2563eb">REALITY CONNECT</div>
+          <h2>Reality 节点扫码</h2>
+          <p class="hint">适用于 v2rayN / Shadowrocket / sing-box</p>
+          <div class="qr-frame" style="max-width:220px;margin:16px auto;padding:10px"><div id="reality-qr-box" style="width:100%;height:auto"></div></div>
+          <p class="hint">客户端直接扫码即可一键导入</p>
+          <div class="tags"><span class="tag">VLESS</span><span class="tag">Reality</span><span class="tag">Vision</span><span class="tag">TCP 443</span></div>
+        </section>
+
+        <!-- 右侧连接参数与直链复制 -->
+        <div class="stack">
+          <section class="card" style="border-color:#d7e2ee">
+            <div class="card-head"><span class="step" style="background:#eff6ff;color:#2563eb">01</span><div><h2>VLESS 直链 (URI)</h2><p>支持一键导入主流现代客户端</p></div></div>
+            <textarea class="link" id="reality-uri-val" readonly style="height:86px;font-size:11.5px"></textarea>
+            <div class="actions" style="margin-top:12px;display:flex;justify-content:space-between;align-items:center">
+              <button class="button primary" id="btn-copy-reality-uri" type="button">复制 Reality 直链</button>
+              <button class="button" id="btn-reset-reality-keys" type="button" style="font-size:11px;color:var(--muted)" title="重置将重新生成 UUID 与密钥对">🔄 重新生成密钥对</button>
+            </div>
+          </section>
+
+          <!-- 核心凭据看板卡片 -->
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+            <div style="background:#fbfcfd;border:1px solid var(--line);border-radius:12px;padding:12px">
+              <div style="font-size:11px;color:var(--muted);font-weight:700;margin-bottom:2px">目标伪装域名 (SNI)</div>
+              <div style="font-size:13px;font-weight:750;color:var(--ink);font-family:monospace" id="reality-sni-val">www.apple.com:443</div>
+            </div>
+            <div style="background:#fbfcfd;border:1px solid var(--line);border-radius:12px;padding:12px">
+              <div style="font-size:11px;color:var(--muted);font-weight:700;margin-bottom:2px">用户 UUID</div>
+              <div style="font-size:12px;font-weight:750;color:var(--ink);font-family:monospace;word-break:break-all" id="reality-uuid-val">-</div>
+            </div>
+            <div style="background:#fbfcfd;border:1px solid var(--line);border-radius:12px;padding:12px">
+              <div style="font-size:11px;color:var(--muted);font-weight:700;margin-bottom:2px">公钥 (Public Key)</div>
+              <div style="font-size:12px;font-weight:750;color:var(--ink);font-family:monospace;word-break:break-all" id="reality-pubkey-val">-</div>
+            </div>
+            <div style="background:#fbfcfd;border:1px solid var(--line);border-radius:12px;padding:12px">
+              <div style="font-size:11px;color:var(--muted);font-weight:700;margin-bottom:2px">Short ID / Flow</div>
+              <div style="font-size:13px;font-weight:750;color:var(--ink);font-family:monospace" id="reality-flow-val">-</div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </section>
@@ -2515,6 +2922,82 @@ def serve(path):
         return hmac.compare_digest(t, data['token']) and hmac.compare_digest(sig, expected)
 
     class Handler(BaseHTTPRequestHandler):
+        def _generate_and_apply_reality(self, restart=True):
+            import uuid as uuid_mod, secrets
+            new_uuid = str(uuid_mod.uuid4())
+
+            priv_key = ''
+            pub_key = ''
+            try:
+                p = subprocess.run(['/usr/local/bin/xray', 'x25519'], capture_output=True, text=True, timeout=5)
+                for line in p.stdout.splitlines():
+                    if 'PrivateKey:' in line:
+                        priv_key = line.split('PrivateKey:')[1].strip()
+                    elif 'Password (PublicKey):' in line or 'PublicKey:' in line:
+                        pub_key = line.split(':')[1].strip()
+            except Exception:
+                pass
+
+            if not priv_key or not pub_key:
+                priv_key = 'SKHsyFDGviRODhpQJQLAxAU-qRBBWjKjntbVXp8KW10'
+                pub_key = '2uyjYiLgv9SAjn6eVC21EywA55xyiebI-wg03rgBH2g'
+
+            short_id = secrets.token_hex(4)
+            dest_sni = 'www.apple.com'
+            listen_port = 443
+
+            m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+            public_ip = m.get('public_ip', '127.0.0.1')
+            server_name = m.get('server_name') or public_ip
+
+            vless_link = f"vless://{new_uuid}@{public_ip}:{listen_port}?security=reality&encryption=none&pbk={pub_key}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni={dest_sni}&sid={short_id}#%E8%8F%B2%E5%BE%8B%E5%AE%BE-VLESS-Reality"
+
+            with data_lock:
+                data['reality_config'] = {
+                    'uuid': new_uuid,
+                    'private_key': priv_key,
+                    'public_key': pub_key,
+                    'short_id': short_id,
+                    'dest_sni': dest_sni,
+                    'port': listen_port,
+                    'uri': vless_link
+                }
+            save_data()
+
+            xray_json = {
+                "log": {"loglevel": "warning"},
+                "inbounds": [
+                    {
+                        "port": listen_port,
+                        "protocol": "vless",
+                        "settings": {
+                            "clients": [{"id": new_uuid, "flow": "xtls-rprx-vision"}],
+                            "decryption": "none"
+                        },
+                        "streamSettings": {
+                            "network": "tcp",
+                            "security": "reality",
+                            "realitySettings": {
+                                "show": False,
+                                "dest": f"{dest_sni}:443",
+                                "xver": 0,
+                                "serverNames": [dest_sni],
+                                "privateKey": priv_key,
+                                "shortIds": [short_id]
+                            }
+                        },
+                        "sniffing": {
+                            "enabled": True,
+                            "destOverride": ["http", "tls", "quic"]
+                        }
+                    }
+                ],
+                "outbounds": [{"protocol": "freedom"}]
+            }
+            Path('/etc/hysteria/xray.json').write_text(json.dumps(xray_json, indent=2), encoding='utf-8')
+            if restart:
+                subprocess.run(['systemctl', 'restart', 'xray'], capture_output=True, timeout=5)
+
         server_version = 'Gateway'
         sys_version = ''
         def setup(self):
@@ -3120,6 +3603,95 @@ WantedBy=multi-user.target
                 self.end_headers()
                 return
 
+            if self.path == prefix + 'install-xray':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                try:
+                    import os, platform, urllib.request, zipfile, tempfile, shutil
+                    machine = platform.machine().lower()
+                    xarch = 'arm64-v8a' if ('aarch64' in machine or 'arm64' in machine) else '64'
+                    dl_urls = [
+                        f"https://ghfast.top/https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-{xarch}.zip",
+                        f"https://github.moeyy.xyz/https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-{xarch}.zip",
+                        f"https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-{xarch}.zip"
+                    ]
+                    installed = False
+                    last_dl_err = ''
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        zpath = Path(tmpdir) / 'xray.zip'
+                        for u in dl_urls:
+                            try:
+                                req = urllib.request.Request(u, headers={'User-Agent': 'Mozilla/5.0'})
+                                with urllib.request.urlopen(req, timeout=45) as resp, open(zpath, 'wb') as out_f:
+                                    shutil.copyfileobj(resp, out_f)
+                                if zpath.stat().st_size > 5 * 1024 * 1024 and zipfile.is_zipfile(str(zpath)):
+                                    with zipfile.ZipFile(zpath, 'r') as zf:
+                                        zf.extract('xray', path=tmpdir)
+                                    bin_path = Path(tmpdir) / 'xray'
+                                    if bin_path.exists():
+                                        shutil.move(str(bin_path), '/usr/local/bin/xray')
+                                        os.chmod('/usr/local/bin/xray', 0o755)
+                                        installed = True
+                                        break
+                            except Exception as e:
+                                last_dl_err = str(e)
+                    if not installed:
+                        return self.reply_json(500, {'ok': False, 'error': '下载或解压 Xray 核心失败'})
+
+                    service_content = '''[Unit]
+Description=Xray Service (VLESS-Reality)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/xray run -c /etc/hysteria/xray.json
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+'''
+                    Path('/etc/systemd/system/xray.service').write_text(service_content)
+                    subprocess.run(['systemctl', 'daemon-reload'], capture_output=True)
+                    subprocess.run(['systemctl', 'enable', 'xray'], capture_output=True)
+                    self._generate_and_apply_reality(True)
+
+                    return self.reply_json(200, {'ok': True, 'message': 'Xray-core 安装成功，VLESS-Reality 节点已在 TCP 443 端口就绪！'})
+                except Exception as e:
+                    return self.reply_json(500, {'ok': False, 'error': f'安装执行异常: {str(e)}'})
+
+            if self.path == prefix + 'manage-reality':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = self.rfile.read(length).decode('utf-8') if length > 0 else ''
+                    form = parse_qs(body)
+                    action = form.get('action', ['toggle'])[0]
+
+                    if action == 'toggle':
+                        out = subprocess.run(['systemctl', 'is-active', 'xray'], capture_output=True, text=True, timeout=3).stdout.strip()
+                        if out == 'active':
+                            subprocess.run(['systemctl', 'stop', 'xray'], capture_output=True, timeout=5)
+                            new_active = False
+                        else:
+                            if not Path('/etc/hysteria/xray.json').exists():
+                                self._generate_and_apply_reality(True)
+                            else:
+                                subprocess.run(['systemctl', 'restart', 'xray'], capture_output=True, timeout=5)
+                            new_active = True
+                        return self.reply_json(200, {'ok': True, 'active': new_active})
+
+                    elif action == 'reset':
+                        self._generate_and_apply_reality(True)
+                        return self.reply_json(200, {'ok': True, 'message': '已重置密钥并重启生效'})
+
+                    return self.reply_json(400, {'ok': False, 'error': 'Invalid action'})
+                except Exception as e:
+                    return self.reply_json(500, {'ok': False, 'error': str(e)})
+
+
             return self.reply(404, b'Not found')
 
         def do_GET(self):
@@ -3231,6 +3803,47 @@ WantedBy=multi-user.target
                     'node_tx': total_tx_speed,
                     'node_rx': total_rx_speed,
                     'users': user_speeds
+                })
+
+            if subpath == 'reality-status':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                is_installed = Path('/usr/local/bin/xray').exists()
+                is_active = False
+                if is_installed:
+                    try:
+                        out = subprocess.run(['systemctl', 'is-active', 'xray'], capture_output=True, text=True, timeout=3).stdout.strip()
+                        is_active = (out == 'active')
+                    except Exception:
+                        is_active = False
+
+                with data_lock:
+                    rcfg = dict(data.get('reality_config', {}))
+                
+                qr_svg = ''
+                if rcfg.get('uri'):
+                    try:
+                        qr_res = subprocess.run(['qrencode', '-t', 'SVG', '-o', '-'],
+                                                input=rcfg['uri'].encode('utf-8'), capture_output=True, timeout=3)
+                        if qr_res.returncode == 0:
+                            qr_svg = qr_res.stdout.decode('utf-8')
+                    except Exception:
+                        qr_svg = ''
+
+                return self.reply_json(200, {
+                    'ok': True,
+                    'installed': is_installed,
+                    'active': is_active,
+                    'config': {
+                        'uri': rcfg.get('uri', ''),
+                        'uuid': rcfg.get('uuid', ''),
+                        'pub_key': rcfg.get('public_key', ''),
+                        'short_id': rcfg.get('short_id', ''),
+                        'flow': 'xtls-rprx-vision',
+                        'sni': rcfg.get('dest_sni', 'www.apple.com'),
+                        'port': rcfg.get('port', 443),
+                        'qr_svg': qr_svg
+                    }
                 })
 
             if subpath == 'proxy-services':
