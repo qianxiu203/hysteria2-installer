@@ -671,7 +671,7 @@ document.querySelectorAll('.btn-apply-bbr').forEach(btn => {
   btn.addEventListener('click', async () => {
     const ver = btn.getAttribute('data-version') || 'v1';
     const label = { v1: 'BBR V1 (经典官方)', v2: 'BBR V2 (低丢包)', v3: 'BBR V3 (极限吞吐)' }[ver];
-    if (!confirm('确定要一键配置 ' + label + ' 加速引擎吗？\n系统将自动写入内核持久化配置，部分环境重启后生效。')) return;
+    if (!confirm('确定要一键配置 ' + label + ' 加速引擎吗？系统将自动写入内核持久化配置，部分环境重启后生效。')) return;
 
     btn.disabled = true;
     const orig = btn.textContent;
@@ -701,7 +701,7 @@ document.querySelectorAll('.btn-apply-bbr').forEach(btn => {
 
 if (btnRebootServer) {
   btnRebootServer.addEventListener('click', async () => {
-    if (!confirm("确定要立即安全重启服务器以生效新 BBR 内核网络参数吗？\n服务器将在 10 秒后完成重启，页面将自动重连。")) return;
+    if (!confirm("确定要立即安全重启服务器以生效新 BBR 内核网络参数吗？服务器将在 10 秒后完成重启，页面将自动重连。")) return;
     btnRebootServer.disabled = true;
     btnRebootServer.textContent = '⏳ 重启指令已发送...';
     try {
