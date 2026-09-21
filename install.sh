@@ -691,6 +691,12 @@ footer{display:flex;justify-content:space-between;margin-top:32px;color:#879996;
 .traffic-bar{height:6px;width:90px;background:#e6edec;border-radius:4px;overflow:hidden;margin-top:5px}
 .traffic-fill{height:100%;background:var(--accent);border-radius:4px}
 .traffic-fill.danger{background:var(--danger)}
+.speed-badge{display:inline-flex;align-items:center;gap:4px;background:#eef6f5;color:var(--accent);border-radius:6px;padding:2px 6px;font-size:11px;font-weight:700;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.speed-badge.active{background:#e1f5ee;color:#085041}
+.speed-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px}
+.speed-card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between}
+.speed-card .val{font-size:20px;font-weight:800;letter-spacing:-.02em;color:var(--ink);font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.speed-card .lbl{font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase}
 .api-box{background:#f7faf9;border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
 .api-key-code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px;color:#284d56;word-break:break-all;margin-top:4px}
 .modal-form{display:grid;grid-template-columns:1fr 1fr;gap:16px 20px;background:#f8fbfb;border:1px solid var(--line);border-radius:14px;padding:22px;margin-bottom:20px}
@@ -928,6 +934,51 @@ async function doUpgrade(target) {
 
 checkVersions();
 
+// 实时吞吐量与网速轮询 (每 2 秒更新一次)
+const speedRxEl = document.getElementById('node-speed-rx');
+const speedTxEl = document.getElementById('node-speed-tx');
+const rxTagEl = document.getElementById('rx-active-tag');
+const txTagEl = document.getElementById('tx-active-tag');
+
+function fmtSpeed(bytesPerSec) {
+  if (bytesPerSec < 1024) return bytesPerSec.toFixed(0) + ' B/s';
+  if (bytesPerSec < 1024 * 1024) return (bytesPerSec / 1024).toFixed(1) + ' KB/s';
+  return (bytesPerSec / (1024 * 1024)).toFixed(2) + ' MB/s';
+}
+
+async function pollTrafficSpeed() {
+  try {
+    const res = await fetch(location.pathname + 'traffic-speed', { credentials: 'same-origin' });
+    if (!res.ok) return;
+    const json = await res.json();
+    if (!json.ok) return;
+
+    if (speedRxEl) speedRxEl.textContent = fmtSpeed(json.node_rx || 0);
+    if (speedTxEl) speedTxEl.textContent = fmtSpeed(json.node_tx || 0);
+
+    if (rxTagEl) rxTagEl.className = (json.node_rx > 1024) ? 'speed-badge active' : 'speed-badge';
+    if (txTagEl) txTagEl.className = (json.node_tx > 1024) ? 'speed-badge active' : 'speed-badge';
+
+    // 更新各个用户的实时速率标签
+    if (json.users) {
+      document.querySelectorAll('[data-user-speed]').forEach(badge => {
+        const uid = badge.dataset.userSpeed;
+        const u = json.users[uid];
+        if (u && (u.rx > 0 || u.tx > 0)) {
+          badge.textContent = '↓ ' + fmtSpeed(u.rx) + ' · ↑ ' + fmtSpeed(u.tx);
+          badge.className = 'speed-badge active';
+        } else {
+          badge.textContent = '↓ 0 B/s · ↑ 0 B/s';
+          badge.className = 'speed-badge';
+        }
+      });
+    }
+  } catch (_) {}
+}
+
+setInterval(pollTrafficSpeed, 2000);
+pollTrafficSpeed();
+
 function closeUserModal() {
   if (uModal) uModal.classList.remove('show');
 }
@@ -1153,7 +1204,10 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
           <td><strong>{html.escape(uid)}</strong><div style="font-size:11px;color:var(--muted)">{html.escape(note)}</div></td>
           <td>{status_html}</td>
           <td>{ip_limit_str} ({online_str})</td>
-          <td>{traffic_display}</td>
+          <td>
+            {traffic_display}
+            <div style="margin-top:4px"><span class="speed-badge" data-user-speed="{html.escape(uid)}">↓ 0 B/s · ↑ 0 B/s</span></div>
+          </td>
           <td>{expires_str}</td>
           <td><code style="font-size:11px">{html.escape(u.get("password","")[:4] + "****" + u.get("password","")[-4:])}</code></td>
           <td>
@@ -1225,6 +1279,24 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
       <div class="user-stats">
         <span class="badge-count">有效用户: {active_count} / {len(users)}</span>
         <span class="badge-count" style="background:#f0f7f6">总已用流量: {format_bytes(total_used_bytes)}</span>
+      </div>
+    </div>
+
+    <!-- 节点实时并发网速仪表卡片 (动态轮询更新) -->
+    <div class="speed-grid">
+      <div class="speed-card">
+        <div>
+          <div class="lbl">⚡ 节点实时下行吞吐 (Download)</div>
+          <div class="val" id="node-speed-rx" style="color:var(--accent)">0.0 KB/s</div>
+        </div>
+        <span class="speed-badge active" id="rx-active-tag">● 实时监听</span>
+      </div>
+      <div class="speed-card">
+        <div>
+          <div class="lbl">⬆️ 节点实时上行吞吐 (Upload)</div>
+          <div class="val" id="node-speed-tx" style="color:#284d56">0.0 KB/s</div>
+        </div>
+        <span class="speed-badge" id="tx-active-tag">● 实时监听</span>
       </div>
     </div>
 
@@ -1747,6 +1819,9 @@ def serve(path):
     IP_TIMEOUT_SECONDS = 180
     VALID_USER_ID_RE = re.compile(r'^[a-zA-Z0-9_\-\.]{1,64}$')
 
+    # 实时速率计算滑动窗口数据结构: {uid: [(timestamp, total_bytes_tx, total_bytes_rx)]}
+    speed_tracker = {}
+
     def save_data():
         with data_lock:
             try:
@@ -1901,6 +1976,13 @@ def serve(path):
                     limit_bytes = int(matched_user.get('limit_bytes', 0))
                     used_bytes = int(matched_user.get('used_bytes', 0)) + delta_traffic
                     matched_user['used_bytes'] = used_bytes
+
+                    # 记录实时速率滑动窗口样本 (保留最近 10 秒)
+                    samples = speed_tracker.setdefault(matched_uid, [])
+                    cur_mono = time.monotonic()
+                    samples.append((cur_mono, tx_bytes, rx_bytes))
+                    # 淘汰超过 10 秒的陈旧样本
+                    speed_tracker[matched_uid] = [(t, tx, rx) for (t, tx, rx) in samples if cur_mono - t <= 10]
 
                     if limit_bytes > 0 and used_bytes >= limit_bytes:
                         # 流量超额，阻断拒绝连接
@@ -2221,6 +2303,40 @@ def serve(path):
                     return self.reply(404, b'Not found')
 
             # 2. 版本检查与更新 API
+            if subpath == 'traffic-speed':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                cur_mono = time.monotonic()
+                total_rx_speed = 0.0
+                total_tx_speed = 0.0
+                user_speeds = {}
+
+                with data_lock:
+                    for uid, samples in list(speed_tracker.items()):
+                        # 过滤 6 秒内的样本
+                        recent = [(t, tx, rx) for (t, tx, rx) in samples if cur_mono - t <= 6]
+                        speed_tracker[uid] = recent
+                        if not recent:
+                            user_speeds[uid] = {'tx': 0, 'rx': 0}
+                            continue
+
+                        sum_tx = sum(tx for _, tx, _ in recent)
+                        sum_rx = sum(rx for _, _, rx in recent)
+                        dt = max(recent[-1][0] - recent[0][0], 1.0) if len(recent) > 1 else 3.0
+                        u_tx_speed = sum_tx / dt
+                        u_rx_speed = sum_rx / dt
+
+                        total_tx_speed += u_tx_speed
+                        total_rx_speed += u_rx_speed
+                        user_speeds[uid] = {'tx': u_tx_speed, 'rx': u_rx_speed}
+
+                return self.reply_json(200, {
+                    'ok': True,
+                    'node_tx': total_tx_speed,
+                    'node_rx': total_rx_speed,
+                    'users': user_speeds
+                })
+
             if subpath == 'check-version':
                 if not self.is_authenticated():
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
