@@ -154,6 +154,26 @@ footer{display:flex;justify-content:space-between;margin-top:32px;color:#879996;
 .user-connect-grid{display:grid;grid-template-columns:250px minmax(0,1fr);gap:18px;align-items:start}
 @media(max-width:660px){.user-connect-grid{grid-template-columns:1fr}}
 .user-meta-bar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;background:#f7faf9;padding:10px 14px;border-radius:10px;border:1px solid var(--line);font-size:12px}
+
+/* 代理成功专属弹窗高颜值设计 */
+.pm-card{width:100%;max-width:650px;background:#fff;border:1px solid var(--line);border-radius:24px;padding:26px;box-shadow:0 24px 60px rgba(18,43,49,0.2);max-height:92vh;overflow-y:auto;display:flex;flex-direction:column;gap:16px}
+.pm-banner{background:linear-gradient(135deg,#f0f8f6 0%,#f6faf9 100%);border:1.5px solid #cce8e1;border-radius:16px;padding:14px 18px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}
+.pm-host-box{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.pm-host-val{font-size:17px;font-weight:800;color:var(--ink);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:-.02em}
+.pm-port-val{color:var(--accent);font-weight:850}
+.pm-status-tag{display:inline-flex;align-items:center;gap:4px;background:#e1f5ee;color:#085041;font-size:11px;font-weight:700;border-radius:20px;padding:3px 10px;border:1px solid #b7ebd8}
+.pm-cred-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.pm-cred-card{background:#f8fbfb;border:1px solid var(--line);border-radius:12px;padding:12px 14px;display:flex;justify-content:space-between;align-items:center}
+.pm-cred-lbl{font-size:11px;color:var(--muted);font-weight:700;margin-bottom:3px}
+.pm-cred-val{font-size:13px;font-weight:750;color:var(--ink);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;word-break:break-all}
+.pm-main-grid{display:grid;grid-template-columns:140px minmax(0,1fr);gap:16px;align-items:center;background:#fafcfb;border:1px solid var(--line);border-radius:14px;padding:14px}
+@media(max-width:560px){.pm-main-grid{grid-template-columns:1fr;justify-items:center}.pm-cred-grid{grid-template-columns:1fr}}
+.pm-qr-frame{background:#fff;border:1px solid var(--line);border-radius:10px;padding:6px;display:flex;justify-content:center;align-items:center;width:130px;height:130px;box-shadow:0 3px 10px rgba(0,0,0,0.03)}
+.pm-qr-frame svg{display:block;width:100%;height:100%}
+.pm-links-stack{display:flex;flex-direction:column;gap:10px;min-width:0;width:100%}
+.pm-code-box{display:flex;gap:6px;align-items:center;background:#fff;border:1px solid var(--line);border-radius:8px;padding:4px 6px 4px 10px;transition:border-color .15s}
+.pm-code-box:focus-within{border-color:var(--accent);box-shadow:0 0 0 2px rgba(8,127,116,0.1)}
+.pm-code-input{flex:1;min-width:0;border:none;background:transparent;font:11px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;color:#284d56;outline:none}
 """
 
 SCRIPT = """
@@ -399,13 +419,20 @@ if (proxyModal) {
   });
 }
 
+const resPTypeBadge = document.getElementById('res-ptype-badge');
+const resPQr = document.getElementById('res-pqr');
+
 function showProxyResult(data) {
   if (!proxyModal) return;
   const host = data.host || curProxyServerHost;
-  const url = data.url || (data.type + '://' + data.username + ':' + data.password + '@' + host + ':' + data.port);
+  const ptype = data.type || 'socks5';
+  const url = data.url || (ptype + '://' + data.username + ':' + data.password + '@' + host + ':' + data.port);
   const fmt = data.format || (host + ':' + data.port + ':' + data.username + ':' + data.password);
 
-  if (resPType) resPType.textContent = (data.type || '').toUpperCase();
+  if (resPTypeBadge) {
+    resPTypeBadge.textContent = ptype.toUpperCase();
+    resPTypeBadge.className = 'proxy-type ' + ptype;
+  }
   if (resPHost) resPHost.textContent = host;
   if (resPPort) resPPort.textContent = data.port;
   if (resPUser) resPUser.textContent = data.username;
@@ -413,12 +440,16 @@ function showProxyResult(data) {
   if (resPUrl) resPUrl.value = url;
   if (resPFmt) resPFmt.value = fmt;
 
+  if (resPQr && data.qr) {
+    resPQr.innerHTML = data.qr;
+  }
+
   if (btnCopyPUrl) {
     btnCopyPUrl.onclick = async () => {
       try {
         await navigator.clipboard.writeText(url);
         btnCopyPUrl.textContent = '已复制 ✓';
-        setTimeout(() => { btnCopyPUrl.textContent = '复制链接'; }, 1800);
+        setTimeout(() => { btnCopyPUrl.textContent = '复制 URL'; }, 1800);
       } catch (_) { alert('复制失败，请手动选择复制'); }
     };
   }
@@ -432,6 +463,20 @@ function showProxyResult(data) {
       } catch (_) { alert('复制失败，请手动选择复制'); }
     };
   }
+
+  document.querySelectorAll('[data-copy-field]').forEach(b => {
+    b.onclick = async () => {
+      const el = document.getElementById(b.dataset.copyField);
+      if (el) {
+        try {
+          await navigator.clipboard.writeText(el.textContent);
+          const orig = b.textContent;
+          b.textContent = '✓';
+          setTimeout(() => { b.textContent = orig; }, 1500);
+        } catch (_) {}
+      }
+    };
+  });
 
   proxyModal.classList.add('show');
 }
@@ -1159,55 +1204,69 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
 <div class="security">私密提示 · 链接和二维码包含连接凭据，请勿公开分享或发送截图给他人。</div>
 <p id="copy-status" class="status" role="status" aria-live="polite"></p>
 
-<!-- 入站代理创建成功结果模态框 -->
+<!-- 入站代理创建成功高颜值模态框 (现代轻奢 + 二维码) -->
 <div class="modal-backdrop" id="proxy-modal">
-  <div class="modal-card" style="max-width:580px">
+  <div class="pm-card">
     <div class="modal-head">
       <div>
-        <h2 style="margin:0;font-size:18px;color:var(--accent);display:flex;align-items:center;gap:6px">
-          <span>🎉 代理服务创建成功</span>
+        <h2 style="margin:0;font-size:19px;color:var(--accent);display:flex;align-items:center;gap:6px">
+          <span>🎉 入站代理服务创建成功</span>
         </h2>
-        <p style="font-size:12px;margin-top:2px;color:var(--muted)">GOST 服务已热重载并监听，可以直接在各类客户端或脚本中使用</p>
+        <p style="font-size:12px;margin-top:2px;color:var(--muted)">GOST 核心已秒级热载入并监听，可直接配置或扫码导入使用</p>
       </div>
       <button class="modal-close" type="button" id="pm-close">&times;</button>
     </div>
-    
-    <div class="config-grid" style="gap:12px;margin-top:8px">
-      <div class="card" style="padding:12px 14px;box-shadow:none;border-color:var(--line);background:#f8fbfb">
-        <div style="font-size:11px;color:var(--muted);font-weight:700">代理协议</div>
-        <div id="res-ptype" style="font-size:16px;font-weight:800;color:var(--accent);margin-top:3px">SOCKS5</div>
+
+    <!-- 顶部主连接节点 Banner -->
+    <div class="pm-banner">
+      <div class="pm-host-box">
+        <span class="proxy-type" id="res-ptype-badge">SOCKS5</span>
+        <div class="pm-host-val"><span id="res-phost">usntt.teyir.com</span> :<span class="pm-port-val" id="res-pport">28412</span></div>
       </div>
-      <div class="card" style="padding:12px 14px;box-shadow:none;border-color:var(--line);background:#f8fbfb">
-        <div style="font-size:11px;color:var(--muted);font-weight:700">监听端口</div>
-        <div id="res-pport" style="font-size:16px;font-weight:800;color:var(--ink);margin-top:3px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">28412</div>
+      <span class="pm-status-tag">● 实时监听中</span>
+    </div>
+
+    <!-- 中间对称凭据卡片 (告别孤立留白) -->
+    <div class="pm-cred-grid">
+      <div class="pm-cred-card">
+        <div>
+          <div class="pm-cred-lbl">👤 认证用户名 (Username)</div>
+          <div class="pm-cred-val" id="res-puser">user_123</div>
+        </div>
+        <button class="button" type="button" style="padding:4px 8px;font-size:11px" data-copy-field="res-puser">复制</button>
       </div>
-      <div class="card" style="grid-column:1/-1;padding:12px 14px;box-shadow:none;border-color:var(--line);background:#f8fbfb">
-        <div style="font-size:11px;color:var(--muted);font-weight:700">连接域名 / 主机地址</div>
-        <div id="res-phost" style="font-size:15px;font-weight:750;color:var(--ink);margin-top:3px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">usntt.teyir.com</div>
-      </div>
-      <div class="card" style="padding:12px 14px;box-shadow:none;border-color:var(--line);background:#f8fbfb">
-        <div style="font-size:11px;color:var(--muted);font-weight:700">认证用户名</div>
-        <div id="res-puser" style="font-size:13px;font-weight:700;color:var(--ink);margin-top:3px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">user123</div>
-      </div>
-      <div class="card" style="padding:12px 14px;box-shadow:none;border-color:var(--line);background:#f8fbfb">
-        <div style="font-size:11px;color:var(--muted);font-weight:700">认证密码</div>
-        <div id="res-ppass" style="font-size:13px;font-weight:700;color:var(--ink);margin-top:3px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">pass123</div>
+      <div class="pm-cred-card">
+        <div>
+          <div class="pm-cred-lbl">🔑 认证密码 (Password)</div>
+          <div class="pm-cred-val" id="res-ppass">pwd_456</div>
+        </div>
+        <button class="button" type="button" style="padding:4px 8px;font-size:11px" data-copy-field="res-ppass">复制</button>
       </div>
     </div>
 
-    <div style="margin-top:14px;display:grid;gap:12px">
-      <div>
-        <div style="font-size:12px;font-weight:700;color:var(--ink);margin-bottom:6px">标准直连链接 (URI)</div>
-        <div style="display:flex;gap:8px">
-          <input id="res-purl" readonly style="flex:1;height:38px;padding:0 12px;border:1px solid var(--line);border-radius:8px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:#f7faf9" value="">
-          <button class="button primary" id="btn-copy-purl" type="button" style="padding:0 16px;height:38px;font-size:12px;white-space:nowrap">复制链接</button>
+    <!-- 二维码与链接复合展示区 (左侧扫码 · 右侧直链) -->
+    <div class="pm-main-grid">
+      <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
+        <div class="pm-qr-frame" id="res-pqr">
+          <span style="font-size:11px;color:var(--muted)">生成中...</span>
         </div>
+        <span style="font-size:11px;color:var(--muted);font-weight:600">📱 客户端扫码导入</span>
       </div>
-      <div>
-        <div style="font-size:12px;font-weight:700;color:var(--ink);margin-bottom:6px">通用格式 (Host:Port:User:Pass)</div>
-        <div style="display:flex;gap:8px">
-          <input id="res-pfmt" readonly style="flex:1;height:38px;padding:0 12px;border:1px solid var(--line);border-radius:8px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:#f7faf9" value="">
-          <button class="button" id="btn-copy-pfmt" type="button" style="padding:0 16px;height:38px;font-size:12px;white-space:nowrap">复制格式</button>
+
+      <div class="pm-links-stack">
+        <div>
+          <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:4px">标准直连 URL (URI)</div>
+          <div class="pm-code-box">
+            <input class="pm-code-input" id="res-purl" readonly value="">
+            <button class="button primary" id="btn-copy-purl" type="button" style="padding:4px 12px;font-size:11px;white-space:nowrap">复制 URL</button>
+          </div>
+        </div>
+        <div>
+          <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:4px">通用爬虫/软件格式 (Host:Port:User:Pass)</div>
+          <div class="pm-code-box">
+            <input class="pm-code-input" id="res-pfmt" readonly value="">
+            <button class="button" id="btn-copy-pfmt" type="button" style="padding:4px 12px;font-size:11px;white-space:nowrap">复制格式</button>
+          </div>
         </div>
       </div>
     </div>
@@ -1993,6 +2052,17 @@ def serve(path):
                         m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
                         host = m.get('public_ip', '127.0.0.1') if m.get('is_insecure') else m.get('server_name', 'localhost')
 
+                        uri_link = f"{ptype}://{username}:{password}@{host}:{port}"
+                        qr_svg = ''
+                        try:
+                            qr_res = subprocess.run(['qrencode', '-t', 'SVG', '-o', '-'],
+                                                    input=uri_link.encode('utf-8'),
+                                                    capture_output=True, timeout=3)
+                            if qr_res.returncode == 0:
+                                qr_svg = qr_res.stdout.decode('utf-8')
+                        except Exception:
+                            qr_svg = ''
+
                         return self.reply_json(200, {
                             'ok': True,
                             'id': proxy_id,
@@ -2002,8 +2072,9 @@ def serve(path):
                             'username': username,
                             'password': password,
                             'note': note,
-                            'url': f"{ptype}://{username}:{password}@{host}:{port}",
-                            'format': f"{host}:{port}:{username}:{password}"
+                            'url': uri_link,
+                            'format': f"{host}:{port}:{username}:{password}",
+                            'qr': qr_svg
                         })
 
                     elif action == 'delete':
