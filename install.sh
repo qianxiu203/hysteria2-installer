@@ -2250,10 +2250,13 @@ def serve(path):
                 portal_has_update = False
 
                 try:
-                    # 获取本地核心版本
+                    # 获取本地核心版本 (按行精确匹配 Version: 前缀，避免被字符艺术 LOGO 干扰)
                     out = subprocess.run(['/usr/local/bin/hysteria', 'version'], capture_output=True, text=True, timeout=2).stdout
                     if out:
-                        core_curr = out.split()[2] if len(out.split()) >= 3 else out.splitlines()[0]
+                        for line in out.splitlines():
+                            if line.strip().startswith('Version:'):
+                                core_curr = line.split(':', 1)[1].strip().lstrip('v')
+                                break
                 except Exception:
                     pass
 
