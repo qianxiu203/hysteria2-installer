@@ -12,8 +12,10 @@
 
 - ⚡ **官方核心保证**：自动检测 CPU 架构（amd64 / arm64 / armv7），直接拉取 Hysteria 官方最新发布版二进制。
 - 🛡️ **自签 / 自定义 / 域名证书**：支持一键生成 ECC (prime256v1) 自签证书、指定已有 acme.sh / certbot 证书，或绑定域名并自动申请 Let's Encrypt 证书。
-- 🔀 **端口跳跃 (Port Hopping)**：内置自动化 `iptables` 多端口转发规则配置，有效突破单一 UDP 端口被限速或丢包。
-- 🎭 **Salamander 混淆**：可选开启 Salamander 混淆，将 QUIC 数据报文伪装为完全随机的高熵杂波，彻底免疫 GFW 主动探测。
+- 🔀 **端口跳跃 (Port Hopping) 默认启用**：内置自动化 `iptables` 多端口转发规则（默认 UDP 20000-40000），有效突破单一 UDP 端口被运营商 QoS 限速或丢包。
+- 🎭 **Salamander 混淆 默认启用**：全自动生成高熵随机密码，将 QUIC 数据报文伪装为完全随机的杂波，彻底免疫 GFW 主动探测与深度包检测。
+- 🌐 **Cloudflare WARP 智能分流 (AI 加速)**：支持一键配置 WARP Local Proxy（端口 40000 · MASQUE 协议），配合 3 分钟探活自愈 Watchdog，并在 Web 端提供一键按需启闭开关，实现 OpenAI、Claude、Gemini 干净出口与 VPS 原生极速直连。
+- 🔄 **Web 端双重版本检测与一键升级**：在 Web 仪表盘在线比对 Hysteria 2 官方内核与控制面板自身版本，发现新版一键平滑无损热升级。
 - 📱 **多客户端格式全覆盖**：
   - 标准 **`hysteria2://`** 节点直链（支持 v2rayN、Nekobox、Shadowrocket、Sing-box 等一键导入）
   - **Clash.Meta / Mihomo** (Clash Verge Rev) 节点配置片段
@@ -52,18 +54,19 @@ bash <(wget -qO- https://raw.githubusercontent.com/yys9253462-gif/hysteria2-inst
        Hysteria 2 全功能生产级管理脚本 (x86_64)         
        GitHub: https://github.com/yys9253462-gif/hysteria2-installer    
 ================================================================
-核心状态: 运行中 (Active) | 版本: 2.6.x
+核心状态: 运行中 (Active) | 版本: v2.12.x
 ----------------------------------------------------------------
-  1. 全新安装 Hysteria 2
+  1. 全新安装 Hysteria 2 (默认开启端口跳跃与Salamander混淆)
   2. 更新 Hysteria 2 核心至最新版
   3. 查看私密信息页地址和登录凭据
-  4. 重新修改配置 (端口/密码/证书/混淆)
+  4. 重新修改配置 (端口/密码/证书/域名)
+  5. 一键安装并配置 Cloudflare WARP 出口 (AI解锁)
 ----------------------------------------------------------------
-  5. 启动服务
-  6. 停止服务
-  7. 重启服务
-  8. 查看实时运行日志
-  9. 彻底卸载 Hysteria 2
+  6. 启动服务
+  7. 停止服务
+  8. 重启服务
+  9. 查看实时运行日志
+  10. 彻底卸载 Hysteria 2
   0. 退出脚本
 ================================================================
 ```
@@ -130,22 +133,40 @@ bandwidth:
 # 默认使用 IPv4 直连，避免没有 IPv6 出站路由的 VPS 在访问
 # YouTube 等同时返回 IPv4 / IPv6 地址的网站时连接失败。
 outbounds:
-  - name: direct-ipv4
+  - name: direct_ipv4
     type: direct
     direct:
       mode: "4"
+  - name: warp_socks
+    type: socks5
+    socks5:
+      addr: 127.0.0.1:40000
 
-# 若开启混淆
+# 默认开启 Salamander 混淆
 obfs:
   type: salamander
   salamander:
-    password: your_obfs_password
+    password: your_random_obfs_password
+
+# 开启 WARP 时的 AI 分流 ACL 规则 (支持 Web 控制台一键启闭)
+acl:
+  inline:
+    - warp_socks(openai.com)
+    - warp_socks(chatgpt.com)
+    - warp_socks(oaistatic.com)
+    - warp_socks(oaiusercontent.com)
+    - warp_socks(ai.com)
+    - warp_socks(gemini.google.com)
+    - warp_socks(aistudio.google.com)
+    - warp_socks(generativelanguage.googleapis.com)
+    - warp_socks(anthropic.com)
+    - warp_socks(claude.ai)
 ```
 
 > 脚本默认将 Hysteria 的 direct 出站固定为 IPv4。这可以避免部分仅有 IPv4
 > 出站能力的 VPS 因 DNS 返回 IPv6 地址而出现 `network is unreachable`，进而无法播放
 > YouTube 等双栈网站的视频。若服务器已配置并验证 IPv6 出站，也可将
-> `outbounds[0].direct.mode` 改为 `auto`，恢复双栈 Happy Eyeballs 策略。
+> `outbounds[0].direct.mode` 改为 `auto`，恢复双栈 Happy Eyeballs 策略。开启 WARP 后，OpenAI / Claude / Gemini 自动引流至 Cloudflare 干净出口。
 
 ---
 
