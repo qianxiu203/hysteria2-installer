@@ -343,6 +343,8 @@ clear_all_hopping_rules() {
             [ -n "$line_num" ] && ip6tables -t nat -D PREROUTING "$line_num" 2>/dev/null || break
         done
     fi
+    systemctl disable --now hy2-iptables.service >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/hy2-iptables.service >/dev/null 2>&1 || true
 }
 
 setup_iptables_port_hopping() {
@@ -360,13 +362,32 @@ setup_iptables_port_hopping() {
         ip6tables -t nat -A PREROUTING -p udp --dport "${s_port}:${e_port}" -j REDIRECT --to-ports "${l_port}" 2>/dev/null || true
     fi
 
-    # 保存规则持久化
+    # 保存规则持久化（兼顾 netfilter-persistent 与原生 systemd 自愈守护）
     if command -v netfilter-persistent >/dev/null 2>&1; then
         netfilter-persistent save >/dev/null 2>&1 || true
     elif command -v service >/dev/null 2>&1 && service iptables status >/dev/null 2>&1; then
         service iptables save >/dev/null 2>&1 || true
     fi
-    log_info "端口跳跃 iptables 规则已生效。"
+
+    # 兜底部署 systemd 端口跳跃自愈守护服务，保证开机/重启 100% 自动恢复规则
+    cat > /etc/systemd/system/hy2-iptables.service <<EOF
+[Unit]
+Description=Hysteria 2 Port Hopping iptables persistence
+After=network.target
+Before=hysteria-server.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c "iptables -t nat -C PREROUTING -p udp --dport ${s_port}:${e_port} -j REDIRECT --to-ports ${l_port} 2>/dev/null || iptables -t nat -A PREROUTING -p udp --dport ${s_port}:${e_port} -j REDIRECT --to-ports ${l_port}"
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable hy2-iptables.service >/dev/null 2>&1 || true
+
+    log_info "端口跳跃 iptables 规则与开机持久化守护已生效。"
 }
 
 # 5. 生成服务端配置文件与 Systemd 服务
@@ -565,14 +586,16 @@ After=network.target network-online.target
 Wants=network-online.target
 After=hysteria-portal.service
 Wants=hysteria-portal.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=${HY2_DIR}
 ExecStart=${HY2_BIN} server -c ${HY2_CONFIG}
-Restart=always
-RestartSec=3
+Restart=on-failure
+RestartSec=10
 LimitNOFILE=65535
 LimitNPROC=65535
 AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW
@@ -771,6 +794,26 @@ footer{display:flex;justify-content:space-between;margin-top:32px;color:#879996;
 .user-connect-grid{display:grid;grid-template-columns:250px minmax(0,1fr);gap:18px;align-items:start}
 @media(max-width:660px){.user-connect-grid{grid-template-columns:1fr}}
 .user-meta-bar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;background:#f7faf9;padding:10px 14px;border-radius:10px;border:1px solid var(--line);font-size:12px}
+
+/* 代理成功专属弹窗高颜值设计 */
+.pm-card{width:100%;max-width:650px;background:#fff;border:1px solid var(--line);border-radius:24px;padding:26px;box-shadow:0 24px 60px rgba(18,43,49,0.2);max-height:92vh;overflow-y:auto;display:flex;flex-direction:column;gap:16px}
+.pm-banner{background:linear-gradient(135deg,#f0f8f6 0%,#f6faf9 100%);border:1.5px solid #cce8e1;border-radius:16px;padding:14px 18px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}
+.pm-host-box{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.pm-host-val{font-size:17px;font-weight:800;color:var(--ink);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:-.02em}
+.pm-port-val{color:var(--accent);font-weight:850}
+.pm-status-tag{display:inline-flex;align-items:center;gap:4px;background:#e1f5ee;color:#085041;font-size:11px;font-weight:700;border-radius:20px;padding:3px 10px;border:1px solid #b7ebd8}
+.pm-cred-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.pm-cred-card{background:#f8fbfb;border:1px solid var(--line);border-radius:12px;padding:12px 14px;display:flex;justify-content:space-between;align-items:center}
+.pm-cred-lbl{font-size:11px;color:var(--muted);font-weight:700;margin-bottom:3px}
+.pm-cred-val{font-size:13px;font-weight:750;color:var(--ink);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;word-break:break-all}
+.pm-main-grid{display:grid;grid-template-columns:140px minmax(0,1fr);gap:16px;align-items:center;background:#fafcfb;border:1px solid var(--line);border-radius:14px;padding:14px}
+@media(max-width:560px){.pm-main-grid{grid-template-columns:1fr;justify-items:center}.pm-cred-grid{grid-template-columns:1fr}}
+.pm-qr-frame{background:#fff;border:1px solid var(--line);border-radius:10px;padding:6px;display:flex;justify-content:center;align-items:center;width:130px;height:130px;box-shadow:0 3px 10px rgba(0,0,0,0.03)}
+.pm-qr-frame svg{display:block;width:100%;height:100%}
+.pm-links-stack{display:flex;flex-direction:column;gap:10px;min-width:0;width:100%}
+.pm-code-box{display:flex;gap:6px;align-items:center;background:#fff;border:1px solid var(--line);border-radius:8px;padding:4px 6px 4px 10px;transition:border-color .15s}
+.pm-code-box:focus-within{border-color:var(--accent);box-shadow:0 0 0 2px rgba(8,127,116,0.1)}
+.pm-code-input{flex:1;min-width:0;border:none;background:transparent;font:11px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;color:#284d56;outline:none}
 """
 
 SCRIPT = """
@@ -991,7 +1034,156 @@ pollTrafficSpeed();
 // 入站代理服务管理 (gost 驱动)
 const gostBadge = document.getElementById('gost-badge');
 const proxyTbody = document.getElementById('proxy-tbody');
-const proxyForm = document.getElementById('proxy-form');
+const btnInstallGost = document.getElementById('btn-install-gost');
+const proxyModal = document.getElementById('proxy-modal');
+const pmClose = document.getElementById('pm-close');
+const resPType = document.getElementById('res-ptype');
+const resPHost = document.getElementById('res-phost');
+const resPPort = document.getElementById('res-pport');
+const resPUser = document.getElementById('res-puser');
+const resPPass = document.getElementById('res-ppass');
+const resPUrl = document.getElementById('res-purl');
+const resPFmt = document.getElementById('res-pfmt');
+const btnCopyPUrl = document.getElementById('btn-copy-purl');
+const btnCopyPFmt = document.getElementById('btn-copy-pfmt');
+
+let curProxyServerHost = location.hostname;
+
+function closeProxyModal() {
+  if (proxyModal) proxyModal.classList.remove('show');
+}
+if (pmClose) pmClose.addEventListener('click', closeProxyModal);
+if (proxyModal) {
+  proxyModal.addEventListener('click', (e) => {
+    if (e.target === proxyModal) closeProxyModal();
+  });
+}
+
+const resPTypeBadge = document.getElementById('res-ptype-badge');
+const resPQr = document.getElementById('res-pqr');
+
+function showProxyResult(data) {
+  if (!proxyModal) return;
+  const host = data.host || curProxyServerHost;
+  const ptype = data.type || 'socks5';
+  const url = data.url || (ptype + '://' + data.username + ':' + data.password + '@' + host + ':' + data.port);
+  const fmt = data.format || (host + ':' + data.port + ':' + data.username + ':' + data.password);
+
+  if (resPTypeBadge) {
+    resPTypeBadge.textContent = ptype.toUpperCase();
+    resPTypeBadge.className = 'proxy-type ' + ptype;
+  }
+  if (resPHost) resPHost.textContent = host;
+  if (resPPort) resPPort.textContent = data.port;
+  if (resPUser) resPUser.textContent = data.username;
+  if (resPPass) resPPass.textContent = data.password;
+  if (resPUrl) resPUrl.value = url;
+  if (resPFmt) resPFmt.value = fmt;
+
+  if (resPQr && data.qr) {
+    resPQr.innerHTML = data.qr;
+  }
+
+  if (btnCopyPUrl) {
+    btnCopyPUrl.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(url);
+        btnCopyPUrl.textContent = '已复制 ✓';
+        setTimeout(() => { btnCopyPUrl.textContent = '复制 URL'; }, 1800);
+      } catch (_) { alert('复制失败，请手动选择复制'); }
+    };
+  }
+
+  if (btnCopyPFmt) {
+    btnCopyPFmt.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(fmt);
+        btnCopyPFmt.textContent = '已复制 ✓';
+        setTimeout(() => { btnCopyPFmt.textContent = '复制格式'; }, 1800);
+      } catch (_) { alert('复制失败，请手动选择复制'); }
+    };
+  }
+
+  document.querySelectorAll('[data-copy-field]').forEach(b => {
+    b.onclick = async () => {
+      const el = document.getElementById(b.dataset.copyField);
+      if (el) {
+        try {
+          await navigator.clipboard.writeText(el.textContent);
+          const orig = b.textContent;
+          b.textContent = '✓';
+          setTimeout(() => { b.textContent = orig; }, 1500);
+        } catch (_) {}
+      }
+    };
+  });
+
+  proxyModal.classList.add('show');
+}
+
+// 绑定秒级一键生成按钮
+document.querySelectorAll('.btn-quick-proxy').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const ptype = btn.dataset.ptype;
+    const cPortEl = document.getElementById('custom-proxy-port');
+    const customPort = cPortEl ? cPortEl.value.trim() : '';
+    btn.disabled = true;
+    const origText = btn.textContent;
+    btn.textContent = '⚡ 正在生成...';
+    try {
+      let body = 'action=create&type=' + encodeURIComponent(ptype);
+      if (customPort) body += '&port=' + encodeURIComponent(customPort);
+
+      const res = await fetch(location.pathname + 'manage-proxy', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body
+      });
+      const json = await res.json();
+      if (json.ok) {
+        if (cPortEl) cPortEl.value = '';
+        showProxyResult(json);
+        loadProxyServices();
+      } else {
+        alert(json.error || '生成失败');
+      }
+    } catch (e) {
+      alert('生成异常: ' + e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = origText;
+    }
+  });
+});
+
+if (btnInstallGost) {
+  btnInstallGost.addEventListener('click', async () => {
+    if (!confirm("确定要一键安装或更新 GOST 代理服务吗？系统将自动匹配架构并配置自启。")) return;
+    btnInstallGost.disabled = true;
+    const origText = btnInstallGost.textContent;
+    btnInstallGost.textContent = '⏳ 正在安装 GOST...';
+    try {
+      const res = await fetch(location.pathname + 'install-gost', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+      });
+      const json = await res.json();
+      if (json.ok) {
+        alert(json.message || 'GOST 安装成功！服务已就绪。');
+        loadProxyServices();
+      } else {
+        alert(json.error || '安装失败，请检查服务器网络或日志');
+      }
+    } catch (e) {
+      alert('安装请求异常: ' + e.message);
+    } finally {
+      btnInstallGost.disabled = false;
+      btnInstallGost.textContent = origText;
+    }
+  });
+}
 
 async function loadProxyServices() {
   if (!proxyTbody) return;
@@ -1006,14 +1198,25 @@ async function loadProxyServices() {
         gostBadge.textContent = '● 未安装 gost';
         gostBadge.style.background = '#fff1f0';
         gostBadge.style.color = '#cf3c3c';
+        if (btnInstallGost) {
+          btnInstallGost.style.display = 'inline-flex';
+          btnInstallGost.textContent = '⚡ 一键安装 GOST';
+        }
       } else if (json.gost_active) {
         gostBadge.textContent = '● gost 运行中';
         gostBadge.style.background = '#eaf3de';
         gostBadge.style.color = '#27500a';
+        if (btnInstallGost) {
+          btnInstallGost.style.display = 'none';
+        }
       } else {
         gostBadge.textContent = '● gost 未启动';
         gostBadge.style.background = '#f1efe8';
         gostBadge.style.color = '#5f5e5a';
+        if (btnInstallGost) {
+          btnInstallGost.style.display = 'inline-flex';
+          btnInstallGost.textContent = '🔄 重启/修复 GOST';
+        }
       }
     }
 
@@ -1022,16 +1225,36 @@ async function loadProxyServices() {
       proxyTbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px">暂无代理服务，点击上方「添加代理服务」创建</td></tr>';
       return;
     }
+    if (json.host) curProxyServerHost = json.host;
     const typeLabel = { socks5: 'SOCKS5', http: 'HTTP', https: 'HTTPS' };
-    proxyTbody.innerHTML = services.map(s => `
+    proxyTbody.innerHTML = services.map(s => {
+      const fullUrl = `${s.type}://${s.username}:${s.password}@${curProxyServerHost}:${s.port}`;
+      return `
       <tr>
         <td><span class="proxy-type ${s.type}">${typeLabel[s.type] || s.type}</span></td>
-        <td><code style="font-size:12px">:${s.port}</code></td>
+        <td><code style="font-size:12px;font-weight:700;color:var(--accent)">:${s.port}</code></td>
         <td><code style="font-size:12px">${s.username}</code></td>
         <td><code style="font-size:12px">${s.password}</code></td>
-        <td style="color:var(--muted);font-size:12px">${s.note || '-'}</td>
+        <td>
+          <div style="display:flex;align-items:center;gap:6px">
+            <code style="font-size:11px;background:#f5f8f7;padding:2px 6px;border-radius:4px;word-break:break-all">${s.type}://${s.username}:****@${curProxyServerHost}:${s.port}</code>
+            <button class="button" style="padding:2px 8px;font-size:11px;white-space:nowrap" type="button" data-copy-link="${fullUrl}">复制链接</button>
+          </div>
+        </td>
         <td><button class="button danger" style="padding:4px 10px;font-size:11px" type="button" data-proxy-del="${s.id}">删除</button></td>
-      </tr>`).join('');
+      </tr>`;
+    }).join('');
+
+    proxyTbody.querySelectorAll('[data-copy-link]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(btn.dataset.copyLink);
+          const orig = btn.textContent;
+          btn.textContent = '已复制 ✓';
+          setTimeout(() => { btn.textContent = orig; }, 1800);
+        } catch (_) { alert('复制失败'); }
+      });
+    });
     proxyTbody.querySelectorAll('[data-proxy-del]').forEach(btn => {
       btn.addEventListener('click', async () => {
         if (!confirm('确定删除该代理服务？')) return;
@@ -1049,36 +1272,7 @@ async function loadProxyServices() {
   } catch (_) {}
 }
 
-if (proxyForm) {
-  proxyForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const fd = new FormData(proxyForm);
-    const body = new URLSearchParams();
-    body.append('action', 'create');
-    body.append('type', fd.get('type'));
-    body.append('port', fd.get('port'));
-    body.append('username', fd.get('username'));
-    body.append('password', fd.get('password'));
-    body.append('note', fd.get('note'));
-    try {
-      const res = await fetch(location.pathname + 'manage-proxy', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: body.toString()
-      });
-      const json = await res.json();
-      if (json.ok) {
-        proxyForm.reset();
-        loadProxyServices();
-      } else {
-        alert(json.error || '创建失败');
-      }
-    } catch (err) {
-      alert('创建失败: ' + err.message);
-    }
-  });
-}
+// proxyForm replaced with instant buttons
 
 loadProxyServices();
 
@@ -1342,6 +1536,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
 <div class="tab-bar">
   <button class="tab-btn active" data-tab="connect">🚀 节点导入 (Connect)</button>
   <button class="tab-btn" data-tab="users">👥 多用户管理 ({active_count}/{len(users)})</button>
+  <button class="tab-btn" data-tab="proxies">🌐 入站代理 & WARP</button>
   <button class="tab-btn" data-tab="cluster">🔑 通用 REST API 对接</button>
   <button class="tab-btn" data-tab="configs">⚙️ 高级配置</button>
 </div>
@@ -1404,74 +1599,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
     </div>
 
     <!-- 手动添加用户卡片 (结构化字段 + 随机生成辅助) -->
-    <!-- WARP 出口分流全局控制卡片 -->
-    <div class="switch-box" id="warp-box">
-      <div class="switch-info">
-        <div class="switch-title">
-          <span>⚡ Cloudflare WARP 智能分流出口 (AI 加速)</span>
-          <span class="status-pill" id="warp-badge" style="background:#eaf3de;color:#27500a">检测中...</span>
-        </div>
-        <div class="switch-desc">
-          开启后 OpenAI (ChatGPT), Claude, Google Gemini 流量自动经由 Cloudflare 干净网络出口，有效防止封号与验证码；普通网页与下载仍维持 VPS 原生高速直连。
-        </div>
-      </div>
-      <div style="display:flex;gap:10px;align-items:center">
-        <button class="toggle-btn off" id="btn-toggle-warp" type="button">切换中...</button>
-      </div>
-    </div>
 
-    <!-- 入站代理服务管理卡片 (gost 驱动) -->
-    <div class="switch-box proxy-card" id="proxy-box">
-      <div class="switch-info">
-        <div class="switch-title">
-          <span>🌐 入站代理服务 (SOCKS5 / HTTP / HTTPS)</span>
-          <span class="status-pill" id="gost-badge" style="background:#f1efe8;color:#5f5e5a">检测中...</span>
-        </div>
-        <div class="switch-desc">
-          让服务器额外提供 SOCKS5 / HTTP / HTTPS 代理端口，客户端无需安装 Hysteria 也能直接作为普通代理使用（独立账号密码认证）。
-        </div>
-      </div>
-    </div>
-
-    <details style="margin-bottom:18px">
-      <summary class="button" style="margin-bottom:12px;list-style:none">＋ 添加代理服务</summary>
-      <form class="modal-form" id="proxy-form" style="margin-bottom:14px">
-        <div class="form-field">
-          <label for="ptype">协议类型</label>
-          <select id="ptype" name="type" style="height:42px;padding:0 12px;border:1px solid var(--line);border-radius:9px;font-size:13px;background:#fff">
-            <option value="socks5">SOCKS5</option>
-            <option value="http">HTTP</option>
-            <option value="https">HTTPS</option>
-          </select>
-        </div>
-        <div class="form-field">
-          <label for="pport">监听端口</label>
-          <input id="pport" name="port" type="number" min="1" max="65535" placeholder="例如 1080" required>
-        </div>
-        <div class="form-field">
-          <label for="puser">账号 <span>留空自动生成</span></label>
-          <input id="puser" name="username" placeholder="留空自动生成">
-        </div>
-        <div class="form-field">
-          <label for="ppass">密码 <span>留空自动生成</span></label>
-          <input id="ppass" name="password" placeholder="留空自动生成">
-        </div>
-        <div class="form-field-full">
-          <label for="pnote">备注 <span>选填</span></label>
-          <input id="pnote" name="note" placeholder="例如: 备用HTTP代理 / 给某客户">
-        </div>
-        <div class="form-field-full" style="margin-top:6px">
-          <button class="button primary" style="width:100%;height:44px;font-size:14px" type="submit">立即创建代理服务 →</button>
-        </div>
-      </form>
-    </details>
-
-    <div class="user-table-wrap" style="margin-bottom:20px">
-      <table class="proxy-table">
-        <thead><tr><th>类型</th><th>端口</th><th>账号</th><th>密码</th><th>备注</th><th>操作</th></tr></thead>
-        <tbody id="proxy-tbody"><tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px">正在加载代理服务...</td></tr></tbody>
-      </table>
-    </div>
 
     <details style="margin-bottom:18px">
       <summary class="button" style="margin-bottom:12px;list-style:none">＋ 手动添加/开通新用户</summary>
@@ -1531,6 +1659,73 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
         <thead><tr><th>用户标识</th><th>状态</th><th>IP 限制 (实时)</th><th>已用流量 / 配额</th><th>到期时间</th><th>连接密码</th><th>操作</th></tr></thead>
         <tbody>{users_table_html}</tbody>
       </table>
+    </div>
+  </section>
+</div>
+
+<!-- Tab 3: 入站代理与 WARP 扩展服务视图 (独立专区) -->
+<div class="tab-pane" id="pane-proxies">
+  <!-- 区块 1: 入站代理服务 (GOST 驱动) -->
+  <section class="card" style="margin-bottom:22px">
+    <div class="user-header">
+      <div>
+        <h2>🌐 入站代理服务 (GOST 驱动)</h2>
+        <p style="font-size:13px">让服务器额外提供独立 SOCKS5 / HTTP / HTTPS 代理端口，普通客户端直连即可使用</p>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <span class="status-pill" id="gost-badge" style="background:#f1efe8;color:#5f5e5a">检测中...</span>
+        <button class="button primary" id="btn-install-gost" type="button" style="padding:6px 14px;font-size:12px;display:none">⚡ 一键安装 GOST</button>
+      </div>
+    </div>
+
+    <!-- 极速一键生成按钮专区 -->
+    <div style="background:#f8fbfb;border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:18px">
+      <div style="font-size:13px;font-weight:700;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+        <span>⚡ 秒级一键生成入站代理服务 (自动分配空闲端口与安全密码)</span>
+        <details style="display:inline-block">
+          <summary style="font-size:12px;color:var(--accent);cursor:pointer;font-weight:600">高级指定端口 ▾</summary>
+          <div style="margin-top:8px;background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px;display:flex;gap:8px;align-items:center">
+            <input id="custom-proxy-port" type="number" min="1" max="65535" placeholder="输入自定义端口(留空则随机)" style="width:200px;height:34px;padding:0 10px;border:1px solid var(--line);border-radius:6px;font-size:12px">
+            <span style="font-size:11px;color:var(--muted)">选填，留空自动分配</span>
+          </div>
+        </details>
+      </div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap">
+        <button class="button primary btn-quick-proxy" data-ptype="socks5" type="button" style="height:44px;padding:0 22px;font-size:13px;border-radius:10px">⚡ 一键生成 SOCKS5 代理</button>
+        <button class="button btn-quick-proxy" data-ptype="http" type="button" style="height:44px;padding:0 22px;font-size:13px;border-radius:10px;background:#fff;border-color:#badcd5">⚡ 一键生成 HTTP 代理</button>
+        <button class="button btn-quick-proxy" data-ptype="https" type="button" style="height:44px;padding:0 22px;font-size:13px;border-radius:10px;background:#fff;border-color:#badcd5">⚡ 一键生成 HTTPS 代理</button>
+      </div>
+    </div>
+
+
+
+    <div class="user-table-wrap">
+      <table class="proxy-table">
+        <thead><tr><th>类型</th><th>端口</th><th>账号</th><th>密码</th><th>完整直连地址 (可复制)</th><th>操作</th></tr></thead>
+        <tbody id="proxy-tbody"><tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px">正在加载代理服务...</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 区块 2: Cloudflare WARP 智能分流出口 -->
+  <section class="card">
+    <div class="user-header">
+      <div>
+        <h2>⚡ Cloudflare WARP 智能分流出口 (AI 加速)</h2>
+        <p style="font-size:13px">智能分流主流 AI 大模型流量（ChatGPT、Claude、Gemini），普通网页直连保持原生高速</p>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <span class="status-pill" id="warp-badge" style="background:#eaf3de;color:#27500a">检测中...</span>
+        <button class="toggle-btn off" id="btn-toggle-warp" type="button">切换中...</button>
+      </div>
+    </div>
+    <div class="switch-box" id="warp-box" style="margin-bottom:0">
+      <div class="switch-info">
+        <div class="switch-title"><span>🛡️ 防封号与验证码保护机制</span></div>
+        <div class="switch-desc">
+          开启后，针对 OpenAI (chatgpt.com / openai.com / ai.com)、Anthropic (claude.ai)、Google (gemini.google.com / aistudio.google.com) 的出站流量将经由 Cloudflare 干净网络出口，有效避开数据中心 IP 拦截与高频 Cloudflare 盾；其余全球流量均维持 VPS 原生网卡直连。
+        </div>
+      </div>
     </div>
   </section>
 </div>
@@ -1648,6 +1843,75 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
 
 <div class="security">私密提示 · 链接和二维码包含连接凭据，请勿公开分享或发送截图给他人。</div>
 <p id="copy-status" class="status" role="status" aria-live="polite"></p>
+
+<!-- 入站代理创建成功高颜值模态框 (现代轻奢 + 二维码) -->
+<div class="modal-backdrop" id="proxy-modal">
+  <div class="pm-card">
+    <div class="modal-head">
+      <div>
+        <h2 style="margin:0;font-size:19px;color:var(--accent);display:flex;align-items:center;gap:6px">
+          <span>🎉 入站代理服务创建成功</span>
+        </h2>
+        <p style="font-size:12px;margin-top:2px;color:var(--muted)">GOST 核心已秒级热载入并监听，可直接配置或扫码导入使用</p>
+      </div>
+      <button class="modal-close" type="button" id="pm-close">&times;</button>
+    </div>
+
+    <!-- 顶部主连接节点 Banner -->
+    <div class="pm-banner">
+      <div class="pm-host-box">
+        <span class="proxy-type" id="res-ptype-badge">SOCKS5</span>
+        <div class="pm-host-val"><span id="res-phost">usntt.teyir.com</span> :<span class="pm-port-val" id="res-pport">28412</span></div>
+      </div>
+      <span class="pm-status-tag">● 实时监听中</span>
+    </div>
+
+    <!-- 中间对称凭据卡片 (告别孤立留白) -->
+    <div class="pm-cred-grid">
+      <div class="pm-cred-card">
+        <div>
+          <div class="pm-cred-lbl">👤 认证用户名 (Username)</div>
+          <div class="pm-cred-val" id="res-puser">user_123</div>
+        </div>
+        <button class="button" type="button" style="padding:4px 8px;font-size:11px" data-copy-field="res-puser">复制</button>
+      </div>
+      <div class="pm-cred-card">
+        <div>
+          <div class="pm-cred-lbl">🔑 认证密码 (Password)</div>
+          <div class="pm-cred-val" id="res-ppass">pwd_456</div>
+        </div>
+        <button class="button" type="button" style="padding:4px 8px;font-size:11px" data-copy-field="res-ppass">复制</button>
+      </div>
+    </div>
+
+    <!-- 二维码与链接复合展示区 (左侧扫码 · 右侧直链) -->
+    <div class="pm-main-grid">
+      <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
+        <div class="pm-qr-frame" id="res-pqr">
+          <span style="font-size:11px;color:var(--muted)">生成中...</span>
+        </div>
+        <span style="font-size:11px;color:var(--muted);font-weight:600">📱 客户端扫码导入</span>
+      </div>
+
+      <div class="pm-links-stack">
+        <div>
+          <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:4px">标准直连 URL (URI)</div>
+          <div class="pm-code-box">
+            <input class="pm-code-input" id="res-purl" readonly value="">
+            <button class="button primary" id="btn-copy-purl" type="button" style="padding:4px 12px;font-size:11px;white-space:nowrap">复制 URL</button>
+          </div>
+        </div>
+        <div>
+          <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:4px">通用爬虫/软件格式 (Host:Port:User:Pass)</div>
+          <div class="pm-code-box">
+            <input class="pm-code-input" id="res-pfmt" readonly value="">
+            <button class="button" id="btn-copy-pfmt" type="button" style="padding:4px 12px;font-size:11px;white-space:nowrap">复制格式</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 
 <!-- 专属用户连接模态框 -->
 <div class="modal-backdrop" id="user-modal">
@@ -2360,31 +2624,57 @@ def serve(path):
                         ptype = form.get('type', ['socks5'])[0]
                         if ptype not in ('socks5', 'http', 'https'):
                             return self.reply_json(400, {'ok': False, 'error': 'Invalid proxy type'})
-                        try:
-                            port = int(form.get('port', ['0'])[0])
-                        except Exception:
-                            return self.reply_json(400, {'ok': False, 'error': 'Invalid port'})
-                        if port < 1 or port > 65535:
-                            return self.reply_json(400, {'ok': False, 'error': 'Port out of range (1-65535)'})
-                        username = form.get('username', [''])[0].strip()[:64] or secrets.token_hex(6)
-                        password = form.get('password', [''])[0].strip() or secrets.token_hex(16)
-                        note = form.get('note', [''])[0].strip()[:200]
-
-                        # 真实端口占用检测（避免与 Hysteria 订阅端口、其他服务冲突）
+                        
+                        import random
                         import socket
-                        try:
-                            probe = socket.socket()
-                            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                            probe.bind(('0.0.0.0', port))
-                            probe.close()
-                        except OSError:
-                            return self.reply_json(400, {'ok': False, 'error': f'端口 {port} 已被系统占用（可能与 Hysteria 订阅端口冲突）'})
+
+                        raw_port = form.get('port', [''])[0].strip()
+                        port = 0
+                        if raw_port:
+                            try:
+                                port = int(raw_port)
+                            except Exception:
+                                return self.reply_json(400, {'ok': False, 'error': 'Invalid port'})
 
                         with data_lock:
-                            # 端口冲突检查
-                            for svc in data.get('proxy_services', []):
-                                if svc.get('port') == port:
-                                    return self.reply_json(400, {'ok': False, 'error': f'端口 {port} 已被占用'})
+                            existing_ports = set(s.get('port') for s in data.get('proxy_services', []))
+
+                        # 若未指定端口或端口无效，自动在 12000-58000 寻找空闲可用端口（避开 Hysteria 20000-40000 端口跳跃段及常见端口）
+                        if port <= 0 or port > 65535:
+                            allocated = None
+                            for _ in range(100):
+                                cand = random.randint(12000, 58000)
+                                if 20000 <= cand <= 40000 or cand in existing_ports or cand in (8443, 40000, 56195):
+                                    continue
+                                try:
+                                    probe = socket.socket()
+                                    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                                    probe.bind(('0.0.0.0', cand))
+                                    probe.close()
+                                    allocated = cand
+                                    break
+                                except OSError:
+                                    continue
+                            if not allocated:
+                                return self.reply_json(500, {'ok': False, 'error': '系统未能找到空闲可用端口，请尝试手动指定端口'})
+                            port = allocated
+                        else:
+                            # 真实端口占用检测（避免与已有服务冲突）
+                            if port in existing_ports:
+                                return self.reply_json(400, {'ok': False, 'error': f'端口 {port} 已被其他代理服务占用'})
+                            try:
+                                probe = socket.socket()
+                                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                                probe.bind(('0.0.0.0', port))
+                                probe.close()
+                            except OSError:
+                                return self.reply_json(400, {'ok': False, 'error': f'端口 {port} 已被系统其他进程占用'})
+
+                        username = form.get('username', [''])[0].strip()[:64] or ('user_' + secrets.token_hex(4))
+                        password = form.get('password', [''])[0].strip() or secrets.token_hex(12)
+                        note = form.get('note', [''])[0].strip()[:200]
+
+                        with data_lock:
                             proxy_id = 'proxy_' + secrets.token_hex(6)
                             data.setdefault('proxy_services', []).append({
                                 'id': proxy_id,
@@ -2397,7 +2687,35 @@ def serve(path):
                             })
                         save_data()
                         reload_gost()
-                        return self.reply_json(200, {'ok': True, 'id': proxy_id, 'type': ptype, 'port': port, 'username': username})
+
+                        # 获取主机域名或 IP 以输出完整连接格式
+                        m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+                        host = m.get('public_ip', '127.0.0.1') if m.get('is_insecure') else m.get('server_name', 'localhost')
+
+                        uri_link = f"{ptype}://{username}:{password}@{host}:{port}"
+                        qr_svg = ''
+                        try:
+                            qr_res = subprocess.run(['qrencode', '-t', 'SVG', '-o', '-'],
+                                                    input=uri_link.encode('utf-8'),
+                                                    capture_output=True, timeout=3)
+                            if qr_res.returncode == 0:
+                                qr_svg = qr_res.stdout.decode('utf-8')
+                        except Exception:
+                            qr_svg = ''
+
+                        return self.reply_json(200, {
+                            'ok': True,
+                            'id': proxy_id,
+                            'type': ptype,
+                            'host': host,
+                            'port': port,
+                            'username': username,
+                            'password': password,
+                            'note': note,
+                            'url': uri_link,
+                            'format': f"{host}:{port}:{username}:{password}",
+                            'qr': qr_svg
+                        })
 
                     elif action == 'delete':
                         proxy_id = form.get('id', [''])[0].strip()
@@ -2414,6 +2732,66 @@ def serve(path):
                     return self.reply_json(400, {'ok': False, 'error': 'Invalid action'})
                 except Exception as e:
                     return self.reply_json(500, {'ok': False, 'error': str(e)})
+
+            if self.path == prefix + 'install-gost':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                try:
+                    import platform
+                    machine = platform.machine().lower()
+                    if 'x86_64' in machine or 'amd64' in machine:
+                        arch = 'linux_amd64'
+                    elif 'aarch64' in machine or 'arm64' in machine:
+                        arch = 'linux_arm64'
+                    elif 'armv7' in machine:
+                        arch = 'linux_armv7'
+                    else:
+                        arch = 'linux_amd64'
+
+                    # 自动检测并下载 gost 最新稳定版
+                    install_cmd = f'''
+                    set -e
+                    ARCH="{arch}"
+                    TMP_DIR=$(mktemp -d)
+                    cd "$TMP_DIR"
+                    # 下载官方 release
+                    curl -sSL -m 60 "https://github.com/go-gost/gost/releases/download/v3.0.0-nightly.20240128/gost_3.0.0-nightly.20240128_${{ARCH}}.tar.gz" -o gost.tar.gz || \
+                    curl -sSL -m 60 "https://ghproxy.com/https://github.com/go-gost/gost/releases/download/v3.0.0-nightly.20240128/gost_3.0.0-nightly.20240128_${{ARCH}}.tar.gz" -o gost.tar.gz
+                    tar -xzf gost.tar.gz
+                    install -m 755 gost /usr/local/bin/gost
+                    rm -rf "$TMP_DIR"
+
+                    # 确保 systemd 服务存在
+                    cat > /etc/systemd/system/gost.service << 'SERVICE_EOF'
+[Unit]
+Description=GOST Proxy Service (SOCKS5/HTTP/HTTPS inbound)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/gost -C /etc/hysteria/gost.yml
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+                    systemctl daemon-reload
+                    systemctl enable gost
+                    '''
+                    res = subprocess.run(['bash', '-c', install_cmd], capture_output=True, text=True, timeout=120)
+                    if res.returncode != 0:
+                        err_detail = (res.stderr or res.stdout or '下载或安装失败').strip()
+                        return self.reply_json(500, {'ok': False, 'error': f'安装失败: {err_detail}'})
+
+                    # 重新生成 gost.yml 并启动服务
+                    write_gost_config()
+                    subprocess.run(['systemctl', 'restart', 'gost'], capture_output=True, timeout=10)
+
+                    return self.reply_json(200, {'ok': True, 'message': 'GOST 官方核心安装成功，服务已自动配置并启动！'})
+                except Exception as e:
+                    return self.reply_json(500, {'ok': False, 'error': f'执行异常: {str(e)}'})
 
             if self.path == prefix + 'manage-warp':
                 if not self.is_authenticated():
@@ -2631,10 +3009,13 @@ def serve(path):
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
                 with data_lock:
                     services = list(data.get('proxy_services', []))
+                m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+                host = m.get('public_ip', '127.0.0.1') if m.get('is_insecure') else m.get('server_name', 'localhost')
                 return self.reply_json(200, {
                     'ok': True,
                     'gost_installed': Path('/usr/local/bin/gost').exists(),
                     'gost_active': gost_status(),
+                    'host': host,
                     'services': services
                 })
 
@@ -2807,6 +3188,7 @@ if __name__ == '__main__':
         refresh(sys.argv[2])
     else:
         serve(sys.argv[2])
+
 
 PYPORTAL
 }
