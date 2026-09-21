@@ -252,6 +252,65 @@ if (btnToggleWarp) {
   });
 }
 
+// 版本检测与一键更新交互
+const coreVerDisplay = document.getElementById('core-ver-display');
+const portalVerDisplay = document.getElementById('portal-ver-display');
+const btnUpdateCore = document.getElementById('btn-update-core');
+const btnUpdatePortal = document.getElementById('btn-update-portal');
+const updateStatusMsg = document.getElementById('update-status-msg');
+
+async function checkVersions() {
+  if (!coreVerDisplay || !portalVerDisplay) return;
+  try {
+    const res = await fetch(location.pathname + 'check-version', { credentials: 'same-origin' });
+    if (!res.ok) return;
+    const json = await res.json();
+    if (!json.ok) return;
+
+    // 核心展示
+    coreVerDisplay.textContent = json.core_current + (json.core_has_update ? (' → 可升级至 ' + json.core_latest) : ' (最新)');
+    if (json.core_has_update && btnUpdateCore) {
+      btnUpdateCore.style.display = 'inline-flex';
+      btnUpdateCore.onclick = () => doUpgrade('core');
+    }
+
+    // 面板展示
+    portalVerDisplay.textContent = json.portal_current + (json.portal_has_update ? (' → 发现新版本') : ' (最新)');
+    if (json.portal_has_update && btnUpdatePortal) {
+      btnUpdatePortal.style.display = 'inline-flex';
+      btnUpdatePortal.onclick = () => doUpgrade('portal');
+    }
+  } catch (_) {}
+}
+
+async function doUpgrade(target) {
+  const btn = target === 'core' ? btnUpdateCore : btnUpdatePortal;
+  if (!confirm(`确定要升级 ${target === 'core' ? 'Hysteria 2 官方核心' : '控制面板自身'} 吗？`)) return;
+  if (btn) { btn.disabled = true; btn.textContent = '升级中...'; }
+  if (updateStatusMsg) updateStatusMsg.textContent = '正在下载并应用更新，请稍候约 5-10 秒...';
+  try {
+    const res = await fetch(location.pathname + 'do-upgrade', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'target=' + target
+    });
+    const json = await res.json();
+    if (json.ok) {
+      if (updateStatusMsg) updateStatusMsg.textContent = '升级已触发！5 秒后将自动刷新页面...';
+      setTimeout(() => location.reload(), 5000);
+    } else {
+      alert(json.error || '升级失败');
+      if (btn) { btn.disabled = false; btn.textContent = '重试升级'; }
+    }
+  } catch (e) {
+    alert('升级请求异常: ' + e.message);
+    if (btn) { btn.disabled = false; btn.textContent = '重试升级'; }
+  }
+}
+
+checkVersions();
+
 function closeUserModal() {
   if (uModal) uModal.classList.remove('show');
 }
@@ -698,8 +757,33 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
   </section>
 </div>
 
-<!-- Tab 4: 高级配置文件视图 -->
+<!-- Tab 4: 高级配置与版本更新视图 -->
 <div class="tab-pane" id="pane-configs">
+  <!-- 版本检测与一键更新卡片 -->
+  <section class="card" style="margin-bottom:20px;border-left:4px solid var(--accent)">
+    <div class="card-head"><span class="step">UP</span><div><h2>系统版本与一键升级</h2><p>支持在线比对并升级 Hysteria 2 官方内核与控制面板自身</p></div></div>
+    
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+      <!-- 核心版本 -->
+      <div class="api-box" style="margin-bottom:0">
+        <div>
+          <div style="font-size:11px;color:var(--muted);font-weight:700">Hysteria 2 官方核心版本</div>
+          <div style="font-size:14px;font-weight:700;margin-top:4px" id="core-ver-display">检测中...</div>
+        </div>
+        <button class="button primary" id="btn-update-core" type="button" style="display:none">一键升级核心</button>
+      </div>
+      <!-- 面板版本 -->
+      <div class="api-box" style="margin-bottom:0">
+        <div>
+          <div style="font-size:11px;color:var(--muted);font-weight:700">控制面板与安装脚本</div>
+          <div style="font-size:14px;font-weight:700;margin-top:4px" id="portal-ver-display">检测中...</div>
+        </div>
+        <button class="button primary" id="btn-update-portal" type="button" style="display:none">一键更新面板</button>
+      </div>
+    </div>
+    <div id="update-status-msg" style="font-size:12px;color:var(--muted)"></div>
+  </section>
+
   <section class="advanced" style="margin-top:0">
     <div class="advanced-title"><h2>完整配置文件片段</h2><p>支持手动复制或下载独立配置文件。</p></div>
     <div class="config-grid">
@@ -1323,8 +1407,26 @@ def serve(path):
             if not self.check_rate_limit(bucket='web'):
                 return self.reply(429, b'Too many requests')
 
-            # 3. Web 网页版管理通道 (用户管理 / WARP 开关)
+            # 3. Web 网页版管理通道 (用户管理 / WARP 开关 / 触发升级)
             prefix = '/' + data['token'] + '/'
+            if self.path == prefix + 'do-upgrade':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = self.rfile.read(length).decode('utf-8')
+                    form = parse_qs(body)
+                    target = form.get('target', [''])[0]
+                    if target not in ('core', 'portal'):
+                        return self.reply_json(400, {'ok': False, 'error': 'Invalid target'})
+
+                    # 异步执行系统升级脚本
+                    subprocess.Popen(['bash', '/etc/hysteria/do_upgrade.sh', target],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return self.reply_json(200, {'ok': True, 'target': target})
+                except Exception as e:
+                    return self.reply_json(500, {'ok': False, 'error': str(e)})
+
             if self.path == prefix + 'manage-warp':
                 if not self.is_authenticated():
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
@@ -1501,7 +1603,61 @@ def serve(path):
                 else:
                     return self.reply(404, b'Not found')
 
-            # 2. 用户专属配置 API (供管理后台弹窗使用，需管理员已登录认证)
+            # 2. 版本检查与更新 API
+            if subpath == 'check-version':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                import urllib.request
+                core_curr = '未知'
+                core_latest = '未知'
+                core_has_update = False
+                portal_curr = '2026.09.21'
+                portal_has_update = False
+
+                try:
+                    # 获取本地核心版本
+                    out = subprocess.run(['/usr/local/bin/hysteria', 'version'], capture_output=True, text=True, timeout=2).stdout
+                    if out:
+                        core_curr = out.split()[2] if len(out.split()) >= 3 else out.splitlines()[0]
+                except Exception:
+                    pass
+
+                try:
+                    # 从 GitHub 获取官方最新版本
+                    req = urllib.request.Request('https://api.github.com/repos/apernet/hysteria/releases/latest',
+                                                 headers={'User-Agent': 'hysteria2-installer'})
+                    with urllib.request.urlopen(req, timeout=3) as resp:
+                        if resp.status == 200:
+                            rel = json.loads(resp.read().decode('utf-8'))
+                            core_latest = rel.get('tag_name', '').lstrip('app/v').lstrip('v')
+                            if core_curr != '未知' and core_latest and core_curr != core_latest:
+                                core_has_update = True
+                except Exception:
+                    pass
+
+                try:
+                    # 检查面板是否有新提交
+                    req2 = urllib.request.Request('https://api.github.com/repos/yys9253462-gif/hysteria2-installer/commits/main',
+                                                  headers={'User-Agent': 'hysteria2-installer'})
+                    with urllib.request.urlopen(req2, timeout=3) as resp2:
+                        if resp2.status == 200:
+                            commit_info = json.loads(resp2.read().decode('utf-8'))
+                            remote_sha = commit_info.get('sha', '')[:7]
+                            local_sha = data.get('portal_sha', '')
+                            if local_sha and remote_sha and local_sha != remote_sha:
+                                portal_has_update = True
+                except Exception:
+                    pass
+
+                return self.reply_json(200, {
+                    'ok': True,
+                    'core_current': core_curr,
+                    'core_latest': core_latest,
+                    'core_has_update': core_has_update,
+                    'portal_current': portal_curr,
+                    'portal_has_update': portal_has_update
+                })
+
             if subpath == 'warp-status':
                 if not self.is_authenticated():
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
