@@ -923,36 +923,10 @@ const uModalSub = document.getElementById('um-sub');
 const uModalBody = document.getElementById('um-body');
 const uModalClose = document.getElementById('um-close');
 
-// WARP 状态与一键开关逻辑
+// WARP 状态与一键安装与自定义分流交互
 const warpBadge = document.getElementById('warp-badge');
 const btnToggleWarp = document.getElementById('btn-toggle-warp');
-
-async function checkWarpStatus() {
-  if (!warpBadge || !btnToggleWarp) return;
-  try {
-    const res = await fetch(location.pathname + 'warp-status', { credentials: 'same-origin' });
-    if (!res.ok) return;
-    const json = await res.json();
-    if (!json.ok) return;
-    if (json.enabled) {
-      warpBadge.textContent = json.connected ? ('● 运行中 (' + (json.ip || '已连通') + ')') : '● 正在连接 / 异常';
-      warpBadge.style.background = json.connected ? '#eaf3de' : '#fff1f0';
-      warpBadge.style.color = json.connected ? '#27500a' : '#cf3c3c';
-      btnToggleWarp.textContent = '已开启 (点击关闭)';
-      btnToggleWarp.className = 'toggle-btn on';
-    } else {
-      warpBadge.textContent = '○ 已停用 (直连模式)';
-      warpBadge.style.background = '#f1efe8';
-      warpBadge.style.color = '#5f5e5a';
-      btnToggleWarp.textContent = '已关闭 (点击开启)';
-      btnToggleWarp.className = 'toggle-btn off';
-    }
-    if (Array.isArray(json.rules)) {
-      renderWarpRules(json.rules);
-    }
-  } catch (_) {}
-}
-
+const btnInstallWarp = document.getElementById('btn-install-warp');
 const warpTagsCloud = document.getElementById('warp-tags-cloud');
 const warpRulesCount = document.getElementById('warp-rules-count');
 const formAddWarpRule = document.getElementById('form-add-warp-rule');
@@ -1014,6 +988,106 @@ async function delWarpRule(domain) {
 }
 window.delWarpRule = delWarpRule;
 
+async function checkWarpStatus() {
+  if (!warpBadge) return;
+  try {
+    const res = await fetch(location.pathname + 'warp-status', { credentials: 'same-origin' });
+    if (!res.ok) return;
+    const json = await res.json();
+    if (!json.ok) return;
+
+    if (btnInstallWarp) {
+      if (!json.installed) {
+        btnInstallWarp.style.display = 'inline-flex';
+      } else {
+        btnInstallWarp.style.display = 'none';
+      }
+    }
+
+    if (!json.installed) {
+      warpBadge.textContent = '● 未安装 WARP 客户端';
+      warpBadge.style.background = '#fff1f0';
+      warpBadge.style.color = '#cf3c3c';
+      if (btnToggleWarp) btnToggleWarp.style.display = 'none';
+      return;
+    } else {
+      if (btnToggleWarp) btnToggleWarp.style.display = 'inline-flex';
+    }
+
+    if (json.enabled) {
+      warpBadge.textContent = json.connected ? ('● 运行中 (' + (json.ip || '已连通') + ')') : '● 正在连接 / 异常';
+      warpBadge.style.background = json.connected ? '#eaf3de' : '#fff1f0';
+      warpBadge.style.color = json.connected ? '#27500a' : '#cf3c3c';
+      if (btnToggleWarp) {
+        btnToggleWarp.textContent = '已开启 (点击关闭)';
+        btnToggleWarp.className = 'toggle-btn on';
+      }
+    } else {
+      warpBadge.textContent = '○ 已停用 (直连模式)';
+      warpBadge.style.background = '#f1efe8';
+      warpBadge.style.color = '#5f5e5a';
+      if (btnToggleWarp) {
+        btnToggleWarp.textContent = '已关闭 (点击开启)';
+        btnToggleWarp.className = 'toggle-btn off';
+      }
+    }
+
+    if (Array.isArray(json.rules)) {
+      renderWarpRules(json.rules);
+    }
+  } catch (_) {}
+}
+
+if (btnToggleWarp) {
+  btnToggleWarp.addEventListener('click', async () => {
+    btnToggleWarp.disabled = true;
+    btnToggleWarp.textContent = '切换中...';
+    try {
+      const res = await fetch(location.pathname + 'manage-warp', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'action=toggle'
+      });
+      const json = await res.json();
+      if (!json.ok) alert(json.error || '切换失败');
+    } catch (e) {
+      alert('操作失败: ' + e.message);
+    } finally {
+      btnToggleWarp.disabled = false;
+      await checkWarpStatus();
+    }
+  });
+}
+
+if (btnInstallWarp) {
+  btnInstallWarp.addEventListener('click', async () => {
+    if (!confirm("确定要在服务器上一键安装并注册 Cloudflare WARP 客户端吗？安装后将自动启用 40000 端口 Local Proxy 模式。")) return;
+    btnInstallWarp.disabled = true;
+    const origText = btnInstallWarp.textContent;
+    btnInstallWarp.textContent = '⏳ 正在安装 WARP (耗时约 30 秒)...';
+    try {
+      const res = await fetch(location.pathname + 'install-warp', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+      });
+      const json = await res.json();
+      if (json.ok) {
+        alert(json.message || 'Cloudflare WARP 安装成功！服务已自动就绪。');
+        await checkWarpStatus();
+      } else {
+        alert(json.error || '安装失败，请检查网络');
+      }
+    } catch (e) {
+      alert('安装请求异常: ' + e.message);
+    } finally {
+      btnInstallWarp.disabled = false;
+      btnInstallWarp.textContent = origText;
+    }
+  });
+}
+
 if (formAddWarpRule) {
   formAddWarpRule.addEventListener('submit', (e) => {
     e.preventDefault();
@@ -1048,8 +1122,7 @@ if (btnResetWarpRules) {
   });
 }
 
-if (btnToggleWarp) {
-  checkWarpStatus();
+checkWarpStatus();
 
 // VLESS-Reality 客户端与状态交互
 const realityBadge = document.getElementById('reality-badge');
@@ -1199,8 +1272,7 @@ if (btnCopyRealityUri) {
   });
 }
 
-// 初始化时执行状态检查
-setTimeout(checkRealityStatus, 300);
+checkRealityStatus();
 
 // BBR 状态获取与一键切换交互
 const bbrBadge = document.getElementById('bbr-badge');
@@ -1306,288 +1378,7 @@ if (btnRebootServer) {
   });
 }
 
-setTimeout(checkBbrStatus, 400);
-
-
-  btnToggleWarp.addEventListener('click', async () => {
-    btnToggleWarp.disabled = true;
-    btnToggleWarp.textContent = '正在切换...';
-    try {
-      const res = await fetch(location.pathname + 'manage-warp', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'action=toggle'
-      });
-      const json = await res.json();
-      if (!json.ok) alert(json.error || '切换失败');
-    } catch (e) {
-      alert('操作失败: ' + e.message);
-    } finally {
-      btnToggleWarp.disabled = false;
-      checkWarpStatus();
-
-// VLESS-Reality 客户端与状态交互
-const realityBadge = document.getElementById('reality-badge');
-const btnInstallXray = document.getElementById('btn-install-xray');
-const btnToggleReality = document.getElementById('btn-toggle-reality');
-const realityContentBox = document.getElementById('reality-content-box');
-const realityUriVal = document.getElementById('reality-uri-val');
-const realityQrBox = document.getElementById('reality-qr-box');
-const realitySniVal = document.getElementById('reality-sni-val');
-const realityUuidVal = document.getElementById('reality-uuid-val');
-const realityPubkeyVal = document.getElementById('reality-pubkey-val');
-const realityFlowVal = document.getElementById('reality-flow-val');
-const btnCopyRealityUri = document.getElementById('btn-copy-reality-uri');
-const btnResetRealityKeys = document.getElementById('btn-reset-reality-keys');
-
-async function checkRealityStatus() {
-  if (!realityBadge) return;
-  try {
-    const res = await fetch(location.pathname + 'reality-status', { credentials: 'same-origin' });
-    if (!res.ok) return;
-    const json = await res.json();
-    if (!json.ok) return;
-
-    if (!json.installed) {
-      realityBadge.textContent = '● 未安装 Xray 核心';
-      realityBadge.style.background = '#fff1f0';
-      realityBadge.style.color = '#cf3c3c';
-      if (btnInstallXray) btnInstallXray.style.display = 'inline-flex';
-      if (btnToggleReality) btnToggleReality.style.display = 'none';
-      if (realityContentBox) realityContentBox.style.display = 'none';
-      return;
-    }
-
-    if (btnInstallXray) btnInstallXray.style.display = 'none';
-    if (btnToggleReality) btnToggleReality.style.display = 'inline-flex';
-
-    if (json.active) {
-      realityBadge.textContent = '● 运行中 (TCP 443 端口)';
-      realityBadge.style.background = '#eaf3de';
-      realityBadge.style.color = '#27500a';
-      btnToggleReality.textContent = '已开启 (点击关闭)';
-      btnToggleReality.className = 'toggle-btn on';
-      if (realityContentBox) realityContentBox.style.display = 'block';
-    } else {
-      realityBadge.textContent = '○ 已停止';
-      realityBadge.style.background = '#f1efe8';
-      realityBadge.style.color = '#5f5e5a';
-      btnToggleReality.textContent = '已关闭 (点击开启)';
-      btnToggleReality.className = 'toggle-btn off';
-      if (realityContentBox) realityContentBox.style.display = 'none';
-    }
-
-    if (json.config) {
-      const cfg = json.config;
-      if (realityUriVal) realityUriVal.value = cfg.uri || '';
-      if (realityQrBox && cfg.qr_svg) realityQrBox.innerHTML = cfg.qr_svg;
-      if (realitySniVal) realitySniVal.textContent = (cfg.sni || 'www.apple.com') + ':' + (cfg.port || 443);
-      if (realityUuidVal) realityUuidVal.textContent = cfg.uuid || '-';
-      if (realityPubkeyVal) realityPubkeyVal.textContent = cfg.pub_key || '-';
-      if (realityFlowVal) realityFlowVal.textContent = (cfg.short_id || '') + ' · ' + (cfg.flow || 'xtls-rprx-vision');
-    }
-  } catch (_) {}
-}
-
-if (btnInstallXray) {
-  btnInstallXray.addEventListener('click', async () => {
-    if (!confirm("确定要一键安装 Xray 官方核心并部署 VLESS-Reality 节点吗？")) return;
-    btnInstallXray.disabled = true;
-    const orig = btnInstallXray.textContent;
-    btnInstallXray.textContent = '⏳ 正在下载并配置 Xray (约 20-30 秒)...';
-    try {
-      const res = await fetch(location.pathname + 'install-xray', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-      });
-      const json = await res.json();
-      if (json.ok) {
-        alert(json.message || 'Xray-core 安装并启动成功！');
-        await checkRealityStatus();
-      } else {
-        alert(json.error || '安装失败');
-      }
-    } catch (e) {
-      alert('请求异常: ' + e.message);
-    } finally {
-      btnInstallXray.disabled = false;
-      btnInstallXray.textContent = orig;
-    }
-  });
-}
-
-if (btnToggleReality) {
-  btnToggleReality.addEventListener('click', async () => {
-    btnToggleReality.disabled = true;
-    btnToggleReality.textContent = '切换中...';
-    try {
-      const res = await fetch(location.pathname + 'manage-reality', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'action=toggle'
-      });
-      const json = await res.json();
-      if (!json.ok) alert(json.error || '切换失败');
-      await checkRealityStatus();
-    } catch (e) {
-      alert('请求异常: ' + e.message);
-    } finally {
-      btnToggleReality.disabled = false;
-    }
-  });
-}
-
-if (btnResetRealityKeys) {
-  btnResetRealityKeys.addEventListener('click', async () => {
-    if (!confirm("确定要重新生成 UUID 与 Reality 密钥对吗？旧客户端连接凭据将失效。")) return;
-    try {
-      const res = await fetch(location.pathname + 'manage-reality', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'action=reset'
-      });
-      const json = await res.json();
-      if (json.ok) {
-        alert('密钥与 UUID 已重新生成并生效！');
-        await checkRealityStatus();
-      } else {
-        alert(json.error || '重置失败');
-      }
-    } catch (e) {
-      alert('请求异常: ' + e.message);
-    }
-  });
-}
-
-if (btnCopyRealityUri) {
-  btnCopyRealityUri.addEventListener('click', () => {
-    if (realityUriVal && realityUriVal.value) {
-      navigator.clipboard.writeText(realityUriVal.value).then(() => {
-        const orig = btnCopyRealityUri.textContent;
-        btnCopyRealityUri.textContent = '✓ 已复制直链';
-        setTimeout(() => btnCopyRealityUri.textContent = orig, 1500);
-      });
-    }
-  });
-}
-
-// 初始化时执行状态检查
-setTimeout(checkRealityStatus, 300);
-
-// BBR 状态获取与一键切换交互
-const bbrBadge = document.getElementById('bbr-badge');
-const bbrCurrentText = document.getElementById('bbr-current-text');
-const bbrQdiscText = document.getElementById('bbr-qdisc-text');
-const bbrKernelText = document.getElementById('bbr-kernel-text');
-const bbrRebootTip = document.getElementById('bbr-reboot-tip');
-const btnRebootServer = document.getElementById('btn-reboot-server');
-
-async function checkBbrStatus() {
-  if (!bbrBadge) return;
-  try {
-    const res = await fetch(location.pathname + 'bbr-status', { credentials: 'same-origin' });
-    if (!res.ok) return;
-    const json = await res.json();
-    if (!json.ok) return;
-
-    if (bbrCurrentText) bbrCurrentText.textContent = json.current || 'cubic';
-    if (bbrQdiscText) bbrQdiscText.textContent = json.qdisc || 'fq_codel';
-    if (bbrKernelText) bbrKernelText.textContent = json.kernel || '--';
-
-    const isBbrActive = (json.current && json.current.includes('bbr'));
-    if (bbrBadge) {
-      if (isBbrActive) {
-        bbrBadge.textContent = '● 已开启 ' + json.current.toUpperCase();
-        bbrBadge.style.background = '#eaf3de';
-        bbrBadge.style.color = '#27500a';
-      } else {
-        bbrBadge.textContent = '○ 未开启 BBR (' + json.current + ')';
-        bbrBadge.style.background = '#f1efe8';
-        bbrBadge.style.color = '#5f5e5a';
-      }
-    }
-
-    if (bbrRebootTip && btnRebootServer) {
-      if (json.need_reboot) {
-        bbrRebootTip.style.display = 'block';
-        bbrRebootTip.textContent = '⚠️ 已成功配置 ' + json.configured.toUpperCase() + '，需要重启服务器后生效！';
-        btnRebootServer.style.display = 'inline-flex';
-      } else {
-        bbrRebootTip.style.display = 'none';
-        btnRebootServer.style.display = 'none';
-      }
-    }
-  } catch (_) {}
-}
-
-document.querySelectorAll('.btn-apply-bbr').forEach(btn => {
-  btn.addEventListener('click', async () => {
-    const ver = btn.getAttribute('data-version') || 'v1';
-    const label = { v1: 'BBR V1 (经典官方)', v2: 'BBR V2 (低丢包)', v3: 'BBR V3 (极限吞吐)' }[ver];
-    if (!confirm('确定要一键配置 ' + label + ' 加速引擎吗？\n系统将自动写入内核持久化配置，部分环境重启后生效。')) return;
-
-    btn.disabled = true;
-    const orig = btn.textContent;
-    btn.textContent = '正在配置...';
-    try {
-      const res = await fetch(location.pathname + 'set-bbr', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'version=' + encodeURIComponent(ver)
-      });
-      const json = await res.json();
-      if (json.ok) {
-        alert(json.message || '配置成功！');
-        await checkBbrStatus();
-      } else {
-        alert(json.error || '配置失败');
-      }
-    } catch (e) {
-      alert('请求异常: ' + e.message);
-    } finally {
-      btn.disabled = false;
-      btn.textContent = orig;
-    }
-  });
-});
-
-if (btnRebootServer) {
-  btnRebootServer.addEventListener('click', async () => {
-    if (!confirm("确定要立即安全重启服务器以生效新 BBR 内核网络参数吗？\n服务器将在 10 秒后完成重启，页面将自动重连。")) return;
-    btnRebootServer.disabled = true;
-    btnRebootServer.textContent = '⏳ 重启指令已发送...';
-    try {
-      const res = await fetch(location.pathname + 'reboot-server', {
-        method: 'POST',
-        credentials: 'same-origin'
-      });
-      alert("服务器正在重启中，系统将在 25 秒后自动刷新页面！");
-      let countdown = 25;
-      const timer = setInterval(() => {
-        countdown--;
-        btnRebootServer.textContent = '正在重启中 (' + countdown + 's)...';
-        if (countdown <= 0) {
-          clearInterval(timer);
-          location.reload();
-        }
-      }, 1000);
-    } catch (e) {
-      alert("重启请求已发出: " + e.message);
-    }
-  });
-}
-
-setTimeout(checkBbrStatus, 400);
-
-
-    }
-  });
-}
+checkBbrStatus();
 
 // 版本检测与一键更新交互
 const coreVerDisplay = document.getElementById('core-ver-display');
@@ -2371,7 +2162,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
   </section>
 
   <!-- 区块 2: Cloudflare WARP 智能分流出口 -->
-  <section class="card warp-section">
+  <section class="card">
     <div class="user-header">
       <div>
         <h2>⚡ Cloudflare WARP 智能分流出口 (AI 加速)</h2>
@@ -2379,48 +2170,16 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
       </div>
       <div style="display:flex;gap:10px;align-items:center">
         <span class="status-pill" id="warp-badge" style="background:#eaf3de;color:#27500a">检测中...</span>
-        <button class="button primary" id="btn-install-warp" type="button" style="display:none">⚡ 一键安装 WARP</button>
+        <button class="button primary" id="btn-install-warp" type="button" style="padding:6px 14px;font-size:12px;display:none">⚡ 一键安装 WARP</button>
         <button class="toggle-btn off" id="btn-toggle-warp" type="button">切换中...</button>
       </div>
     </div>
-
-    <!-- 机制说明卡片 -->
-    <div class="warp-switch-card">
-      <div class="warp-desc-title">🛡️ 出口路由与防封号保护机制</div>
-      <p class="warp-desc-text">
-        开启后，名单内的目标网站出站流量将由 Cloudflare WARP 干净网络出口分流，有效避开数据中心 IP 拦截与高频验证码挑战；其余全球网站维持原生网卡直连。
-      </p>
-    </div>
-
-    <!-- 自定义分流规则管理面板 (类名化高阶质感) -->
-    <div class="warp-rules-card">
-      <div class="warp-rules-head">
-        <div class="warp-rules-title-box">
-          <span class="warp-rules-title">🎯 自定义分流域名列表 (走 WARP 出口)</span>
-          <span class="warp-count-badge" id="warp-rules-count">加载中...</span>
+    <div class="switch-box" id="warp-box" style="margin-bottom:0">
+      <div class="switch-info">
+        <div class="switch-title"><span>🛡️ 防封号与验证码保护机制</span></div>
+        <div class="switch-desc">
+          开启后，针对 OpenAI (chatgpt.com / openai.com / ai.com)、Anthropic (claude.ai)、Google (gemini.google.com / aistudio.google.com) 的出站流量将经由 Cloudflare 干净网络出口，有效避开数据中心 IP 拦截与高频 Cloudflare 盾；其余全球流量均维持 VPS 原生网卡直连。
         </div>
-        <button class="warp-reset-btn" id="btn-reset-warp-rules" type="button" title="恢复为系统推荐的常用 AI 域名规则">恢复预设</button>
-      </div>
-
-      <!-- 添加新域名输入栏 -->
-      <form class="warp-add-form" id="form-add-warp-rule">
-        <input class="warp-domain-input" id="input-warp-domain" type="text" placeholder="输入要走 WARP 的域名，例如 netflix.com / bing.com" required>
-        <button class="warp-add-btn" type="submit">＋ 添加分流域名</button>
-      </form>
-
-      <!-- 快捷预设一键添加 -->
-      <div class="warp-presets-bar">
-        <span>常用推荐快捷添加:</span>
-        <a href="javascript:void(0)" class="warp-preset-chip preset-rule" data-domain="netflix.com">+ Netflix</a>
-        <a href="javascript:void(0)" class="warp-preset-chip preset-rule" data-domain="disneyplus.com">+ Disney+</a>
-        <a href="javascript:void(0)" class="warp-preset-chip preset-rule" data-domain="spotify.com">+ Spotify</a>
-        <a href="javascript:void(0)" class="warp-preset-chip preset-rule" data-domain="bing.com">+ Bing/Copilot</a>
-        <a href="javascript:void(0)" class="warp-preset-chip preset-rule" data-domain="twitter.com">+ Twitter/X</a>
-      </div>
-
-      <!-- 动态标签云容器 -->
-      <div class="warp-tags-wrap" id="warp-tags-cloud">
-        <span style="font-size:12px;color:var(--muted)">正在拉取规则...</span>
       </div>
     </div>
   </section>
@@ -2441,7 +2200,6 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
       </div>
     </div>
 
-    <!-- 伪装机制与核心优势说明卡片 -->
     <div class="warp-switch-card" style="background:#f7f9fc;border-color:#d7e2ee">
       <div class="warp-desc-title" style="color:#1a365d">💡 双引擎容灾保障哲学</div>
       <p class="warp-desc-text" style="color:#4a5568">
@@ -2451,7 +2209,6 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
 
     <div id="reality-content-box" style="display:none">
       <div class="layout" style="margin-top:10px">
-        <!-- 左侧二维码展示 -->
         <section class="card qr-card" style="background:#fbfcfd;border-color:var(--line)">
           <div class="eyebrow" style="color:#2563eb">REALITY CONNECT</div>
           <h2>Reality 节点扫码</h2>
@@ -2461,7 +2218,6 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
           <div class="tags"><span class="tag">VLESS</span><span class="tag">Reality</span><span class="tag">Vision</span><span class="tag">TCP 443</span></div>
         </section>
 
-        <!-- 右侧连接参数与直链复制 -->
         <div class="stack">
           <section class="card" style="border-color:#d7e2ee">
             <div class="card-head"><span class="step" style="background:#eff6ff;color:#2563eb">01</span><div><h2>VLESS 直链 (URI)</h2><p>支持一键导入主流现代客户端</p></div></div>
@@ -2472,7 +2228,6 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
             </div>
           </section>
 
-          <!-- 核心凭据看板卡片 -->
           <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
             <div style="background:#fbfcfd;border:1px solid var(--line);border-radius:12px;padding:12px">
               <div style="font-size:11px;color:var(--muted);font-weight:700;margin-bottom:2px">目标伪装域名 (SNI)</div>
@@ -2521,7 +2276,6 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
       </div>
     </div>
 
-    <!-- 三个核心一键切换按钮 -->
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px">
       <div style="background:#ffffff;border:1px solid var(--line);border-radius:14px;padding:16px;display:flex;flex-direction:column;justify-content:space-between;gap:12px;box-shadow:0 2px 6px rgba(0,0,0,0.02)">
         <div>
@@ -2557,7 +2311,6 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
       </div>
     </div>
   </section>
-
 </div>
 
 <!-- Tab 3: 集群与通用 REST API 对接视图 -->
@@ -3733,7 +3486,6 @@ WantedBy=multi-user.target
                     form = parse_qs(body)
                     action = form.get('action', ['toggle'])[0]
 
-                    # 经典内置默认规则列表
                     DEFAULT_WARP_DOMAINS = [
                         'ipify.org', 'cloudflare.com',
                         'openai.com', 'chatgpt.com', 'oaistatic.com', 'oaiusercontent.com', 'ai.com',
@@ -3750,7 +3502,6 @@ WantedBy=multi-user.target
                             data['warp_enabled'] = not curr
                         elif action == 'add_rule':
                             raw_domain = form.get('domain', [''])[0].strip().lower()
-                            # 清洗输入：移除协议头、端口与路径
                             cleaned = re.sub(r'^[a-zA-Z]+://', '', raw_domain).split('/')[0].split(':')[0].strip('.')
                             if cleaned and cleaned not in data['warp_rules'] and re.match(r'^[a-zA-Z0-9.\-]+$', cleaned):
                                 data['warp_rules'].append(cleaned)
@@ -3766,7 +3517,6 @@ WantedBy=multi-user.target
 
                     save_data()
 
-                    # 动态重新写回 /etc/hysteria/config.yaml 并重启 hysteria-server
                     def apply_hy2_acl():
                         cfg_path = Path('/etc/hysteria/config.yaml')
                         if not cfg_path.exists():
@@ -3798,6 +3548,149 @@ WantedBy=multi-user.target
                         'enabled': new_state,
                         'rules': current_rules
                     })
+                except Exception as e:
+                    return self.reply_json(500, {'ok': False, 'error': str(e)})
+
+            if self.path == prefix + 'install-xray':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                try:
+                    import os, platform, urllib.request, zipfile, tempfile, shutil
+                    machine = platform.machine().lower()
+                    xarch = 'arm64-v8a' if ('aarch64' in machine or 'arm64' in machine) else '64'
+                    dl_urls = [
+                        f"https://ghfast.top/https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-{xarch}.zip",
+                        f"https://github.moeyy.xyz/https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-{xarch}.zip",
+                        f"https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-{xarch}.zip"
+                    ]
+                    installed = False
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        zpath = Path(tmpdir) / 'xray.zip'
+                        for u in dl_urls:
+                            try:
+                                req = urllib.request.Request(u, headers={'User-Agent': 'Mozilla/5.0'})
+                                with urllib.request.urlopen(req, timeout=45) as resp, open(zpath, 'wb') as out_f:
+                                    shutil.copyfileobj(resp, out_f)
+                                if zpath.stat().st_size > 5 * 1024 * 1024 and zipfile.is_zipfile(str(zpath)):
+                                    with zipfile.ZipFile(zpath, 'r') as zf:
+                                        zf.extract('xray', path=tmpdir)
+                                    bin_path = Path(tmpdir) / 'xray'
+                                    if bin_path.exists():
+                                        shutil.move(str(bin_path), '/usr/local/bin/xray')
+                                        os.chmod('/usr/local/bin/xray', 0o755)
+                                        installed = True
+                                        break
+                            except Exception:
+                                pass
+
+                    if not installed:
+                        return self.reply_json(500, {'ok': False, 'error': '下载或解压 Xray 核心失败'})
+
+                    service_content = '''[Unit]
+Description=Xray Service (VLESS-Reality)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/xray run -c /etc/hysteria/xray.json
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+'''
+                    Path('/etc/systemd/system/xray.service').write_text(service_content)
+                    subprocess.run(['systemctl', 'daemon-reload'], capture_output=True)
+                    subprocess.run(['systemctl', 'enable', 'xray'], capture_output=True)
+                    self._generate_and_apply_reality(True)
+
+                    return self.reply_json(200, {'ok': True, 'message': 'Xray-core 安装成功，VLESS-Reality 节点已在 TCP 443 端口就绪！'})
+                except Exception as e:
+                    return self.reply_json(500, {'ok': False, 'error': f'安装执行异常: {str(e)}'})
+
+            if self.path == prefix + 'manage-reality':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = self.rfile.read(length).decode('utf-8') if length > 0 else ''
+                    form = parse_qs(body)
+                    action = form.get('action', ['toggle'])[0]
+
+                    if action == 'toggle':
+                        out = subprocess.run(['systemctl', 'is-active', 'xray'], capture_output=True, text=True, timeout=3).stdout.strip()
+                        if out == 'active':
+                            subprocess.run(['systemctl', 'stop', 'xray'], capture_output=True, timeout=5)
+                            new_active = False
+                        else:
+                            if not Path('/etc/hysteria/xray.json').exists():
+                                self._generate_and_apply_reality(True)
+                            else:
+                                subprocess.run(['systemctl', 'restart', 'xray'], capture_output=True, timeout=5)
+                            new_active = True
+                        return self.reply_json(200, {'ok': True, 'active': new_active})
+
+                    elif action == 'reset':
+                        self._generate_and_apply_reality(True)
+                        return self.reply_json(200, {'ok': True, 'message': '已重置密钥并重启生效'})
+
+                    return self.reply_json(400, {'ok': False, 'error': 'Invalid action'})
+                except Exception as e:
+                    return self.reply_json(500, {'ok': False, 'error': str(e)})
+
+            if self.path == prefix + 'set-bbr':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = self.rfile.read(length).decode('utf-8') if length > 0 else ''
+                    form = parse_qs(body)
+                    ver = form.get('version', ['v1'])[0].lower()
+
+                    Path('/etc/modules-load.d/bbr.conf').write_text('tcp_bbr\n', encoding='utf-8')
+                    subprocess.run(['modprobe', 'tcp_bbr'], capture_output=True)
+
+                    target_algo = 'bbr'
+                    qdisc = 'fq'
+                    if ver == 'v2':
+                        avail = subprocess.run(['sysctl', '-n', 'net.ipv4.tcp_available_congestion_control'],
+                                               capture_output=True, text=True).stdout
+                        target_algo = 'bbr2' if 'bbr2' in avail else 'bbr'
+                    elif ver == 'v3':
+                        avail = subprocess.run(['sysctl', '-n', 'net.ipv4.tcp_available_congestion_control'],
+                                               capture_output=True, text=True).stdout
+                        target_algo = 'bbr3' if 'bbr3' in avail else 'bbr'
+
+                    bbr_sysctl = f'''# TCP 拥塞控制 BBR {ver.upper()} 深度优化
+net.core.default_qdisc = {qdisc}
+net.ipv4.tcp_congestion_control = {target_algo}
+net.ipv4.tcp_notsent_lowat = 16384
+net.ipv4.tcp_slow_start_after_idle = 0
+'''
+                    Path('/etc/sysctl.d/99-bbr.conf').write_text(bbr_sysctl, encoding='utf-8')
+                    subprocess.run(['sysctl', '-p', '/etc/sysctl.d/99-bbr.conf'], capture_output=True, text=True)
+                    
+                    with data_lock:
+                        data['bbr_target_version'] = ver
+                    save_data()
+
+                    curr = subprocess.run(['sysctl', '-n', 'net.ipv4.tcp_congestion_control'],
+                                          capture_output=True, text=True).stdout.strip()
+                    
+                    if curr == target_algo:
+                        return self.reply_json(200, {'ok': True, 'message': f'恭喜！BBR {ver.upper()} 算法已立即热生效（当前算法: {curr}）！'})
+                    else:
+                        return self.reply_json(200, {'ok': True, 'message': f'BBR {ver.upper()} 配置已成功保存！需要重启服务器后完成内核级生效。'})
+                except Exception as e:
+                    return self.reply_json(500, {'ok': False, 'error': str(e)})
+
+            if self.path == prefix + 'reboot-server':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                try:
+                    subprocess.Popen(['bash', '-c', 'sleep 1 && reboot'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return self.reply_json(200, {'ok': True, 'message': '服务器正在重启中'})
                 except Exception as e:
                     return self.reply_json(500, {'ok': False, 'error': str(e)})
 
@@ -3879,95 +3772,6 @@ WantedBy=multi-user.target
                 self.send_header('Cache-Control', 'no-store')
                 self.end_headers()
                 return
-
-            if self.path == prefix + 'install-xray':
-                if not self.is_authenticated():
-                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                try:
-                    import os, platform, urllib.request, zipfile, tempfile, shutil
-                    machine = platform.machine().lower()
-                    xarch = 'arm64-v8a' if ('aarch64' in machine or 'arm64' in machine) else '64'
-                    dl_urls = [
-                        f"https://ghfast.top/https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-{xarch}.zip",
-                        f"https://github.moeyy.xyz/https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-{xarch}.zip",
-                        f"https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-{xarch}.zip"
-                    ]
-                    installed = False
-                    last_dl_err = ''
-                    with tempfile.TemporaryDirectory() as tmpdir:
-                        zpath = Path(tmpdir) / 'xray.zip'
-                        for u in dl_urls:
-                            try:
-                                req = urllib.request.Request(u, headers={'User-Agent': 'Mozilla/5.0'})
-                                with urllib.request.urlopen(req, timeout=45) as resp, open(zpath, 'wb') as out_f:
-                                    shutil.copyfileobj(resp, out_f)
-                                if zpath.stat().st_size > 5 * 1024 * 1024 and zipfile.is_zipfile(str(zpath)):
-                                    with zipfile.ZipFile(zpath, 'r') as zf:
-                                        zf.extract('xray', path=tmpdir)
-                                    bin_path = Path(tmpdir) / 'xray'
-                                    if bin_path.exists():
-                                        shutil.move(str(bin_path), '/usr/local/bin/xray')
-                                        os.chmod('/usr/local/bin/xray', 0o755)
-                                        installed = True
-                                        break
-                            except Exception as e:
-                                last_dl_err = str(e)
-                    if not installed:
-                        return self.reply_json(500, {'ok': False, 'error': '下载或解压 Xray 核心失败'})
-
-                    service_content = '''[Unit]
-Description=Xray Service (VLESS-Reality)
-After=network.target
-
-[Service]
-Type=simple
-User=root
-ExecStart=/usr/local/bin/xray run -c /etc/hysteria/xray.json
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-'''
-                    Path('/etc/systemd/system/xray.service').write_text(service_content)
-                    subprocess.run(['systemctl', 'daemon-reload'], capture_output=True)
-                    subprocess.run(['systemctl', 'enable', 'xray'], capture_output=True)
-                    self._generate_and_apply_reality(True)
-
-                    return self.reply_json(200, {'ok': True, 'message': 'Xray-core 安装成功，VLESS-Reality 节点已在 TCP 443 端口就绪！'})
-                except Exception as e:
-                    return self.reply_json(500, {'ok': False, 'error': f'安装执行异常: {str(e)}'})
-
-            if self.path == prefix + 'manage-reality':
-                if not self.is_authenticated():
-                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                try:
-                    length = int(self.headers.get('Content-Length', 0))
-                    body = self.rfile.read(length).decode('utf-8') if length > 0 else ''
-                    form = parse_qs(body)
-                    action = form.get('action', ['toggle'])[0]
-
-                    if action == 'toggle':
-                        out = subprocess.run(['systemctl', 'is-active', 'xray'], capture_output=True, text=True, timeout=3).stdout.strip()
-                        if out == 'active':
-                            subprocess.run(['systemctl', 'stop', 'xray'], capture_output=True, timeout=5)
-                            new_active = False
-                        else:
-                            if not Path('/etc/hysteria/xray.json').exists():
-                                self._generate_and_apply_reality(True)
-                            else:
-                                subprocess.run(['systemctl', 'restart', 'xray'], capture_output=True, timeout=5)
-                            new_active = True
-                        return self.reply_json(200, {'ok': True, 'active': new_active})
-
-                    elif action == 'reset':
-                        self._generate_and_apply_reality(True)
-                        return self.reply_json(200, {'ok': True, 'message': '已重置密钥并重启生效'})
-
-                    return self.reply_json(400, {'ok': False, 'error': 'Invalid action'})
-                except Exception as e:
-                    return self.reply_json(500, {'ok': False, 'error': str(e)})
-
 
             return self.reply(404, b'Not found')
 
@@ -4082,152 +3886,6 @@ WantedBy=multi-user.target
                     'users': user_speeds
                 })
 
-            if subpath == 'bbr-status':
-                if not self.is_authenticated():
-                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                try:
-                    import platform
-                    kernel_ver = platform.release()
-                    cc_out = subprocess.run(['sysctl', '-n', 'net.ipv4.tcp_congestion_control'],
-                                            capture_output=True, text=True, timeout=2).stdout.strip()
-                    qdisc_out = subprocess.run(['sysctl', '-n', 'net.core.default_qdisc'],
-                                              capture_output=True, text=True, timeout=2).stdout.strip()
-                    
-                    # 检查持久化配置
-                    conf_path = Path('/etc/sysctl.d/99-bbr.conf')
-                    configured_bbr = ''
-                    if conf_path.exists():
-                        c_text = conf_path.read_text(encoding='utf-8')
-                        for line in c_text.splitlines():
-                            if 'tcp_congestion_control' in line and '=' in line:
-                                configured_bbr = line.split('=')[1].strip()
-
-                    need_reboot = False
-                    if configured_bbr and configured_bbr != cc_out:
-                        need_reboot = True
-
-                    with data_lock:
-                        target_ver = data.get('bbr_target_version', '')
-
-                    return self.reply_json(200, {
-                        'ok': True,
-                        'current': cc_out or 'cubic',
-                        'qdisc': qdisc_out or 'fq_codel',
-                        'kernel': kernel_ver,
-                        'configured': configured_bbr or target_ver or cc_out,
-                        'need_reboot': need_reboot
-                    })
-                except Exception as e:
-                    return self.reply_json(500, {'ok': False, 'error': str(e)})
-
-            if self.path == prefix + 'set-bbr':
-                if not self.is_authenticated():
-                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                try:
-                    length = int(self.headers.get('Content-Length', 0))
-                    body = self.rfile.read(length).decode('utf-8') if length > 0 else ''
-                    form = parse_qs(body)
-                    ver = form.get('version', ['v1'])[0].lower()
-
-                    # 针对 BBR V1 / V2 / V3 进行内核配置适配
-                    # 确保 tcp_bbr 模块开机加载
-                    Path('/etc/modules-load.d/bbr.conf').write_text('tcp_bbr\n', encoding='utf-8')
-                    subprocess.run(['modprobe', 'tcp_bbr'], capture_output=True)
-
-                    target_algo = 'bbr'
-                    qdisc = 'fq'
-                    if ver == 'v2':
-                        # 如果系统支持 bbr2 则使用 bbr2，否则回退到高阶 bbr 参数调优
-                        avail = subprocess.run(['sysctl', '-n', 'net.ipv4.tcp_available_congestion_control'],
-                                               capture_output=True, text=True).stdout
-                        target_algo = 'bbr2' if 'bbr2' in avail else 'bbr'
-                    elif ver == 'v3':
-                        avail = subprocess.run(['sysctl', '-n', 'net.ipv4.tcp_available_congestion_control'],
-                                               capture_output=True, text=True).stdout
-                        target_algo = 'bbr3' if 'bbr3' in avail else 'bbr'
-
-                    bbr_sysctl = f'''# TCP 拥塞控制 BBR {ver.upper()} 深度优化
-net.core.default_qdisc = {qdisc}
-net.ipv4.tcp_congestion_control = {target_algo}
-net.ipv4.tcp_notsent_lowat = 16384
-net.ipv4.tcp_slow_start_after_idle = 0
-'''
-                    Path('/etc/sysctl.d/99-bbr.conf').write_text(bbr_sysctl, encoding='utf-8')
-                    
-                    # 立即尝试热应用
-                    res = subprocess.run(['sysctl', '-p', '/etc/sysctl.d/99-bbr.conf'], capture_output=True, text=True)
-                    
-                    with data_lock:
-                        data['bbr_target_version'] = ver
-                    save_data()
-
-                    curr = subprocess.run(['sysctl', '-n', 'net.ipv4.tcp_congestion_control'],
-                                          capture_output=True, text=True).stdout.strip()
-                    
-                    if curr == target_algo:
-                        return self.reply_json(200, {
-                            'ok': True,
-                            'message': f'恭喜！BBR {ver.upper()} 算法已立即热生效（当前算法: {curr}）！'
-                        })
-                    else:
-                        return self.reply_json(200, {
-                            'ok': True,
-                            'message': f'BBR {ver.upper()} 配置已成功保存！需要重启服务器后完成内核级生效。'
-                        })
-                except Exception as e:
-                    return self.reply_json(500, {'ok': False, 'error': str(e)})
-
-            if self.path == prefix + 'reboot-server':
-                if not self.is_authenticated():
-                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                try:
-                    # 异步延迟 1 秒后执行安全重启，确保先给前端返回 HTTP 200
-                    subprocess.Popen(['bash', '-c', 'sleep 1 && reboot'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    return self.reply_json(200, {'ok': True, 'message': '服务器正在重启中'})
-                except Exception as e:
-                    return self.reply_json(500, {'ok': False, 'error': str(e)})
-
-            if subpath == 'reality-status':
-                if not self.is_authenticated():
-                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                is_installed = Path('/usr/local/bin/xray').exists()
-                is_active = False
-                if is_installed:
-                    try:
-                        out = subprocess.run(['systemctl', 'is-active', 'xray'], capture_output=True, text=True, timeout=3).stdout.strip()
-                        is_active = (out == 'active')
-                    except Exception:
-                        is_active = False
-
-                with data_lock:
-                    rcfg = dict(data.get('reality_config', {}))
-                
-                qr_svg = ''
-                if rcfg.get('uri'):
-                    try:
-                        qr_res = subprocess.run(['qrencode', '-t', 'SVG', '-o', '-'],
-                                                input=rcfg['uri'].encode('utf-8'), capture_output=True, timeout=3)
-                        if qr_res.returncode == 0:
-                            qr_svg = qr_res.stdout.decode('utf-8')
-                    except Exception:
-                        qr_svg = ''
-
-                return self.reply_json(200, {
-                    'ok': True,
-                    'installed': is_installed,
-                    'active': is_active,
-                    'config': {
-                        'uri': rcfg.get('uri', ''),
-                        'uuid': rcfg.get('uuid', ''),
-                        'pub_key': rcfg.get('public_key', ''),
-                        'short_id': rcfg.get('short_id', ''),
-                        'flow': 'xtls-rprx-vision',
-                        'sni': rcfg.get('dest_sni', 'www.apple.com'),
-                        'port': rcfg.get('port', 443),
-                        'qr_svg': qr_svg
-                    }
-                })
-
             if subpath == 'proxy-services':
                 if not self.is_authenticated():
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
@@ -4321,20 +3979,12 @@ net.ipv4.tcp_slow_start_after_idle = 0
                                 connected = True
                     except Exception:
                         connected = False
-                with data_lock:
-                    rules = list(data.get('warp_rules', [
-                        'ipify.org', 'cloudflare.com',
-                        'openai.com', 'chatgpt.com', 'oaistatic.com', 'oaiusercontent.com', 'ai.com',
-                        'anthropic.com', 'claude.ai',
-                        'gemini.google.com', 'aistudio.google.com', 'generativelanguage.googleapis.com'
-                    ]))
                 return self.reply_json(200, {
                     'ok': True,
                     'installed': is_installed,
                     'enabled': enabled,
                     'connected': connected,
-                    'ip': outbound_ip,
-                    'rules': rules
+                    'ip': outbound_ip
                 })
 
             if self.path == prefix + 'install-warp':
