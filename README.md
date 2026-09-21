@@ -16,6 +16,7 @@
 - 🎭 **Salamander 混淆 默认启用**：全自动生成高熵随机密码，将 QUIC 数据报文伪装为完全随机的杂波，彻底免疫 GFW 主动探测与深度包检测。
 - 🌐 **Cloudflare WARP 智能分流 (AI 加速)**：支持一键配置 WARP Local Proxy（端口 40000 · MASQUE 协议），配合 3 分钟探活自愈 Watchdog，并在 Web 端提供一键按需启闭开关，实现 OpenAI、Claude、Gemini 干净出口与 VPS 原生极速直连。
 - 🔄 **Web 端双重版本检测与一键升级**：在 Web 仪表盘在线比对 Hysteria 2 官方内核与控制面板自身版本，发现新版一键平滑无损热升级。
+- 🕳️ **入站代理服务 (SOCKS5 / HTTP / HTTPS)**：集成 gost 引擎，在 Web 控制台一键添加/删除三种入站代理服务（独立账号密码认证），客户端无需安装 Hysteria 也能直接把服务器当普通代理用，配置动态生成并平滑热重载。
 - 📱 **多客户端格式全覆盖**：
   - 标准 **`hysteria2://`** 节点直链（支持 v2rayN、Nekobox、Shadowrocket、Sing-box 等一键导入）
   - **Clash.Meta / Mihomo** (Clash Verge Rev) 节点配置片段
@@ -61,12 +62,13 @@ bash <(wget -qO- https://raw.githubusercontent.com/yys9253462-gif/hysteria2-inst
   3. 查看私密信息页地址和登录凭据
   4. 重新修改配置 (端口/密码/证书/域名)
   5. 一键安装并配置 Cloudflare WARP 出口 (AI解锁)
+  6. 一键安装 gost 入站代理引擎 (SOCKS5/HTTP/HTTPS)
 ----------------------------------------------------------------
-  6. 启动服务
-  7. 停止服务
-  8. 重启服务
-  9. 查看实时运行日志
-  10. 彻底卸载 Hysteria 2
+  7. 启动服务
+  8. 停止服务
+  9. 重启服务
+  10. 查看实时运行日志
+  11. 彻底卸载 Hysteria 2
   0. 退出脚本
 ================================================================
 ```
