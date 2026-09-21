@@ -458,20 +458,14 @@ bandwidth:
 # default route. Use the default direct outbound over IPv4 so those answers do
 # not break requests to dual-stack sites such as YouTube.
 outbounds:
-  - name: direct-ipv4
+  - name: direct_ipv4
     type: direct
     direct:
       mode: "4"
-  - name: warp-socks
+  - name: warp_socks
     type: socks5
     socks5:
       addr: 127.0.0.1:40000
-
-acl:
-  inline:
-    - block(geoip:private)
-    - block(geosite:private)
-    - direct-ipv4(all)
 EOF
 
     # 写入 toggle_warp.sh 控制脚本，供 portal.py 或命令行无感知调用
@@ -481,20 +475,30 @@ ACTION="$1" # 1: enable, 0: disable
 CONFIG="/etc/hysteria/config.yaml"
 [[ -f "$CONFIG" ]] || exit 1
 
+# 清理旧 acl 段
+sed -i "/^acl:/,\$d" "$CONFIG"
+
 if [[ "$ACTION" == "1" ]]; then
     which warp-cli >/dev/null 2>&1 && {
-        warp-cli status 2>/dev/null | grep -qi "connected" || warp-cli connect >/dev/null 2>&1 || true
+        warp-cli --accept-tos status 2>/dev/null | grep -qi "connected" || warp-cli --accept-tos connect >/dev/null 2>&1 || true
     }
-    if ! grep -q "warp-socks(domain:openai.com)" "$CONFIG"; then
-        sed -i '/block(geosite:private)/a \    - warp-socks(domain:openai.com)\n    - warp-socks(domain:chatgpt.com)\n    - warp-socks(domain:oaistatic.com)\n    - warp-socks(domain:oaiusercontent.com)\n    - warp-socks(domain:ai.com)\n    - warp-socks(domain:gemini.google.com)\n    - warp-socks(domain:aistudio.google.com)\n    - warp-socks(domain:generativelanguage.googleapis.com)\n    - warp-socks(domain:anthropic.com)\n    - warp-socks(domain:claude.ai)' "$CONFIG"
-        systemctl reload-or-restart hysteria-server 2>/dev/null || systemctl restart hysteria-server 2>/dev/null || true
-    fi
-else
-    if grep -q "warp-socks(domain:" "$CONFIG"; then
-        sed -i '/warp-socks(domain:/d' "$CONFIG"
-        systemctl reload-or-restart hysteria-server 2>/dev/null || systemctl restart hysteria-server 2>/dev/null || true
-    fi
+    cat >> "$CONFIG" <<'EOF'
+acl:
+  inline:
+    - warp_socks(openai.com)
+    - warp_socks(chatgpt.com)
+    - warp_socks(oaistatic.com)
+    - warp_socks(oaiusercontent.com)
+    - warp_socks(ai.com)
+    - warp_socks(gemini.google.com)
+    - warp_socks(aistudio.google.com)
+    - warp_socks(generativelanguage.googleapis.com)
+    - warp_socks(anthropic.com)
+    - warp_socks(claude.ai)
+EOF
 fi
+
+systemctl restart hysteria-server 2>/dev/null || true
 EOTW
     chmod +x "$HY2_DIR/toggle_warp.sh"
 
