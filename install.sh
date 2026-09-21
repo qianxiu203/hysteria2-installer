@@ -697,6 +697,15 @@ footer{display:flex;justify-content:space-between;margin-top:32px;color:#879996;
 .speed-card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between}
 .speed-card .val{font-size:20px;font-weight:800;letter-spacing:-.02em;color:var(--ink);font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
 .speed-card .lbl{font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase}
+.proxy-card{border-left:4px solid #534AB7}
+.proxy-table{width:100%;border-collapse:collapse;text-align:left;font-size:13px}
+.proxy-table th{background:#f8fbfb;padding:10px 12px;color:var(--muted);font-weight:700;border-bottom:1px solid var(--line);white-space:nowrap}
+.proxy-table td{padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:middle}
+.proxy-table tr:last-child td{border-bottom:none}
+.proxy-type{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.proxy-type.socks5{background:#EEEDFE;color:#3C3489}
+.proxy-type.http{background:#E6F1FB;color:#0C447C}
+.proxy-type.https{background:#E1F5EE;color:#085041}
 .api-box{background:#f7faf9;border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
 .api-key-code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px;color:#284d56;word-break:break-all;margin-top:4px}
 .modal-form{display:grid;grid-template-columns:1fr 1fr;gap:16px 20px;background:#f8fbfb;border:1px solid var(--line);border-radius:14px;padding:22px;margin-bottom:20px}
@@ -978,6 +987,100 @@ async function pollTrafficSpeed() {
 
 setInterval(pollTrafficSpeed, 2000);
 pollTrafficSpeed();
+
+// 入站代理服务管理 (gost 驱动)
+const gostBadge = document.getElementById('gost-badge');
+const proxyTbody = document.getElementById('proxy-tbody');
+const proxyForm = document.getElementById('proxy-form');
+
+async function loadProxyServices() {
+  if (!proxyTbody) return;
+  try {
+    const res = await fetch(location.pathname + 'proxy-services', { credentials: 'same-origin' });
+    if (!res.ok) return;
+    const json = await res.json();
+    if (!json.ok) return;
+
+    if (gostBadge) {
+      if (!json.gost_installed) {
+        gostBadge.textContent = '● 未安装 gost';
+        gostBadge.style.background = '#fff1f0';
+        gostBadge.style.color = '#cf3c3c';
+      } else if (json.gost_active) {
+        gostBadge.textContent = '● gost 运行中';
+        gostBadge.style.background = '#eaf3de';
+        gostBadge.style.color = '#27500a';
+      } else {
+        gostBadge.textContent = '● gost 未启动';
+        gostBadge.style.background = '#f1efe8';
+        gostBadge.style.color = '#5f5e5a';
+      }
+    }
+
+    const services = json.services || [];
+    if (services.length === 0) {
+      proxyTbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px">暂无代理服务，点击上方「添加代理服务」创建</td></tr>';
+      return;
+    }
+    const typeLabel = { socks5: 'SOCKS5', http: 'HTTP', https: 'HTTPS' };
+    proxyTbody.innerHTML = services.map(s => `
+      <tr>
+        <td><span class="proxy-type ${s.type}">${typeLabel[s.type] || s.type}</span></td>
+        <td><code style="font-size:12px">:${s.port}</code></td>
+        <td><code style="font-size:12px">${s.username}</code></td>
+        <td><code style="font-size:12px">${s.password}</code></td>
+        <td style="color:var(--muted);font-size:12px">${s.note || '-'}</td>
+        <td><button class="button danger" style="padding:4px 10px;font-size:11px" type="button" data-proxy-del="${s.id}">删除</button></td>
+      </tr>`).join('');
+    proxyTbody.querySelectorAll('[data-proxy-del]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!confirm('确定删除该代理服务？')) return;
+        const res = await fetch(location.pathname + 'manage-proxy', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'action=delete&id=' + encodeURIComponent(btn.dataset.proxyDel)
+        });
+        const json = await res.json();
+        if (json.ok) loadProxyServices();
+        else alert(json.error || '删除失败');
+      });
+    });
+  } catch (_) {}
+}
+
+if (proxyForm) {
+  proxyForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(proxyForm);
+    const body = new URLSearchParams();
+    body.append('action', 'create');
+    body.append('type', fd.get('type'));
+    body.append('port', fd.get('port'));
+    body.append('username', fd.get('username'));
+    body.append('password', fd.get('password'));
+    body.append('note', fd.get('note'));
+    try {
+      const res = await fetch(location.pathname + 'manage-proxy', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString()
+      });
+      const json = await res.json();
+      if (json.ok) {
+        proxyForm.reset();
+        loadProxyServices();
+      } else {
+        alert(json.error || '创建失败');
+      }
+    } catch (err) {
+      alert('创建失败: ' + err.message);
+    }
+  });
+}
+
+loadProxyServices();
 
 function closeUserModal() {
   if (uModal) uModal.classList.remove('show');
@@ -1315,6 +1418,59 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
       <div style="display:flex;gap:10px;align-items:center">
         <button class="toggle-btn off" id="btn-toggle-warp" type="button">切换中...</button>
       </div>
+    </div>
+
+    <!-- 入站代理服务管理卡片 (gost 驱动) -->
+    <div class="switch-box proxy-card" id="proxy-box">
+      <div class="switch-info">
+        <div class="switch-title">
+          <span>🌐 入站代理服务 (SOCKS5 / HTTP / HTTPS)</span>
+          <span class="status-pill" id="gost-badge" style="background:#f1efe8;color:#5f5e5a">检测中...</span>
+        </div>
+        <div class="switch-desc">
+          让服务器额外提供 SOCKS5 / HTTP / HTTPS 代理端口，客户端无需安装 Hysteria 也能直接作为普通代理使用（独立账号密码认证）。
+        </div>
+      </div>
+    </div>
+
+    <details style="margin-bottom:18px">
+      <summary class="button" style="margin-bottom:12px;list-style:none">＋ 添加代理服务</summary>
+      <form class="modal-form" id="proxy-form" style="margin-bottom:14px">
+        <div class="form-field">
+          <label for="ptype">协议类型</label>
+          <select id="ptype" name="type" style="height:42px;padding:0 12px;border:1px solid var(--line);border-radius:9px;font-size:13px;background:#fff">
+            <option value="socks5">SOCKS5</option>
+            <option value="http">HTTP</option>
+            <option value="https">HTTPS</option>
+          </select>
+        </div>
+        <div class="form-field">
+          <label for="pport">监听端口</label>
+          <input id="pport" name="port" type="number" min="1" max="65535" placeholder="例如 1080" required>
+        </div>
+        <div class="form-field">
+          <label for="puser">账号 <span>留空自动生成</span></label>
+          <input id="puser" name="username" placeholder="留空自动生成">
+        </div>
+        <div class="form-field">
+          <label for="ppass">密码 <span>留空自动生成</span></label>
+          <input id="ppass" name="password" placeholder="留空自动生成">
+        </div>
+        <div class="form-field-full">
+          <label for="pnote">备注 <span>选填</span></label>
+          <input id="pnote" name="note" placeholder="例如: 备用HTTP代理 / 给某客户">
+        </div>
+        <div class="form-field-full" style="margin-top:6px">
+          <button class="button primary" style="width:100%;height:44px;font-size:14px" type="submit">立即创建代理服务 →</button>
+        </div>
+      </form>
+    </details>
+
+    <div class="user-table-wrap" style="margin-bottom:20px">
+      <table class="proxy-table">
+        <thead><tr><th>类型</th><th>端口</th><th>账号</th><th>密码</th><th>备注</th><th>操作</th></tr></thead>
+        <tbody id="proxy-tbody"><tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px">正在加载代理服务...</td></tr></tbody>
+      </table>
     </div>
 
     <details style="margin-bottom:18px">
@@ -1762,7 +1918,7 @@ def prepare(meta_path, port, node_api_key=None):
 
     data = dict(port=int(port), token=token, auth_hash=hashlib.sha256(auth).hexdigest(),
                 session_secret=session_secret, api_key=api_key, users=users,
-                page=page, qr=qr.decode(), clash=clash, sing=sing)
+                proxy_services=[], page=page, qr=qr.decode(), clash=clash, sing=sing)
     for filename, value in [('portal.json', data), ('portal-access.json', dict(url=base, username=user, password=password, api_key=api_key))]:
         path = root / filename
         path.write_text(json.dumps(value, ensure_ascii=False))
@@ -1800,6 +1956,8 @@ def refresh(meta_path):
                 'note': 'Master Admin'
             }
         }
+    if 'proxy_services' not in data:
+        data['proxy_services'] = []
     data['page'] = page_html(m, uri, subscription, clash, sing, users=data['users'], api_key=data['api_key'], token=data['token'], session_secret=data.get('session_secret', ''))
     
     temporary = path.with_suffix('.tmp')
@@ -1836,6 +1994,68 @@ def serve(path):
                     disk_temp.write_text(json.dumps(data, ensure_ascii=False))
                     disk_temp.chmod(0o600)
                     disk_temp.replace(disk_path)
+
+    def write_gost_config():
+        """根据 proxy_services 动态生成 gost.yml 配置并触发热重载。"""
+        gost_cfg_path = portal_path.parent / 'gost.yml'
+        cert_dir = portal_path.parent / 'gost-cert'
+        services = []
+        with data_lock:
+            for idx, svc in enumerate(data.get('proxy_services', [])):
+                ptype = svc.get('type', 'socks5')
+                port = int(svc.get('port', 0))
+                if port <= 0 or port > 65535:
+                    continue
+                handler_type = 'socks5' if ptype == 'socks5' else 'http'
+                entry = {
+                    'name': f'proxy-{idx}',
+                    'addr': f':{port}',
+                    'handler': {
+                        'type': handler_type,
+                        'auth': {
+                            'username': svc.get('username', ''),
+                            'password': svc.get('password', ''),
+                        },
+                    },
+                    'listener': {'type': 'tcp'},
+                }
+                if ptype == 'https':
+                    entry['listener'] = {
+                        'type': 'tls',
+                        'tls': {
+                            'certFile': str(cert_dir / 'cert.pem'),
+                            'keyFile': str(cert_dir / 'key.pem'),
+                        },
+                    }
+                services.append(entry)
+
+        cfg = {'services': services}
+        try:
+            tmp = gost_cfg_path.with_suffix('.tmp')
+            tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
+            tmp.chmod(0o644)
+            tmp.replace(gost_cfg_path)
+        except OSError:
+            pass
+
+    def reload_gost():
+        """通过 systemctl reload 或 SIGHUP 平滑重载 gost 配置。"""
+        write_gost_config()
+        try:
+            subprocess.run(['systemctl', 'reload', 'gost'], capture_output=True, timeout=3)
+        except Exception:
+            try:
+                subprocess.run(['systemctl', 'restart', 'gost'], capture_output=True, timeout=5)
+            except Exception:
+                pass
+
+    def gost_status():
+        """检测 gost 服务运行状态。"""
+        try:
+            out = subprocess.run(['systemctl', 'is-active', 'gost'], capture_output=True, text=True, timeout=3).stdout.strip()
+            return out == 'active'
+        except Exception:
+            return False
 
     def regenerate_page():
         m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
@@ -2126,6 +2346,65 @@ def serve(path):
                 except Exception as e:
                     return self.reply_json(500, {'ok': False, 'error': str(e)})
 
+            if self.path == prefix + 'manage-proxy':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                try:
+                    length = int(self.headers.get('Content-Length', 0))
+                    body = self.rfile.read(length).decode('utf-8')
+                    form = parse_qs(body)
+                    action = form.get('action', [''])[0]
+                    now_ts = int(time.time())
+
+                    if action == 'create':
+                        ptype = form.get('type', ['socks5'])[0]
+                        if ptype not in ('socks5', 'http', 'https'):
+                            return self.reply_json(400, {'ok': False, 'error': 'Invalid proxy type'})
+                        try:
+                            port = int(form.get('port', ['0'])[0])
+                        except Exception:
+                            return self.reply_json(400, {'ok': False, 'error': 'Invalid port'})
+                        if port < 1 or port > 65535:
+                            return self.reply_json(400, {'ok': False, 'error': 'Port out of range (1-65535)'})
+                        username = form.get('username', [''])[0].strip()[:64] or secrets.token_hex(6)
+                        password = form.get('password', [''])[0].strip() or secrets.token_hex(16)
+                        note = form.get('note', [''])[0].strip()[:200]
+
+                        with data_lock:
+                            # 端口冲突检查
+                            for svc in data.get('proxy_services', []):
+                                if svc.get('port') == port:
+                                    return self.reply_json(400, {'ok': False, 'error': f'端口 {port} 已被占用'})
+                            proxy_id = 'proxy_' + secrets.token_hex(6)
+                            data.setdefault('proxy_services', []).append({
+                                'id': proxy_id,
+                                'type': ptype,
+                                'port': port,
+                                'username': username,
+                                'password': password,
+                                'created_at': now_ts,
+                                'note': note,
+                            })
+                        save_data()
+                        reload_gost()
+                        return self.reply_json(200, {'ok': True, 'id': proxy_id, 'type': ptype, 'port': port, 'username': username})
+
+                    elif action == 'delete':
+                        proxy_id = form.get('id', [''])[0].strip()
+                        with data_lock:
+                            services = data.get('proxy_services', [])
+                            new_services = [s for s in services if s.get('id') != proxy_id]
+                            if len(new_services) == len(services):
+                                return self.reply_json(404, {'ok': False, 'error': 'Proxy service not found'})
+                            data['proxy_services'] = new_services
+                        save_data()
+                        reload_gost()
+                        return self.reply_json(200, {'ok': True, 'message': 'Proxy service deleted'})
+
+                    return self.reply_json(400, {'ok': False, 'error': 'Invalid action'})
+                except Exception as e:
+                    return self.reply_json(500, {'ok': False, 'error': str(e)})
+
             if self.path == prefix + 'manage-warp':
                 if not self.is_authenticated():
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
@@ -2335,6 +2614,18 @@ def serve(path):
                     'node_tx': total_tx_speed,
                     'node_rx': total_rx_speed,
                     'users': user_speeds
+                })
+
+            if subpath == 'proxy-services':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                with data_lock:
+                    services = list(data.get('proxy_services', []))
+                return self.reply_json(200, {
+                    'ok': True,
+                    'gost_installed': Path('/usr/local/bin/gost').exists(),
+                    'gost_active': gost_status(),
+                    'services': services
                 })
 
             if subpath == 'check-version':
@@ -2621,6 +2912,90 @@ EOF
     log_info "你现在可以在 Web 控制台一键启闭 AI 专线分流。"
 }
 
+# 安装 gost 入站代理引擎 (SOCKS5 / HTTP / HTTPS 三种协议)
+install_gost() {
+    log_step "准备安装 gost 入站代理引擎 (SOCKS5/HTTP/HTTPS)..."
+    GOST_BIN="/usr/local/bin/gost"
+    GOST_CONFIG="${HY2_DIR}/gost.yml"
+
+    # 获取最新版本与匹配当前架构的下载资产
+    RELEASE_JSON=$(curl -s --max-time 15 https://api.github.com/repos/go-gost/gost/releases/latest)
+    GOST_LATEST=$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty')
+    case "$HY2_ARCH" in
+        amd64) GOST_ASSET="linux_amd64" ;;
+        arm64) GOST_ASSET="linux_arm64" ;;
+        armv7) GOST_ASSET="linux_armv7" ;;
+        *) log_err "gost 暂不支持当前 CPU 架构: ${HY2_ARCH}"; return 1 ;;
+    esac
+
+    DOWNLOAD_URL=$(echo "$RELEASE_JSON" | jq -r --arg asset "$GOST_ASSET" '.assets[]? | select(.name | test("linux_" + $asset + "\\.tar\\.gz$")) | .browser_download_url' | head -n 1)
+    if [[ -z "$DOWNLOAD_URL" || "$DOWNLOAD_URL" == "null" ]]; then
+        log_err "未找到 gost ${GOST_ASSET} 架构的下载资源。"
+        return 1
+    fi
+
+    log_info "目标版本: ${GOST_LATEST:-latest} (${GOST_ASSET})"
+    log_step "下载并解压 gost 二进制..."
+    TMP_DIR=$(mktemp -d)
+    if ! curl -fL --progress-bar "$DOWNLOAD_URL" -o "$TMP_DIR/gost.tar.gz"; then
+        rm -rf "$TMP_DIR"
+        log_err "gost 下载失败，请检查网络连接。"
+        return 1
+    fi
+    tar -xzf "$TMP_DIR/gost.tar.gz" -C "$TMP_DIR"
+    find "$TMP_DIR" -name gost -type f -exec install -m 755 {} "$GOST_BIN" \;
+    rm -rf "$TMP_DIR"
+    if [[ ! -f "$GOST_BIN" ]]; then
+        log_err "gost 二进制解压失败。"
+        return 1
+    fi
+
+    # 生成 HTTPS 代理专用自签证书 (若不存在)
+    GOST_CERT_DIR="${HY2_DIR}/gost-cert"
+    mkdir -p "$GOST_CERT_DIR"
+    if [[ ! -f "$GOST_CERT_DIR/cert.pem" ]]; then
+        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+            -keyout "$GOST_CERT_DIR/key.pem" -out "$GOST_CERT_DIR/cert.pem" \
+            -days 3650 -subj "/CN=gost-proxy" >/dev/null 2>&1
+    fi
+
+    # 生成初始配置（services 由 Web 控制台动态管理）
+    if [[ ! -f "$GOST_CONFIG" ]]; then
+        cat > "$GOST_CONFIG" <<'EOF'
+# gost 入站代理配置（由 Web 控制台动态管理，勿手动编辑）
+services: []
+EOF
+    fi
+
+    # 创建 systemd 守护服务（支持 SIGHUP 热重载）
+    cat > /etc/systemd/system/gost.service <<EOF
+[Unit]
+Description=GOST Proxy Service (SOCKS5/HTTP/HTTPS inbound)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=${GOST_BIN} -C ${GOST_CONFIG}
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable gost >/dev/null 2>&1
+    systemctl restart gost
+    sleep 1
+    if systemctl is-active --quiet gost; then
+        log_info "gost 入站代理引擎安装成功！现在可在 Web 控制台添加 SOCKS5/HTTP/HTTPS 代理账号。"
+    else
+        log_warn "gost 已安装，服务暂未启动（尚无代理配置，添加代理账号后自动生效）。"
+    fi
+}
+
 status_service() {
     if [[ ! -f "$HY2_BIN" ]]; then
         log_err "Hysteria 2 未安装！"
@@ -2660,13 +3035,16 @@ uninstall_all() {
         systemctl stop hysteria-server 2>/dev/null || true
         systemctl disable hysteria-server 2>/dev/null || true
         systemctl disable --now hysteria-portal 2>/dev/null || true
+        systemctl disable --now gost 2>/dev/null || true
         rm -f /etc/systemd/system/hysteria-portal.service
+        rm -f /etc/systemd/system/gost.service
         clear_all_hopping_rules
         rm -f "$HY2_SERVICE"
         systemctl daemon-reload
 
         log_step "清理二进制与配置目录..."
         rm -f "$HY2_BIN"
+        rm -f /usr/local/bin/gost
         rm -rf "$HY2_DIR"
         
         log_info "Hysteria 2 已彻底卸载完成！"
@@ -2696,15 +3074,16 @@ menu() {
     echo -e "  ${GREEN}3.${PLAIN} 查看私密信息页地址和登录凭据"
     echo -e "  ${GREEN}4.${PLAIN} 重新修改配置 (端口/密码/证书/域名/混淆)"
     echo -e "  ${GREEN}5.${PLAIN} 一键安装并配置 Cloudflare WARP 出口 (AI解锁)"
+    echo -e "  ${GREEN}6.${PLAIN} 一键安装 gost 入站代理引擎 (SOCKS5/HTTP/HTTPS)"
     echo -e "${CYAN}----------------------------------------------------------------${PLAIN}"
-    echo -e "  ${GREEN}6.${PLAIN} 启动服务"
-    echo -e "  ${GREEN}7.${PLAIN} 停止服务"
-    echo -e "  ${GREEN}8.${PLAIN} 重启服务"
-    echo -e "  ${GREEN}9.${PLAIN} 查看实时运行日志"
-    echo -e "  ${GREEN}10.${PLAIN} 彻底卸载 Hysteria 2"
+    echo -e "  ${GREEN}7.${PLAIN} 启动服务"
+    echo -e "  ${GREEN}8.${PLAIN} 停止服务"
+    echo -e "  ${GREEN}9.${PLAIN} 重启服务"
+    echo -e "  ${GREEN}10.${PLAIN} 查看实时运行日志"
+    echo -e "  ${GREEN}11.${PLAIN} 彻底卸载 Hysteria 2"
     echo -e "  ${GREEN}0.${PLAIN} 退出脚本"
     echo -e "${CYAN}================================================================${PLAIN}"
-    read -rp "请输入选项 [0-10]: " choice
+    read -rp "请输入选项 [0-11]: " choice
 
     case "$choice" in
         1)
@@ -2744,18 +3123,22 @@ menu() {
             install_warp_local_proxy
             ;;
         6)
-            start_service
+            check_root
+            install_gost
             ;;
         7)
-            stop_service
+            start_service
             ;;
         8)
-            restart_service
+            stop_service
             ;;
         9)
-            view_logs
+            restart_service
             ;;
         10)
+            view_logs
+            ;;
+        11)
             check_root
             uninstall_all
             ;;
