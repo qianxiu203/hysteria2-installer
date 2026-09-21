@@ -567,13 +567,16 @@ import hashlib
 import hmac
 import html
 import json
+import re
 import secrets
 import subprocess
 import sys
+import threading
 import time
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, quote, urlencode
 
 
@@ -1525,22 +1528,25 @@ def serve(path):
     session_secret = data.get('session_secret', data['auth_hash'])
     meta_path = portal_path.parent / 'client_meta.json'
 
+    data_lock = threading.Lock()
     ip_tracker = {}
     IP_TIMEOUT_SECONDS = 180
+    VALID_USER_ID_RE = re.compile(r'^[a-zA-Z0-9_\-\.]{1,64}$')
 
     def save_data():
-        try:
-            temp = portal_path.with_suffix('.tmp')
-            temp.write_text(json.dumps(data, ensure_ascii=False))
-            temp.chmod(0o600)
-            temp.replace(portal_path)
-        except OSError:
-            disk_path = Path('/etc/hysteria/portal.json')
-            if disk_path.exists():
-                disk_temp = disk_path.with_suffix('.tmp')
-                disk_temp.write_text(json.dumps(data, ensure_ascii=False))
-                disk_temp.chmod(0o600)
-                disk_temp.replace(disk_path)
+        with data_lock:
+            try:
+                temp = portal_path.with_suffix('.tmp')
+                temp.write_text(json.dumps(data, ensure_ascii=False))
+                temp.chmod(0o600)
+                temp.replace(portal_path)
+            except OSError:
+                disk_path = Path('/etc/hysteria/portal.json')
+                if disk_path.exists():
+                    disk_temp = disk_path.with_suffix('.tmp')
+                    disk_temp.write_text(json.dumps(data, ensure_ascii=False))
+                    disk_temp.chmod(0o600)
+                    disk_temp.replace(disk_path)
 
     def regenerate_page():
         m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
@@ -1553,13 +1559,19 @@ def serve(path):
         
         now_ts = int(time.time())
         display_users = {}
-        for uid, uinfo in data.get('users', {}).items():
-            u_copy = dict(uinfo)
-            user_ips = {ip: t for ip, t in ip_tracker.get(uid, {}).items() if now_ts - t < IP_TIMEOUT_SECONDS}
-            u_copy['online_ips'] = user_ips
-            display_users[uid] = u_copy
+        with data_lock:
+            # 清理离线已久的 ip_tracker 键
+            dead_uids = [u for u, tr in ip_tracker.items() if not any(now_ts - t < IP_TIMEOUT_SECONDS for t in tr.values())]
+            for du in dead_uids:
+                del ip_tracker[du]
 
-        data['page'] = page_html(m, uri, subscription, clash, sing, users=display_users, api_key=data.get('api_key'), token=data['token'], session_secret=session_secret)
+            for uid, uinfo in data.get('users', {}).items():
+                u_copy = dict(uinfo)
+                user_ips = {ip: t for ip, t in ip_tracker.get(uid, {}).items() if now_ts - t < IP_TIMEOUT_SECONDS}
+                u_copy['online_ips'] = user_ips
+                display_users[uid] = u_copy
+
+            data['page'] = page_html(m, uri, subscription, clash, sing, users=display_users, api_key=data.get('api_key'), token=data['token'], session_secret=session_secret)
         save_data()
 
     def sign_session(token):
@@ -1614,15 +1626,30 @@ def serve(path):
             self.end_headers()
             self.wfile.write(body)
 
-        def do_POST(self):
+        def check_rate_limit(self, bucket='web'):
             now = time.monotonic()
-            self.server.requests[:] = [t for t in self.server.requests if now-t < 1]
-            self.server.failures[:] = [t for t in self.server.failures if now-t < 60]
-            if len(self.server.requests) >= 50 or len(self.server.failures) >= 60:
-                return self.reply(429, b'Too many requests')
-            self.server.requests.append(now)
+            with data_lock:
+                if bucket == 'api':
+                    self.server.api_requests[:] = [t for t in self.server.api_requests if now - t < 1]
+                    if len(self.server.api_requests) >= 50:
+                        return False
+                    self.server.api_requests.append(now)
+                    return True
+                else:
+                    self.server.requests[:] = [t for t in self.server.requests if now - t < 1]
+                    self.server.failures[:] = [t for t in self.server.failures if now - t < 60]
+                    if len(self.server.requests) >= 50 or len(self.server.failures) >= 60:
+                        return False
+                    self.server.requests.append(now)
+                    return True
 
-            # 1. Hysteria 2 本地 HTTP 动态鉴权、实时流量统计与 IP 限额拦截端点
+        def record_failure(self):
+            now = time.monotonic()
+            with data_lock:
+                self.server.failures.append(now)
+
+        def do_POST(self):
+            # 1. Hysteria 2 本地 HTTP 动态鉴权、实时流量统计与 IP 限额拦截端点 (来自 127.0.0.1 豁免限流)
             if self.path == '/auth':
                 try:
                     length = int(self.headers.get('Content-Length', 0))
@@ -1639,49 +1666,53 @@ def serve(path):
                     return self.reply_json(200, {'ok': False, 'msg': 'Bad auth request'})
 
                 now_ts = int(time.time())
-                users = data.get('users', {})
-                matched_uid, matched_user = None, None
-                for uid, uinfo in users.items():
-                    if uinfo.get('password') == client_auth:
-                        matched_uid, matched_user = uid, uinfo
-                        break
+                with data_lock:
+                    users = data.get('users', {})
+                    matched_uid, matched_user = None, None
+                    for uid, uinfo in users.items():
+                        if uinfo.get('password') == client_auth:
+                            matched_uid, matched_user = uid, uinfo
+                            break
 
-                if not matched_user:
-                    return self.reply_json(200, {'ok': False, 'msg': 'User not found'})
+                    if not matched_user:
+                        return self.reply_json(200, {'ok': False, 'msg': 'User not found'})
 
-                if matched_user.get('status') != 'active':
-                    return self.reply_json(200, {'ok': False, 'msg': 'User account inactive'})
+                    if matched_user.get('status') != 'active':
+                        return self.reply_json(200, {'ok': False, 'msg': 'User account inactive'})
 
-                if matched_user.get('expires_at', 0) < now_ts:
-                    return self.reply_json(200, {'ok': False, 'msg': 'User account expired'})
+                    if matched_user.get('expires_at', 0) < now_ts:
+                        return self.reply_json(200, {'ok': False, 'msg': 'User account expired'})
 
-                # -------- 流量限额检查与增量累加 -------- #
-                limit_bytes = int(matched_user.get('limit_bytes', 0))
-                used_bytes = int(matched_user.get('used_bytes', 0)) + delta_traffic
-                matched_user['used_bytes'] = used_bytes
+                    # -------- 流量限额检查与增量累加 -------- #
+                    limit_bytes = int(matched_user.get('limit_bytes', 0))
+                    used_bytes = int(matched_user.get('used_bytes', 0)) + delta_traffic
+                    matched_user['used_bytes'] = used_bytes
 
-                if limit_bytes > 0 and used_bytes >= limit_bytes:
-                    # 流量超额，阻断拒绝连接
-                    return self.reply_json(200, {'ok': False, 'msg': 'Traffic quota exceeded'})
+                    if limit_bytes > 0 and used_bytes >= limit_bytes:
+                        # 流量超额，阻断拒绝连接
+                        return self.reply_json(200, {'ok': False, 'msg': 'Traffic quota exceeded'})
 
-                # -------- 同时在线 IP 限制检查 -------- #
-                ip_limit = int(matched_user.get('ip_limit', 0))
-                if ip_limit > 0 and client_ip:
-                    tracker = ip_tracker.setdefault(matched_uid, {})
-                    active_ips = {ip: t for ip, t in tracker.items() if now_ts - t < IP_TIMEOUT_SECONDS}
-                    ip_tracker[matched_uid] = active_ips
+                    # -------- 同时在线 IP 限制检查 -------- #
+                    ip_limit = int(matched_user.get('ip_limit', 0))
+                    if ip_limit > 0 and client_ip:
+                        tracker = ip_tracker.setdefault(matched_uid, {})
+                        active_ips = {ip: t for ip, t in tracker.items() if now_ts - t < IP_TIMEOUT_SECONDS}
+                        ip_tracker[matched_uid] = active_ips
 
-                    if client_ip not in active_ips and len(active_ips) >= ip_limit:
-                        return self.reply_json(200, {'ok': False, 'msg': f'Concurrent IP limit exceeded ({ip_limit} max)'})
-                    active_ips[client_ip] = now_ts
-                elif client_ip:
-                    tracker = ip_tracker.setdefault(matched_uid, {})
-                    tracker[client_ip] = now_ts
+                        if client_ip not in active_ips and len(active_ips) >= ip_limit:
+                            return self.reply_json(200, {'ok': False, 'msg': f'Concurrent IP limit exceeded ({ip_limit} max)'})
+                        active_ips[client_ip] = now_ts
+                    elif client_ip:
+                        tracker = ip_tracker.setdefault(matched_uid, {})
+                        tracker[client_ip] = now_ts
 
                 return self.reply_json(200, {'ok': True, 'id': matched_uid})
 
-            # 2. REST API 接口通道
+            # 2. REST API 接口通道 (独立 API 速率桶)
             if self.path.startswith('/api/v1/'):
+                if not self.check_rate_limit(bucket='api'):
+                    return self.reply(429, b'Too many requests')
+
                 if not self.verify_api_key():
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized API key'})
 
@@ -1697,25 +1728,29 @@ def serve(path):
 
                 # 动态开户 (支持 duration_days, ip_limit, traffic_gb)
                 if sub == 'users/create':
-                    user_id = params.get('user_id') or ('hy2_' + secrets.token_hex(6))
+                    user_id = (params.get('user_id') or ('hy2_' + secrets.token_hex(6))).strip()
+                    if not VALID_USER_ID_RE.match(user_id):
+                        return self.reply_json(400, {'ok': False, 'error': 'Invalid user_id format: only 1-64 alphanumeric, dash, dot and underscore characters allowed'})
+
                     pwd = params.get('password') or secrets.token_hex(16)
                     days = int(params.get('duration_days', 30))
                     ip_limit = int(params.get('ip_limit', 0))
                     traffic_gb = float(params.get('traffic_gb', 0))
                     limit_bytes = int(traffic_gb * (1024**3)) if traffic_gb > 0 else 0
                     expires = int(params.get('expires_at', now_ts + days * 86400))
-                    note = params.get('note', '')
+                    note = str(params.get('note', '')).strip()[:200]
 
-                    data.setdefault('users', {})[user_id] = {
-                        'password': pwd,
-                        'expires_at': expires,
-                        'ip_limit': ip_limit,
-                        'limit_bytes': limit_bytes,
-                        'used_bytes': 0,
-                        'status': 'active',
-                        'created_at': now_ts,
-                        'note': note
-                    }
+                    with data_lock:
+                        data.setdefault('users', {})[user_id] = {
+                            'password': pwd,
+                            'expires_at': expires,
+                            'ip_limit': ip_limit,
+                            'limit_bytes': limit_bytes,
+                            'used_bytes': 0,
+                            'status': 'active',
+                            'created_at': now_ts,
+                            'note': note
+                        }
                     regenerate_page()
 
                     m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
@@ -1733,31 +1768,47 @@ def serve(path):
                     })
 
                 elif sub == 'users/renew':
-                    user_id = params.get('user_id')
+                    user_id = str(params.get('user_id', '')).strip()
+                    if not VALID_USER_ID_RE.match(user_id):
+                        return self.reply_json(400, {'ok': False, 'error': 'Invalid user_id format'})
                     days = int(params.get('extend_days', 30))
                     add_traffic_gb = float(params.get('add_traffic_gb', 0))
-                    u = data.get('users', {}).get(user_id)
-                    if not u:
-                        return self.reply_json(404, {'ok': False, 'error': 'User not found'})
-                    base_time = max(u.get('expires_at', 0), now_ts)
-                    u['expires_at'] = base_time + days * 86400
-                    if add_traffic_gb > 0:
-                        u['limit_bytes'] = int(u.get('limit_bytes', 0)) + int(add_traffic_gb * (1024**3))
-                    u['status'] = 'active'
+                    with data_lock:
+                        u = data.get('users', {}).get(user_id)
+                        if not u:
+                            return self.reply_json(404, {'ok': False, 'error': 'User not found'})
+                        base_time = max(u.get('expires_at', 0), now_ts)
+                        u['expires_at'] = base_time + days * 86400
+                        if add_traffic_gb > 0:
+                            u['limit_bytes'] = int(u.get('limit_bytes', 0)) + int(add_traffic_gb * (1024**3))
+                        u['status'] = 'active'
+                        exp_at = u['expires_at']
+                        lim_b = u.get('limit_bytes', 0)
                     regenerate_page()
-                    return self.reply_json(200, {'ok': True, 'user_id': user_id, 'expires_at': u['expires_at'], 'limit_bytes': u.get('limit_bytes', 0)})
+                    return self.reply_json(200, {'ok': True, 'user_id': user_id, 'expires_at': exp_at, 'limit_bytes': lim_b})
 
                 elif sub == 'users/delete':
-                    user_id = params.get('user_id')
-                    if user_id in data.get('users', {}):
-                        del data['users'][user_id]
-                        if user_id in ip_tracker:
-                            del ip_tracker[user_id]
+                    user_id = str(params.get('user_id', '')).strip()
+                    if not VALID_USER_ID_RE.match(user_id):
+                        return self.reply_json(400, {'ok': False, 'error': 'Invalid user_id format'})
+                    with data_lock:
+                        if user_id in data.get('users', {}):
+                            del data['users'][user_id]
+                            if user_id in ip_tracker:
+                                del ip_tracker[user_id]
+                            deleted = True
+                        else:
+                            deleted = False
+                    if deleted:
                         regenerate_page()
                         return self.reply_json(200, {'ok': True, 'message': 'User deleted'})
                     return self.reply_json(404, {'ok': False, 'error': 'User not found'})
 
                 return self.reply_json(404, {'ok': False, 'error': 'API endpoint not found'})
+
+            # 普通 Web 请求限流
+            if not self.check_rate_limit(bucket='web'):
+                return self.reply(429, b'Too many requests')
 
             # 3. Web 网页版直接增删用户通道
             prefix = '/' + data['token'] + '/'
@@ -1772,28 +1823,33 @@ def serve(path):
                     user_id = form.get('user_id', [''])[0].strip()
                     now_ts = int(time.time())
 
+                    if not VALID_USER_ID_RE.match(user_id):
+                        return self.reply(400, b'Invalid user_id format')
+
                     if action == 'create' and user_id:
                         pwd = form.get('password', [''])[0].strip() or secrets.token_hex(16)
                         days = int(form.get('duration_days', ['30'])[0] or 30)
                         ip_limit = int(form.get('ip_limit', ['0'])[0] or 0)
                         traffic_gb = float(form.get('traffic_gb', ['0'])[0] or 0)
                         limit_bytes = int(traffic_gb * (1024**3)) if traffic_gb > 0 else 0
-                        note = form.get('note', [''])[0].strip()
-                        data.setdefault('users', {})[user_id] = {
-                            'password': pwd,
-                            'expires_at': now_ts + days * 86400,
-                            'ip_limit': ip_limit,
-                            'limit_bytes': limit_bytes,
-                            'used_bytes': 0,
-                            'status': 'active',
-                            'created_at': now_ts,
-                            'note': note
-                        }
+                        note = form.get('note', [''])[0].strip()[:200]
+                        with data_lock:
+                            data.setdefault('users', {})[user_id] = {
+                                'password': pwd,
+                                'expires_at': now_ts + days * 86400,
+                                'ip_limit': ip_limit,
+                                'limit_bytes': limit_bytes,
+                                'used_bytes': 0,
+                                'status': 'active',
+                                'created_at': now_ts,
+                                'note': note
+                            }
                     elif action == 'delete' and user_id:
-                        if user_id in data.get('users', {}):
-                            del data['users'][user_id]
-                            if user_id in ip_tracker:
-                                del ip_tracker[user_id]
+                        with data_lock:
+                            if user_id in data.get('users', {}):
+                                del data['users'][user_id]
+                                if user_id in ip_tracker:
+                                    del ip_tracker[user_id]
 
                     regenerate_page()
                     self.send_response(302)
@@ -1821,7 +1877,7 @@ def serve(path):
                 submitted_digest = hashlib.sha256(submitted_auth).hexdigest()
 
                 if not hmac.compare_digest(submitted_digest, data['auth_hash']):
-                    self.server.failures.append(now)
+                    self.record_failure()
                     page = login_html(data['token'], error_msg='用户名或密码不正确，请重新输入')
                     return self.reply(200, page.encode('utf-8'), 'text/html; charset=utf-8')
 
@@ -1838,22 +1894,21 @@ def serve(path):
             return self.reply(404, b'Not found')
 
         def do_GET(self):
-            now = time.monotonic()
-            self.server.requests[:] = [t for t in self.server.requests if now-t < 1]
-            self.server.failures[:] = [t for t in self.server.failures if now-t < 60]
-            if len(self.server.requests) >= 50 or len(self.server.failures) >= 60:
-                return self.reply(429, b'Too many requests')
-            self.server.requests.append(now)
-
             if self.path.startswith('/api/v1/'):
+                if not self.check_rate_limit(bucket='api'):
+                    return self.reply(429, b'Too many requests')
                 if not self.verify_api_key():
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized API key'})
                 sub = self.path[len('/api/v1/'):]
                 if sub == 'node/meta':
                     m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
-                    users_count = len(data.get('users', {}))
+                    with data_lock:
+                        users_count = len(data.get('users', {}))
                     return self.reply_json(200, {'ok': True, 'meta': m, 'users_count': users_count, 'time': int(time.time())})
                 return self.reply_json(404, {'ok': False, 'error': 'API endpoint not found'})
+
+            if not self.check_rate_limit(bucket='web'):
+                return self.reply(429, b'Too many requests')
 
             prefix = '/' + data['token'] + '/'
             if not self.path.startswith(prefix):
@@ -1870,9 +1925,14 @@ def serve(path):
                 target_uid = parts[0]
                 action_file = parts[1] if len(parts) > 1 else ''
 
-                u = data.get('users', {}).get(target_uid)
-                if not u:
-                    return self.reply(404, b'User not found')
+                if not VALID_USER_ID_RE.match(target_uid):
+                    return self.reply(400, b'Invalid user_id format')
+
+                with data_lock:
+                    u = data.get('users', {}).get(target_uid)
+                    if not u:
+                        return self.reply(404, b'User not found')
+                    u_copy = dict(u)
 
                 query = parse_qs(self.path.split('?', 1)[1]) if '?' in self.path else {}
                 k_val = query.get('k', [''])[0]
@@ -1882,7 +1942,7 @@ def serve(path):
                     return self.reply(403, b'Access denied: invalid key')
 
                 m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
-                pwd = u.get('password', '')
+                pwd = u_copy.get('password', '')
                 uri, clash_yaml, sing_json = artifacts(m, auth_override=pwd, name_override=f"Hy2-{target_uid}")
 
                 if action_file == 'clash.yaml':
@@ -1904,7 +1964,7 @@ def serve(path):
                     host = m.get('public_ip', server_name) if m.get('is_insecure') else server_name
                     listen_port = m.get('listen_port', 19984)
                     obfs_badge = "Salamander" if m.get('obfs_password') else "QUIC"
-                    page = user_page_html(server_name, host, listen_port, obfs_badge, target_uid, u, uri, clash_yaml, sing_json, qr_svg, data['token'], expected_k)
+                    page = user_page_html(server_name, host, listen_port, obfs_badge, target_uid, u_copy, uri, clash_yaml, sing_json, qr_svg, data['token'], expected_k)
                     return self.reply(200, page.encode('utf-8'), 'text/html; charset=utf-8')
                 else:
                     return self.reply(404, b'Not found')
@@ -1915,12 +1975,16 @@ def serve(path):
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
                 query = parse_qs(self.path.split('?', 1)[1]) if '?' in self.path else {}
                 target_uid = query.get('user_id', [''])[0].strip()
-                u = data.get('users', {}).get(target_uid)
-                if not u:
-                    return self.reply_json(404, {'ok': False, 'error': 'User not found'})
+                if not VALID_USER_ID_RE.match(target_uid):
+                    return self.reply_json(400, {'ok': False, 'error': 'Invalid user_id format'})
+                with data_lock:
+                    u = data.get('users', {}).get(target_uid)
+                    if not u:
+                        return self.reply_json(404, {'ok': False, 'error': 'User not found'})
+                    u_copy = dict(u)
 
                 m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
-                pwd = u.get('password', '')
+                pwd = u_copy.get('password', '')
                 uri, clash_yaml, sing_json = artifacts(m, auth_override=pwd, name_override=f"Hy2-{target_uid}")
                 qr_svg = ""
                 try:
@@ -1931,20 +1995,20 @@ def serve(path):
                 return self.reply_json(200, {
                     'ok': True,
                     'user_id': target_uid,
-                    'note': u.get('note', ''),
+                    'note': u_copy.get('note', ''),
                     'uri': uri,
                     'clash': clash_yaml,
                     'sing_box': sing_json,
                     'qr_svg': qr_svg,
-                    'expires_at': u.get('expires_at', 0),
-                    'traffic_used': u.get('used_bytes', 0),
-                    'traffic_limit': u.get('limit_bytes', 0),
-                    'ip_limit': u.get('ip_limit', 0),
+                    'expires_at': u_copy.get('expires_at', 0),
+                    'traffic_used': u_copy.get('used_bytes', 0),
+                    'traffic_limit': u_copy.get('limit_bytes', 0),
+                    'ip_limit': u_copy.get('ip_limit', 0),
                 })
 
             if not self.is_authenticated():
                 if is_client_api:
-                    self.server.failures.append(now)
+                    self.record_failure()
                     return self.reply(401, b'Authentication required', www_auth=True)
                 page = login_html(data['token'])
                 return self.reply(200, page.encode('utf-8'), 'text/html; charset=utf-8')
@@ -1958,7 +2022,9 @@ def serve(path):
             if route is None:
                 return self.reply(404, b'Not found')
             key, mime = route
-            self.reply(200, data[key].encode(), mime)
+            with data_lock:
+                content = data[key].encode()
+            self.reply(200, content, mime)
 
         def reply(self, code, body, mime='text/plain', www_auth=False):
             self.send_response(code)
@@ -1977,8 +2043,11 @@ def serve(path):
             self.end_headers()
             self.wfile.write(body)
 
-    server = HTTPServer(('127.0.0.1', data['port']), Handler)
-    server.requests, server.failures = [], []
+    class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+        daemon_threads = True
+
+    server = ThreadingHTTPServer(('127.0.0.1', data['port']), Handler)
+    server.requests, server.failures, server.api_requests = [], [], []
     server.serve_forever()
 
 
@@ -1990,6 +2059,7 @@ if __name__ == '__main__':
         refresh(sys.argv[2])
     else:
         serve(sys.argv[2])
+
 PYPORTAL
 }
 
