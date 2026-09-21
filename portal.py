@@ -3305,6 +3305,84 @@ net.ipv4.tcp_slow_start_after_idle = 0
                     'portal_has_update': portal_has_update
                 })
 
+            if subpath == 'reality-status':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                is_installed = Path('/usr/local/bin/xray').exists()
+                is_active = False
+                if is_installed:
+                    try:
+                        out = subprocess.run(['systemctl', 'is-active', 'xray'], capture_output=True, text=True, timeout=3).stdout.strip()
+                        is_active = (out == 'active')
+                    except Exception:
+                        is_active = False
+
+                with data_lock:
+                    rcfg = dict(data.get('reality_config', {}))
+                
+                qr_svg = ''
+                if rcfg.get('uri'):
+                    try:
+                        qr_res = subprocess.run(['qrencode', '-t', 'SVG', '-o', '-'],
+                                                input=rcfg['uri'].encode('utf-8'), capture_output=True, timeout=3)
+                        if qr_res.returncode == 0:
+                            qr_svg = qr_res.stdout.decode('utf-8')
+                    except Exception:
+                        qr_svg = ''
+
+                return self.reply_json(200, {
+                    'ok': True,
+                    'installed': is_installed,
+                    'active': is_active,
+                    'config': {
+                        'uri': rcfg.get('uri', ''),
+                        'uuid': rcfg.get('uuid', ''),
+                        'pub_key': rcfg.get('public_key', ''),
+                        'short_id': rcfg.get('short_id', ''),
+                        'flow': 'xtls-rprx-vision',
+                        'sni': rcfg.get('dest_sni', 'www.apple.com'),
+                        'port': rcfg.get('port', 443),
+                        'qr_svg': qr_svg
+                    }
+                })
+
+            if subpath == 'bbr-status':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                try:
+                    import platform
+                    kernel_ver = platform.release()
+                    cc_out = subprocess.run(['sysctl', '-n', 'net.ipv4.tcp_congestion_control'],
+                                            capture_output=True, text=True, timeout=2).stdout.strip()
+                    qdisc_out = subprocess.run(['sysctl', '-n', 'net.core.default_qdisc'],
+                                              capture_output=True, text=True, timeout=2).stdout.strip()
+                    
+                    conf_path = Path('/etc/sysctl.d/99-bbr.conf')
+                    configured_bbr = ''
+                    if conf_path.exists():
+                        c_text = conf_path.read_text(encoding='utf-8')
+                        for line in c_text.splitlines():
+                            if 'tcp_congestion_control' in line and '=' in line:
+                                configured_bbr = line.split('=')[1].strip()
+
+                    need_reboot = False
+                    if configured_bbr and configured_bbr != cc_out:
+                        need_reboot = True
+
+                    with data_lock:
+                        target_ver = data.get('bbr_target_version', '')
+
+                    return self.reply_json(200, {
+                        'ok': True,
+                        'current': cc_out or 'cubic',
+                        'qdisc': qdisc_out or 'fq_codel',
+                        'kernel': kernel_ver,
+                        'configured': configured_bbr or target_ver or cc_out,
+                        'need_reboot': need_reboot
+                    })
+                except Exception as e:
+                    return self.reply_json(500, {'ok': False, 'error': str(e)})
+
             if subpath == 'warp-status':
                 if not self.is_authenticated():
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
