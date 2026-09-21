@@ -1753,6 +1753,16 @@ def serve(path):
                         password = form.get('password', [''])[0].strip() or secrets.token_hex(16)
                         note = form.get('note', [''])[0].strip()[:200]
 
+                        # 真实端口占用检测（避免与 Hysteria 订阅端口、其他服务冲突）
+                        import socket
+                        try:
+                            probe = socket.socket()
+                            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                            probe.bind(('0.0.0.0', port))
+                            probe.close()
+                        except OSError:
+                            return self.reply_json(400, {'ok': False, 'error': f'端口 {port} 已被系统占用（可能与 Hysteria 订阅端口冲突）'})
+
                         with data_lock:
                             # 端口冲突检查
                             for svc in data.get('proxy_services', []):

@@ -2370,6 +2370,16 @@ def serve(path):
                         password = form.get('password', [''])[0].strip() or secrets.token_hex(16)
                         note = form.get('note', [''])[0].strip()[:200]
 
+                        # 真实端口占用检测（避免与 Hysteria 订阅端口、其他服务冲突）
+                        import socket
+                        try:
+                            probe = socket.socket()
+                            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                            probe.bind(('0.0.0.0', port))
+                            probe.close()
+                        except OSError:
+                            return self.reply_json(400, {'ok': False, 'error': f'端口 {port} 已被系统占用（可能与 Hysteria 订阅端口冲突）'})
+
                         with data_lock:
                             # 端口冲突检查
                             for svc in data.get('proxy_services', []):
@@ -2918,9 +2928,14 @@ install_gost() {
     GOST_BIN="/usr/local/bin/gost"
     GOST_CONFIG="${HY2_DIR}/gost.yml"
 
-    # 获取最新版本与匹配当前架构的下载资产
-    RELEASE_JSON=$(curl -s --max-time 15 https://api.github.com/repos/go-gost/gost/releases/latest)
-    GOST_LATEST=$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty')
+    # 获取最新版本
+    GOST_LATEST=$(curl -s --max-time 15 https://api.github.com/repos/go-gost/gost/releases/latest | jq -r '.tag_name // empty')
+    if [[ -z "$GOST_LATEST" || "$GOST_LATEST" == "null" ]]; then
+        GOST_LATEST="v3.3.0"
+    fi
+    GOST_VER="${GOST_LATEST#v}"
+
+    # gost 资产命名固定为 gost_<版本号>_linux_<架构>.tar.gz
     case "$HY2_ARCH" in
         amd64) GOST_ASSET="linux_amd64" ;;
         arm64) GOST_ASSET="linux_arm64" ;;
@@ -2928,13 +2943,8 @@ install_gost() {
         *) log_err "gost 暂不支持当前 CPU 架构: ${HY2_ARCH}"; return 1 ;;
     esac
 
-    DOWNLOAD_URL=$(echo "$RELEASE_JSON" | jq -r --arg asset "$GOST_ASSET" '.assets[]? | select(.name | test("linux_" + $asset + "\\.tar\\.gz$")) | .browser_download_url' | head -n 1)
-    if [[ -z "$DOWNLOAD_URL" || "$DOWNLOAD_URL" == "null" ]]; then
-        log_err "未找到 gost ${GOST_ASSET} 架构的下载资源。"
-        return 1
-    fi
-
-    log_info "目标版本: ${GOST_LATEST:-latest} (${GOST_ASSET})"
+    DOWNLOAD_URL="https://github.com/go-gost/gost/releases/download/${GOST_LATEST}/gost_${GOST_VER}_${GOST_ASSET}.tar.gz"
+    log_info "目标版本: ${GOST_LATEST} (${GOST_ASSET})"
     log_step "下载并解压 gost 二进制..."
     TMP_DIR=$(mktemp -d)
     if ! curl -fL --progress-bar "$DOWNLOAD_URL" -o "$TMP_DIR/gost.tar.gz"; then
