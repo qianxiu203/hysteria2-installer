@@ -375,21 +375,32 @@ pollTrafficSpeed();
 const gostBadge = document.getElementById('gost-badge');
 const proxyTbody = document.getElementById('proxy-tbody');
 const btnInstallGost = document.getElementById('btn-install-gost');
-const proxyResultBox = document.getElementById('proxy-result-box');
+const proxyModal = document.getElementById('proxy-modal');
+const pmClose = document.getElementById('pm-close');
 const resPType = document.getElementById('res-ptype');
 const resPHost = document.getElementById('res-phost');
 const resPPort = document.getElementById('res-pport');
 const resPUser = document.getElementById('res-puser');
 const resPPass = document.getElementById('res-ppass');
 const resPUrl = document.getElementById('res-purl');
+const resPFmt = document.getElementById('res-pfmt');
 const btnCopyPUrl = document.getElementById('btn-copy-purl');
 const btnCopyPFmt = document.getElementById('btn-copy-pfmt');
-const btnClosePResult = document.getElementById('btn-close-presult');
 
 let curProxyServerHost = location.hostname;
 
+function closeProxyModal() {
+  if (proxyModal) proxyModal.classList.remove('show');
+}
+if (pmClose) pmClose.addEventListener('click', closeProxyModal);
+if (proxyModal) {
+  proxyModal.addEventListener('click', (e) => {
+    if (e.target === proxyModal) closeProxyModal();
+  });
+}
+
 function showProxyResult(data) {
-  if (!proxyResultBox) return;
+  if (!proxyModal) return;
   const host = data.host || curProxyServerHost;
   const url = data.url || (data.type + '://' + data.username + ':' + data.password + '@' + host + ':' + data.port);
   const fmt = data.format || (host + ':' + data.port + ':' + data.username + ':' + data.password);
@@ -400,13 +411,14 @@ function showProxyResult(data) {
   if (resPUser) resPUser.textContent = data.username;
   if (resPPass) resPPass.textContent = data.password;
   if (resPUrl) resPUrl.value = url;
+  if (resPFmt) resPFmt.value = fmt;
 
   if (btnCopyPUrl) {
     btnCopyPUrl.onclick = async () => {
       try {
         await navigator.clipboard.writeText(url);
         btnCopyPUrl.textContent = '已复制 ✓';
-        setTimeout(() => { btnCopyPUrl.textContent = '复制完整 URL 链接'; }, 1800);
+        setTimeout(() => { btnCopyPUrl.textContent = '复制链接'; }, 1800);
       } catch (_) { alert('复制失败，请手动选择复制'); }
     };
   }
@@ -416,19 +428,12 @@ function showProxyResult(data) {
       try {
         await navigator.clipboard.writeText(fmt);
         btnCopyPFmt.textContent = '已复制 ✓';
-        setTimeout(() => { btnCopyPFmt.textContent = '复制 IP:Port:User:Pass'; }, 1800);
+        setTimeout(() => { btnCopyPFmt.textContent = '复制格式'; }, 1800);
       } catch (_) { alert('复制失败，请手动选择复制'); }
     };
   }
 
-  proxyResultBox.style.display = 'block';
-  proxyResultBox.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-}
-
-if (btnClosePResult) {
-  btnClosePResult.onclick = () => {
-    if (proxyResultBox) proxyResultBox.style.display = 'none';
-  };
+  proxyModal.classList.add('show');
 }
 
 // 绑定秒级一键生成按钮
@@ -1007,42 +1012,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
       </div>
     </div>
 
-    <!-- 创建成功高亮结果展示卡片 -->
-    <div id="proxy-result-box" style="display:none;background:#f0f8f6;border:1.5px solid #a3dad0;border-radius:14px;padding:20px;margin-bottom:20px">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
-        <div style="font-size:15px;font-weight:800;color:var(--accent);display:flex;align-items:center;gap:6px">
-          <span>🎉 代理服务创建成功！已立即生效</span>
-        </div>
-        <button class="button" id="btn-close-presult" type="button" style="padding:2px 10px;font-size:11px">关闭 ✕</button>
-      </div>
-      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(170px, 1fr));gap:10px;margin-bottom:14px">
-        <div style="background:#fff;padding:12px;border-radius:10px;border:1px solid var(--line)">
-          <div style="font-size:11px;color:var(--muted)">协议类型</div>
-          <div id="res-ptype" style="font-size:15px;font-weight:800;color:var(--ink);text-transform:uppercase">SOCKS5</div>
-        </div>
-        <div style="background:#fff;padding:12px;border-radius:10px;border:1px solid var(--line)">
-          <div style="font-size:11px;color:var(--muted)">连接域名 / 主机</div>
-          <div id="res-phost" style="font-size:13px;font-weight:700;color:var(--ink);font-family:ui-monospace,SFMono-Regular,Consolas,monospace">usntt.teyir.com</div>
-        </div>
-        <div style="background:#fff;padding:12px;border-radius:10px;border:1px solid var(--line)">
-          <div style="font-size:11px;color:var(--muted)">监听端口</div>
-          <div id="res-pport" style="font-size:16px;font-weight:800;color:var(--accent);font-family:ui-monospace,SFMono-Regular,Consolas,monospace">28412</div>
-        </div>
-        <div style="background:#fff;padding:12px;border-radius:10px;border:1px solid var(--line)">
-          <div style="font-size:11px;color:var(--muted)">用户名 (Username)</div>
-          <div id="res-puser" style="font-size:13px;font-weight:700;color:var(--ink);font-family:ui-monospace,SFMono-Regular,Consolas,monospace">user123</div>
-        </div>
-        <div style="background:#fff;padding:12px;border-radius:10px;border:1px solid var(--line)">
-          <div style="font-size:11px;color:var(--muted)">密码 (Password)</div>
-          <div id="res-ppass" style="font-size:13px;font-weight:700;color:var(--ink);font-family:ui-monospace,SFMono-Regular,Consolas,monospace">pass123</div>
-        </div>
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-        <input id="res-purl" readonly style="flex:1;min-width:240px;height:38px;padding:0 12px;border:1px solid #b7dfd7;border-radius:8px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:#fff" value="">
-        <button class="button primary" id="btn-copy-purl" type="button" style="padding:0 14px;height:38px;font-size:12px">复制完整 URL 链接</button>
-        <button class="button" id="btn-copy-pfmt" type="button" style="padding:0 14px;height:38px;font-size:12px">复制 IP:Port:User:Pass</button>
-      </div>
-    </div>
+
 
     <div class="user-table-wrap">
       <table class="proxy-table">
@@ -1188,6 +1158,61 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
 
 <div class="security">私密提示 · 链接和二维码包含连接凭据，请勿公开分享或发送截图给他人。</div>
 <p id="copy-status" class="status" role="status" aria-live="polite"></p>
+
+<!-- 入站代理创建成功结果模态框 -->
+<div class="modal-backdrop" id="proxy-modal">
+  <div class="modal-card" style="max-width:580px">
+    <div class="modal-head">
+      <div>
+        <h2 style="margin:0;font-size:18px;color:var(--accent);display:flex;align-items:center;gap:6px">
+          <span>🎉 代理服务创建成功</span>
+        </h2>
+        <p style="font-size:12px;margin-top:2px;color:var(--muted)">GOST 服务已热重载并监听，可以直接在各类客户端或脚本中使用</p>
+      </div>
+      <button class="modal-close" type="button" id="pm-close">&times;</button>
+    </div>
+    
+    <div class="config-grid" style="gap:12px;margin-top:8px">
+      <div class="card" style="padding:12px 14px;box-shadow:none;border-color:var(--line);background:#f8fbfb">
+        <div style="font-size:11px;color:var(--muted);font-weight:700">代理协议</div>
+        <div id="res-ptype" style="font-size:16px;font-weight:800;color:var(--accent);margin-top:3px">SOCKS5</div>
+      </div>
+      <div class="card" style="padding:12px 14px;box-shadow:none;border-color:var(--line);background:#f8fbfb">
+        <div style="font-size:11px;color:var(--muted);font-weight:700">监听端口</div>
+        <div id="res-pport" style="font-size:16px;font-weight:800;color:var(--ink);margin-top:3px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">28412</div>
+      </div>
+      <div class="card" style="grid-column:1/-1;padding:12px 14px;box-shadow:none;border-color:var(--line);background:#f8fbfb">
+        <div style="font-size:11px;color:var(--muted);font-weight:700">连接域名 / 主机地址</div>
+        <div id="res-phost" style="font-size:15px;font-weight:750;color:var(--ink);margin-top:3px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">usntt.teyir.com</div>
+      </div>
+      <div class="card" style="padding:12px 14px;box-shadow:none;border-color:var(--line);background:#f8fbfb">
+        <div style="font-size:11px;color:var(--muted);font-weight:700">认证用户名</div>
+        <div id="res-puser" style="font-size:13px;font-weight:700;color:var(--ink);margin-top:3px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">user123</div>
+      </div>
+      <div class="card" style="padding:12px 14px;box-shadow:none;border-color:var(--line);background:#f8fbfb">
+        <div style="font-size:11px;color:var(--muted);font-weight:700">认证密码</div>
+        <div id="res-ppass" style="font-size:13px;font-weight:700;color:var(--ink);margin-top:3px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace">pass123</div>
+      </div>
+    </div>
+
+    <div style="margin-top:14px;display:grid;gap:12px">
+      <div>
+        <div style="font-size:12px;font-weight:700;color:var(--ink);margin-bottom:6px">标准直连链接 (URI)</div>
+        <div style="display:flex;gap:8px">
+          <input id="res-purl" readonly style="flex:1;height:38px;padding:0 12px;border:1px solid var(--line);border-radius:8px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:#f7faf9" value="">
+          <button class="button primary" id="btn-copy-purl" type="button" style="padding:0 16px;height:38px;font-size:12px;white-space:nowrap">复制链接</button>
+        </div>
+      </div>
+      <div>
+        <div style="font-size:12px;font-weight:700;color:var(--ink);margin-bottom:6px">通用格式 (Host:Port:User:Pass)</div>
+        <div style="display:flex;gap:8px">
+          <input id="res-pfmt" readonly style="flex:1;height:38px;padding:0 12px;border:1px solid var(--line);border-radius:8px;font-size:12px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:#f7faf9" value="">
+          <button class="button" id="btn-copy-pfmt" type="button" style="padding:0 16px;height:38px;font-size:12px;white-space:nowrap">复制格式</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 
 <!-- 专属用户连接模态框 -->
 <div class="modal-backdrop" id="user-modal">
