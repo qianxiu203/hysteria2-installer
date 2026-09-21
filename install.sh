@@ -1716,6 +1716,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
       </div>
       <div style="display:flex;gap:10px;align-items:center">
         <span class="status-pill" id="warp-badge" style="background:#eaf3de;color:#27500a">检测中...</span>
+        <button class="button primary" id="btn-install-warp" type="button" style="padding:6px 14px;font-size:12px;display:none">⚡ 一键安装 WARP</button>
         <button class="toggle-btn off" id="btn-toggle-warp" type="button">切换中...</button>
       </div>
     </div>
@@ -3106,10 +3107,10 @@ WantedBy=multi-user.target
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
                 with data_lock:
                     enabled = data.get('warp_enabled', False)
-                # 简单本地探测 40000 端口连通性
+                import shutil; is_installed = shutil.which('warp-cli') is not None
                 connected = False
                 outbound_ip = ''
-                if enabled:
+                if is_installed and enabled:
                     try:
                         import urllib.request
                         proxy_handler = urllib.request.ProxyHandler({'http': 'socks5h://127.0.0.1:40000',
@@ -3122,7 +3123,63 @@ WantedBy=multi-user.target
                                 connected = True
                     except Exception:
                         connected = False
-                return self.reply_json(200, {'ok': True, 'enabled': enabled, 'connected': connected, 'ip': outbound_ip})
+                return self.reply_json(200, {
+                    'ok': True,
+                    'installed': is_installed,
+                    'enabled': enabled,
+                    'connected': connected,
+                    'ip': outbound_ip
+                })
+
+            if self.path == prefix + 'install-warp':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                try:
+                    install_warp_sh = '''
+                    set -eo pipefail
+                    export DEBIAN_FRONTEND=noninteractive
+                    if which apt-get >/dev/null 2>&1; then
+                        apt-get update && apt-get install -y gnupg lsb-release curl
+                        CODENAME=$(grep VERSION_CODENAME /etc/os-release | cut -d= -f2)
+                        CODENAME=${CODENAME:-bookworm}
+                        curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+                        echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ ${CODENAME} main" | tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null
+                        apt-get update && apt-get install -y --no-install-recommends cloudflare-warp
+                    elif which yum >/dev/null 2>&1; then
+                        yum-config-manager --add-repo https://pkg.cloudflareclient.com/cloudflare-warp-ascii.repo 2>/dev/null || true
+                        yum install -y cloudflare-warp
+                    fi
+
+                    if ! which warp-cli >/dev/null 2>&1; then
+                        echo "未能成功安装 warp-cli 客户端！" >&2
+                        exit 1
+                    fi
+
+                    systemctl enable --now warp-svc
+                    sleep 2
+                    warp-cli --accept-tos registration new 2>/dev/null || warp-cli --accept-tos register 2>/dev/null || true
+                    warp-cli --accept-tos mode proxy
+                    warp-cli --accept-tos proxy port 40000
+                    warp-cli --accept-tos tunnel protocol set MASQUE 2>/dev/null || true
+                    warp-cli --accept-tos connect
+                    '''
+                    res = subprocess.run(['bash', '-c', install_warp_sh], capture_output=True, text=True, timeout=180)
+                    if res.returncode != 0:
+                        err_detail = (res.stderr or res.stdout or '安装失败').strip()
+                        return self.reply_json(500, {'ok': False, 'error': f'安装失败: {err_detail}'})
+
+                    # 自动开启 WARP 并热重载
+                    with data_lock:
+                        data['warp_enabled'] = True
+                    save_data()
+                    try:
+                        subprocess.run(['/etc/hysteria/toggle_warp.sh', 'enable'], capture_output=True, timeout=10)
+                    except Exception:
+                        pass
+
+                    return self.reply_json(200, {'ok': True, 'message': 'Cloudflare WARP 客户端安装成功并已就绪！'})
+                except Exception as e:
+                    return self.reply_json(500, {'ok': False, 'error': f'执行异常: {str(e)}'})
 
             if subpath == 'user-config' or subpath.startswith('user-config?'):
                 if not self.is_authenticated():
