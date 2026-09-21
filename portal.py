@@ -2097,7 +2097,7 @@ def serve(path):
                 if not self.is_authenticated():
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
                 try:
-                    import platform
+                    import platform, urllib.request, tarfile, tempfile, shutil
                     machine = platform.machine().lower()
                     if 'x86_64' in machine or 'amd64' in machine:
                         arch = 'linux_amd64'
@@ -2108,22 +2108,52 @@ def serve(path):
                     else:
                         arch = 'linux_amd64'
 
-                    # 自动检测并下载 gost 最新稳定版
-                    install_cmd = f'''
-                    set -e
-                    ARCH="{arch}"
-                    TMP_DIR=$(mktemp -d)
-                    cd "$TMP_DIR"
-                    # 下载官方 release
-                    curl -sSL -m 60 "https://github.com/go-gost/gost/releases/download/v3.0.0-nightly.20240128/gost_3.0.0-nightly.20240128_${{ARCH}}.tar.gz" -o gost.tar.gz || \
-                    curl -sSL -m 60 "https://ghproxy.com/https://github.com/go-gost/gost/releases/download/v3.0.0-nightly.20240128/gost_3.0.0-nightly.20240128_${{ARCH}}.tar.gz" -o gost.tar.gz
-                    tar -xzf gost.tar.gz
-                    install -m 755 gost /usr/local/bin/gost
-                    rm -rf "$TMP_DIR"
+                    # 动态探测最新版本
+                    tag = 'v3.3.0'
+                    try:
+                        req = urllib.request.Request('https://api.github.com/repos/go-gost/gost/releases/latest', headers={'User-Agent': 'Mozilla/5.0'})
+                        with urllib.request.urlopen(req, timeout=8) as r:
+                            rel_data = json.loads(r.read().decode())
+                            if rel_data.get('tag_name'):
+                                tag = rel_data['tag_name']
+                    except Exception:
+                        tag = 'v3.3.0'
+
+                    ver = tag.lstrip('v')
+                    pkg_name = f"gost_{ver}_{arch}.tar.gz"
+
+                    download_urls = [
+                        f"https://github.com/go-gost/gost/releases/download/{tag}/{pkg_name}",
+                        f"https://ghfast.top/https://github.com/go-gost/gost/releases/download/{tag}/{pkg_name}",
+                        f"https://github.moeyy.xyz/https://github.com/go-gost/gost/releases/download/{tag}/{pkg_name}"
+                    ]
+
+                    installed = False
+                    last_err = ''
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        archive_path = Path(tmpdir) / 'gost.tar.gz'
+                        for u in download_urls:
+                            try:
+                                req = urllib.request.Request(u, headers={'User-Agent': 'Mozilla/5.0'})
+                                with urllib.request.urlopen(req, timeout=30) as resp, open(archive_path, 'wb') as out_f:
+                                    shutil.copyfileobj(resp, out_f)
+                                if archive_path.stat().st_size > 1024 * 1024 and tarfile.is_tarfile(str(archive_path)):
+                                    with tarfile.open(str(archive_path), 'r:gz') as tar:
+                                        tar.extractall(path=tmpdir)
+                                    src_bin = Path(tmpdir) / 'gost'
+                                    if src_bin.exists():
+                                        shutil.move(str(src_bin), '/usr/local/bin/gost')
+                                        os.chmod('/usr/local/bin/gost', 0o755)
+                                        installed = True
+                                        break
+                            except Exception as e:
+                                last_err = str(e)
+
+                    if not installed:
+                        return self.reply_json(500, {'ok': False, 'error': f'下载或解压 GOST 失败: {last_err}'})
 
                     # 确保 systemd 服务存在
-                    cat > /etc/systemd/system/gost.service << 'SERVICE_EOF'
-[Unit]
+                    service_content = '''[Unit]
 Description=GOST Proxy Service (SOCKS5/HTTP/HTTPS inbound)
 After=network.target
 
@@ -2135,21 +2165,16 @@ RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
-SERVICE_EOF
-
-                    systemctl daemon-reload
-                    systemctl enable gost
-                    '''
-                    res = subprocess.run(['bash', '-c', install_cmd], capture_output=True, text=True, timeout=120)
-                    if res.returncode != 0:
-                        err_detail = (res.stderr or res.stdout or '下载或安装失败').strip()
-                        return self.reply_json(500, {'ok': False, 'error': f'安装失败: {err_detail}'})
+'''
+                    Path('/etc/systemd/system/gost.service').write_text(service_content)
+                    subprocess.run(['systemctl', 'daemon-reload'], capture_output=True)
+                    subprocess.run(['systemctl', 'enable', 'gost'], capture_output=True)
 
                     # 重新生成 gost.yml 并启动服务
                     write_gost_config()
                     subprocess.run(['systemctl', 'restart', 'gost'], capture_output=True, timeout=10)
 
-                    return self.reply_json(200, {'ok': True, 'message': 'GOST 官方核心安装成功，服务已自动配置并启动！'})
+                    return self.reply_json(200, {'ok': True, 'message': f'GOST {tag} 官方核心安装成功，服务已自动配置并启动！'})
                 except Exception as e:
                     return self.reply_json(500, {'ok': False, 'error': f'执行异常: {str(e)}'})
 
@@ -2548,4 +2573,5 @@ if __name__ == '__main__':
         refresh(sys.argv[2])
     else:
         serve(sys.argv[2])
+
 
