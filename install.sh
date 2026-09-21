@@ -860,6 +860,28 @@ footer{display:flex;justify-content:space-between;margin-top:32px;color:#879996;
 .warp-tag-del { color: #d64545; text-decoration: none; font-size: 15px; line-height: 1; padding: 0 2px; font-weight: 800; cursor: pointer; border-radius: 50%; }
 .warp-tag-del:hover { color: #a82020; transform: scale(1.2); }
 
+/* BBR 拥塞控制模块全局专属高质感样式 */
+.bbr-section { margin-top: 24px; border-left: 4px solid var(--accent); }
+.bbr-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 14px; }
+@media(max-width: 860px) { .bbr-grid { grid-template-columns: 1fr; } }
+.bbr-card { background: #ffffff; border: 1.5px solid var(--line); border-radius: 16px; padding: 20px; display: flex; flex-direction: column; justify-content: space-between; gap: 14px; box-shadow: 0 4px 14px rgba(18, 43, 49, 0.03); transition: all .18s ease; }
+.bbr-card:hover { border-color: #a8cfc6; transform: translateY(-2px); box-shadow: 0 6px 20px rgba(18, 43, 49, 0.06); }
+.bbr-card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.bbr-card-title { font-size: 14.5px; font-weight: 800; color: var(--ink); }
+.bbr-card-desc { font-size: 12px; color: var(--muted); margin: 0; line-height: 1.6; }
+.bbr-btn { width: 100%; height: 42px; font-size: 13px; font-weight: 750; border-radius: 10px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; transition: all .15s ease; border: 1px solid transparent; }
+.bbr-btn.v1 { background: var(--accent); color: #fff; }
+.bbr-btn.v1:hover { filter: brightness(0.92); }
+.bbr-btn.v2 { background: #f6ffed; border-color: #b7eb8f; color: #237804; }
+.bbr-btn.v2:hover { background: #d9f7be; }
+.bbr-btn.v3 { background: #fff0f6; border-color: #ffd6e7; color: #c41d7f; }
+.bbr-btn.v3:hover { background: #ffadd2; }
+
+.bbr-info-bar { background: #f8fbfb; border: 1px solid var(--line); border-radius: 14px; padding: 16px 20px; margin-bottom: 18px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
+.bbr-stat-val { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--accent); font-weight: 800; font-size: 14px; }
+.bbr-sub-text { font-size: 12px; color: var(--muted); margin-top: 3px; }
+
+
 """
 
 SCRIPT = """
@@ -2252,7 +2274,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
   </section>
 
   <!-- 区块: TCP 拥塞控制加速引擎 (BBR V1 / V2 / V3) -->
-  <section class="card" style="margin-top:20px;border-left:4px solid #087f74">
+  <section class="card bbr-section">
     <div class="user-header">
       <div>
         <h2>🚀 TCP 拥塞控制与网络加速引擎 (BBR)</h2>
@@ -2264,50 +2286,52 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
       </div>
     </div>
 
-    <div class="warp-switch-card" style="background:#f8fbfb;border-color:var(--line);margin-bottom:16px">
-      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
-        <div>
-          <div style="font-size:13px;font-weight:750;color:var(--ink);margin-bottom:4px">当前内核拥塞状态: <span id="bbr-current-text" style="font-family:monospace;color:var(--accent);font-weight:800">读取中...</span></div>
-          <div style="font-size:12px;color:var(--muted)">排队规则: <span id="bbr-qdisc-text" style="font-family:monospace">--</span> · 系统内核: <span id="bbr-kernel-text" style="font-family:monospace">--</span></div>
+    <!-- 内核状态横幅 -->
+    <div class="bbr-info-bar">
+      <div>
+        <div style="font-size:13px;font-weight:750;color:var(--ink);margin-bottom:2px">
+          当前内核拥塞控制: <span class="bbr-stat-val" id="bbr-current-text">读取中...</span>
         </div>
-        <div id="bbr-reboot-tip" style="display:none;background:#fff8e6;border:1px solid #ffd591;color:#d46b08;padding:6px 14px;border-radius:8px;font-size:12px;font-weight:600">
-          ⚠️ 新配置已写入，需要重启服务器后生效
-        </div>
+        <div class="bbr-sub-text">排队规则: <span id="bbr-qdisc-text" style="font-family:monospace">--</span> · 系统内核: <span id="bbr-kernel-text" style="font-family:monospace">--</span></div>
+      </div>
+      <div id="bbr-reboot-tip" style="display:none;background:#fff8e6;border:1px solid #ffd591;color:#d46b08;padding:6px 14px;border-radius:8px;font-size:12px;font-weight:700">
+        ⚠️ 新配置已写入，需要重启服务器后生效
       </div>
     </div>
 
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px">
-      <div style="background:#ffffff;border:1px solid var(--line);border-radius:14px;padding:16px;display:flex;flex-direction:column;justify-content:space-between;gap:12px;box-shadow:0 2px 6px rgba(0,0,0,0.02)">
+    <!-- 横向三列高质感卡片布局 (彻底消灭挤压堆叠) -->
+    <div class="bbr-grid">
+      <div class="bbr-card">
         <div>
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-            <strong style="font-size:14px;color:var(--ink)">BBR V1 经典稳定版</strong>
+          <div class="bbr-card-head">
+            <span class="bbr-card-title">BBR V1 经典稳定版</span>
             <span class="status-pill" style="font-size:11px;background:#f0f5f4">免换内核</span>
           </div>
-          <p style="font-size:12px;color:var(--muted);margin:0;line-height:1.5">Google 官方首代拥塞控制算法，成熟极其稳定，原生内核直接支持，即开即用。</p>
+          <p class="bbr-card-desc">Google 官方首代拥塞控制算法，成熟极其稳定，原生内核直接支持，即开即用。</p>
         </div>
-        <button class="button primary btn-apply-bbr" data-version="v1" type="button" style="height:38px;font-size:12px">⚡ 一键开启 BBR V1</button>
+        <button class="bbr-btn v1 btn-apply-bbr" data-version="v1" type="button">⚡ 一键开启 BBR V1</button>
       </div>
 
-      <div style="background:#ffffff;border:1px solid var(--line);border-radius:14px;padding:16px;display:flex;flex-direction:column;justify-content:space-between;gap:12px;box-shadow:0 2px 6px rgba(0,0,0,0.02)">
+      <div class="bbr-card">
         <div>
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-            <strong style="font-size:14px;color:var(--ink)">BBR V2 平衡抗丢包版</strong>
+          <div class="bbr-card-head">
+            <span class="bbr-card-title">BBR V2 平衡抗丢包版</span>
             <span class="status-pill" style="font-size:11px;background:#e6f4ff;color:#0958d9">更低延迟</span>
           </div>
-          <p style="font-size:12px;color:var(--muted);margin:0;line-height:1.5">针对多流竞争与队列膨胀优化，加入 ECN 显式拥塞通知，公平性好、延迟更低。</p>
+          <p class="bbr-card-desc">针对多流竞争与队列膨胀优化，加入 ECN 显式拥塞通知，公平性好、延迟更低。</p>
         </div>
-        <button class="button btn-apply-bbr" data-version="v2" type="button" style="height:38px;font-size:12px;background:#fff;border-color:#b7eb8f;color:#237804">⚡ 一键开启 BBR V2</button>
+        <button class="bbr-btn v2 btn-apply-bbr" data-version="v2" type="button">⚡ 一键开启 BBR V2</button>
       </div>
 
-      <div style="background:#ffffff;border:1px solid var(--line);border-radius:14px;padding:16px;display:flex;flex-direction:column;justify-content:space-between;gap:12px;box-shadow:0 2px 6px rgba(0,0,0,0.02)">
+      <div class="bbr-card">
         <div>
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-            <strong style="font-size:14px;color:var(--ink)">BBR V3 旗舰性能版</strong>
+          <div class="bbr-card-head">
+            <span class="bbr-card-title">BBR V3 旗舰性能版</span>
             <span class="status-pill" style="font-size:11px;background:#fff0f6;color:#c41d7f">极限吞吐</span>
           </div>
-          <p style="font-size:12px;color:var(--muted);margin:0;line-height:1.5">Google 最新迭代版，彻底优化丢包退避机制，跨国高延迟长链路吞吐提升显著。</p>
+          <p class="bbr-card-desc">Google 最新迭代版，彻底优化丢包退避机制，跨国高延迟长链路吞吐提升显著。</p>
         </div>
-        <button class="button btn-apply-bbr" data-version="v3" type="button" style="height:38px;font-size:12px;background:#fff;border-color:#ffd6e7;color:#c41d7f">⚡ 一键开启 BBR V3</button>
+        <button class="bbr-btn v3 btn-apply-bbr" data-version="v3" type="button">⚡ 一键开启 BBR V3</button>
       </div>
     </div>
   </section>
@@ -3957,6 +3981,84 @@ net.ipv4.tcp_slow_start_after_idle = 0
                     'portal_current': portal_curr,
                     'portal_has_update': portal_has_update
                 })
+
+            if subpath == 'reality-status':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                is_installed = Path('/usr/local/bin/xray').exists()
+                is_active = False
+                if is_installed:
+                    try:
+                        out = subprocess.run(['systemctl', 'is-active', 'xray'], capture_output=True, text=True, timeout=3).stdout.strip()
+                        is_active = (out == 'active')
+                    except Exception:
+                        is_active = False
+
+                with data_lock:
+                    rcfg = dict(data.get('reality_config', {}))
+                
+                qr_svg = ''
+                if rcfg.get('uri'):
+                    try:
+                        qr_res = subprocess.run(['qrencode', '-t', 'SVG', '-o', '-'],
+                                                input=rcfg['uri'].encode('utf-8'), capture_output=True, timeout=3)
+                        if qr_res.returncode == 0:
+                            qr_svg = qr_res.stdout.decode('utf-8')
+                    except Exception:
+                        qr_svg = ''
+
+                return self.reply_json(200, {
+                    'ok': True,
+                    'installed': is_installed,
+                    'active': is_active,
+                    'config': {
+                        'uri': rcfg.get('uri', ''),
+                        'uuid': rcfg.get('uuid', ''),
+                        'pub_key': rcfg.get('public_key', ''),
+                        'short_id': rcfg.get('short_id', ''),
+                        'flow': 'xtls-rprx-vision',
+                        'sni': rcfg.get('dest_sni', 'www.apple.com'),
+                        'port': rcfg.get('port', 443),
+                        'qr_svg': qr_svg
+                    }
+                })
+
+            if subpath == 'bbr-status':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                try:
+                    import platform
+                    kernel_ver = platform.release()
+                    cc_out = subprocess.run(['sysctl', '-n', 'net.ipv4.tcp_congestion_control'],
+                                            capture_output=True, text=True, timeout=2).stdout.strip()
+                    qdisc_out = subprocess.run(['sysctl', '-n', 'net.core.default_qdisc'],
+                                              capture_output=True, text=True, timeout=2).stdout.strip()
+                    
+                    conf_path = Path('/etc/sysctl.d/99-bbr.conf')
+                    configured_bbr = ''
+                    if conf_path.exists():
+                        c_text = conf_path.read_text(encoding='utf-8')
+                        for line in c_text.splitlines():
+                            if 'tcp_congestion_control' in line and '=' in line:
+                                configured_bbr = line.split('=')[1].strip()
+
+                    need_reboot = False
+                    if configured_bbr and configured_bbr != cc_out:
+                        need_reboot = True
+
+                    with data_lock:
+                        target_ver = data.get('bbr_target_version', '')
+
+                    return self.reply_json(200, {
+                        'ok': True,
+                        'current': cc_out or 'cubic',
+                        'qdisc': qdisc_out or 'fq_codel',
+                        'kernel': kernel_ver,
+                        'configured': configured_bbr or target_ver or cc_out,
+                        'need_reboot': need_reboot
+                    })
+                except Exception as e:
+                    return self.reply_json(500, {'ok': False, 'error': str(e)})
 
             if subpath == 'warp-status':
                 if not self.is_authenticated():
