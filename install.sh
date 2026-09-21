@@ -259,35 +259,17 @@ setup_ports_and_obfs() {
         NODE_API_KEY=""
     fi
 
-    # 端口跳跃
-    echo -e "\n是否启用端口跳跃 (Port Hopping)? 可有效防止运营商对单 UDP 端口的 QoS 限速与阻断。"
-    read -rp "是否开启端口跳跃? [y/N, 默认 N]: " enable_hop
-    enable_hop=${enable_hop:-n}
-
+    # 端口跳跃 (默认全自动开启，免询问)
     clear_all_hopping_rules
-    HOP_PORT_RANGE=""
-    if [[ "$enable_hop" =~ ^[Yy]$ ]]; then
-        DEFAULT_HOP_START=20000
-        DEFAULT_HOP_END=40000
-        read -rp "请输入端口跳跃起始范围 [默认: ${DEFAULT_HOP_START}]: " HOP_START
-        HOP_START=${HOP_START:-$DEFAULT_HOP_START}
-        read -rp "请输入端口跳跃结束范围 [默认: ${DEFAULT_HOP_END}]: " HOP_END
-        HOP_END=${HOP_END:-$DEFAULT_HOP_END}
-        HOP_PORT_RANGE="${HOP_START}-${HOP_END}"
-        setup_iptables_port_hopping "$LISTEN_PORT" "$HOP_START" "$HOP_END"
-    fi
+    HOP_START=20000
+    HOP_END=40000
+    HOP_PORT_RANGE="${HOP_START}-${HOP_END}"
+    setup_iptables_port_hopping "$LISTEN_PORT" "$HOP_START" "$HOP_END"
+    log_info "端口跳跃已默认自动启用: UDP ${HOP_PORT_RANGE} -> ${LISTEN_PORT}"
 
-    # Salamander 混淆配置
-    echo -e "\n是否启用 Salamander 混淆? (将整个 UDP 数据包伪装为随机高熵杂波，防止 GFW 特征识别)"
-    read -rp "是否开启混淆? [y/N, 默认 N]: " enable_obfs
-    enable_obfs=${enable_obfs:-n}
-
-    OBFS_PASSWORD=""
-    if [[ "$enable_obfs" =~ ^[Yy]$ ]]; then
-        RANDOM_OBFS=$(openssl rand -hex 16)
-        read -rsp "请输入混淆密码 [回车自动生成]: " OBFS_PASSWORD; echo
-        OBFS_PASSWORD=${OBFS_PASSWORD:-$RANDOM_OBFS}
-    fi
+    # Salamander 混淆 (默认全自动开启并生成高熵密钥，免询问)
+    OBFS_PASSWORD=$(openssl rand -hex 16)
+    log_info "Salamander 混淆已默认自动启用 (抗深度包检测 GFW 免疫)"
 }
 
 setup_system_firewall() {
