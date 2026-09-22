@@ -525,15 +525,20 @@ if (btnInstallWarp) {
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
       });
+      if (!res.ok) {
+        const errText = await res.text();
+        showToast('安装失败 (HTTP ' + res.status + '): ' + errText, 'error');
+        return;
+      }
       const json = await res.json();
       if (json.ok) {
-        alert(json.message || 'Cloudflare WARP 安装成功！服务已自动就绪。');
+        showToast(json.message || 'Cloudflare WARP 安装成功！服务已自动就绪。', 'success');
         await checkWarpStatus();
       } else {
-        alert(json.error || '安装失败，请检查网络');
+        showToast(json.error || '安装失败，请检查网络', 'error');
       }
     } catch (e) {
-      alert('安装请求异常: ' + e.message);
+      showToast('安装请求异常: ' + e.message, 'error');
     } finally {
       btnInstallWarp.disabled = false;
       btnInstallWarp.textContent = origText;
@@ -3018,14 +3023,22 @@ WantedBy=multi-user.target
                             if not in_acl:
                                 clean_lines.append(line)
 
+                        cfg_text = '\n'.join(clean_lines)
                         if new_state:
-                            clean_lines.append('acl:')
-                            clean_lines.append('  inline:')
-                            for d in current_rules:
-                                clean_lines.append(f'    - warp_socks(suffix:{d})')
-                            clean_lines.append('    - direct_ipv4(all)')
+                            if 'name: warp_socks' not in cfg_text:
+                                warp_outbound = "\n  - name: warp_socks\n    type: socks5\n    socks5:\n      addr: 127.0.0.1:40000"
+                                if 'outbounds:' in cfg_text:
+                                    cfg_text = cfg_text.replace('outbounds:', 'outbounds:' + warp_outbound)
+                                else:
+                                    cfg_text += '\noutbounds:' + warp_outbound
 
-                        cfg_path.write_text('\n'.join(clean_lines) + '\n', encoding='utf-8')
+                            acl_block = '\nacl:\n  inline:\n'
+                            for d in current_rules:
+                                acl_block += f'    - warp_socks(suffix:{d})\n'
+                            acl_block += '    - direct_ipv4(all)\n'
+                            cfg_text += acl_block
+
+                        cfg_path.write_text(cfg_text.strip() + '\n', encoding='utf-8')
                         subprocess.run(['systemctl', 'restart', 'hysteria-server'], capture_output=True, timeout=10)
 
                     threading.Thread(target=apply_hy2_acl, daemon=True).start()
@@ -3259,6 +3272,60 @@ net.ipv4.tcp_slow_start_after_idle = 0
                 self.send_header('Cache-Control', 'no-store')
                 self.end_headers()
                 return
+
+            if self.path == prefix + 'install-warp':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                try:
+                    install_warp_sh = '''
+                    set -eo pipefail
+                    export DEBIAN_FRONTEND=noninteractive
+                    if which apt-get >/dev/null 2>&1; then
+                        apt-get update && apt-get install -y gnupg lsb-release curl
+                        CODENAME=$(grep VERSION_CODENAME /etc/os-release | cut -d= -f2)
+                        CODENAME=${CODENAME:-bookworm}
+                        curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+                        curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /etc/apt/trusted.gpg.d/cloudflare-warp.gpg 2>/dev/null || true
+                        echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ ${CODENAME} main" | tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null
+                        apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 6E2DD2174FA1C3BA 2>/dev/null || true
+                        apt-get update -o Acquire::AllowInsecureRepositories=true -y || apt-get update -y
+                        apt-get install -y --no-install-recommends cloudflare-warp
+                    elif which yum >/dev/null 2>&1; then
+                        yum-config-manager --add-repo https://pkg.cloudflareclient.com/cloudflare-warp-ascii.repo 2>/dev/null || true
+                        yum install -y cloudflare-warp
+                    fi
+
+                    if ! which warp-cli >/dev/null 2>&1; then
+                        echo "未能成功安装 warp-cli 客户端！" >&2
+                        exit 1
+                    fi
+
+                    systemctl enable --now warp-svc
+                    sleep 2
+                    warp-cli --accept-tos registration new 2>/dev/null || warp-cli --accept-tos register 2>/dev/null || true
+                    warp-cli --accept-tos mode proxy
+                    warp-cli --accept-tos proxy port 40000
+                    warp-cli --accept-tos tunnel protocol set MASQUE 2>/dev/null || true
+                    warp-cli --accept-tos connect
+                    '''
+                    res = subprocess.run(['bash', '-c', install_warp_sh], capture_output=True, text=True, timeout=180)
+                    if res.returncode != 0:
+                        err_detail = (res.stderr or res.stdout or '安装失败').strip()
+                        return self.reply_json(500, {'ok': False, 'error': f'安装失败: {err_detail}'})
+
+                    # 自动开启 WARP 并热重载
+                    with data_lock:
+                        data['warp_enabled'] = True
+                    save_data()
+                    try:
+                        subprocess.run(['/etc/hysteria/toggle_warp.sh', 'enable'], capture_output=True, timeout=10)
+                    except Exception:
+                        pass
+
+                    return self.reply_json(200, {'ok': True, 'message': 'Cloudflare WARP 客户端安装成功并已就绪！'})
+                except Exception as e:
+                    return self.reply_json(500, {'ok': False, 'error': f'执行异常: {str(e)}'})
+
 
             return self.reply(404, b'Not found')
 
@@ -3551,56 +3618,6 @@ net.ipv4.tcp_slow_start_after_idle = 0
                     'connected': connected,
                     'ip': outbound_ip
                 })
-
-            if self.path == prefix + 'install-warp':
-                if not self.is_authenticated():
-                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                try:
-                    install_warp_sh = '''
-                    set -eo pipefail
-                    export DEBIAN_FRONTEND=noninteractive
-                    if which apt-get >/dev/null 2>&1; then
-                        apt-get update && apt-get install -y gnupg lsb-release curl
-                        CODENAME=$(grep VERSION_CODENAME /etc/os-release | cut -d= -f2)
-                        CODENAME=${CODENAME:-bookworm}
-                        curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-                        echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ ${CODENAME} main" | tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null
-                        apt-get update && apt-get install -y --no-install-recommends cloudflare-warp
-                    elif which yum >/dev/null 2>&1; then
-                        yum-config-manager --add-repo https://pkg.cloudflareclient.com/cloudflare-warp-ascii.repo 2>/dev/null || true
-                        yum install -y cloudflare-warp
-                    fi
-
-                    if ! which warp-cli >/dev/null 2>&1; then
-                        echo "未能成功安装 warp-cli 客户端！" >&2
-                        exit 1
-                    fi
-
-                    systemctl enable --now warp-svc
-                    sleep 2
-                    warp-cli --accept-tos registration new 2>/dev/null || warp-cli --accept-tos register 2>/dev/null || true
-                    warp-cli --accept-tos mode proxy
-                    warp-cli --accept-tos proxy port 40000
-                    warp-cli --accept-tos tunnel protocol set MASQUE 2>/dev/null || true
-                    warp-cli --accept-tos connect
-                    '''
-                    res = subprocess.run(['bash', '-c', install_warp_sh], capture_output=True, text=True, timeout=180)
-                    if res.returncode != 0:
-                        err_detail = (res.stderr or res.stdout or '安装失败').strip()
-                        return self.reply_json(500, {'ok': False, 'error': f'安装失败: {err_detail}'})
-
-                    # 自动开启 WARP 并热重载
-                    with data_lock:
-                        data['warp_enabled'] = True
-                    save_data()
-                    try:
-                        subprocess.run(['/etc/hysteria/toggle_warp.sh', 'enable'], capture_output=True, timeout=10)
-                    except Exception:
-                        pass
-
-                    return self.reply_json(200, {'ok': True, 'message': 'Cloudflare WARP 客户端安装成功并已就绪！'})
-                except Exception as e:
-                    return self.reply_json(500, {'ok': False, 'error': f'执行异常: {str(e)}'})
 
             if subpath == 'user-config' or subpath.startswith('user-config?'):
                 if not self.is_authenticated():
