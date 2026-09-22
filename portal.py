@@ -1633,7 +1633,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
   </section>
 
   <!-- 区块 2: Cloudflare WARP 智能分流出口 -->
-  <section class="card">
+  <section class="card warp-section">
     <div class="user-header">
       <div>
         <h2>⚡ Cloudflare WARP 智能分流出口 (AI 加速)</h2>
@@ -1645,12 +1645,39 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
         <button class="toggle-btn off" id="btn-toggle-warp" type="button">切换中...</button>
       </div>
     </div>
-    <div class="switch-box" id="warp-box" style="margin-bottom:0">
-      <div class="switch-info">
-        <div class="switch-title"><span>🛡️ 防封号与验证码保护机制</span></div>
-        <div class="switch-desc">
-          开启后，针对 OpenAI (chatgpt.com / openai.com / ai.com)、Anthropic (claude.ai)、Google (gemini.google.com / aistudio.google.com) 的出站流量将经由 Cloudflare 干净网络出口，有效避开数据中心 IP 拦截与高频 Cloudflare 盾；其余全球流量均维持 VPS 原生网卡直连。
+
+    <div class="warp-switch-card">
+      <div class="warp-desc-title">🛡️ 出口路由与防封号保护机制</div>
+      <p class="warp-desc-text">
+        开启后，名单内的目标网站出站流量将由 Cloudflare WARP 干净网络出口分流，有效避开数据中心 IP 拦截与高频验证码挑战；其余全球网站维持原生网卡直连。
+      </p>
+    </div>
+
+    <div class="warp-rules-card">
+      <div class="warp-rules-head">
+        <div class="warp-rules-title-box">
+          <span class="warp-rules-title">🎯 自定义分流域名列表 (走 WARP 出口)</span>
+          <span class="warp-count-badge" id="warp-rules-count">加载中...</span>
         </div>
+        <button class="warp-reset-btn" id="btn-reset-warp-rules" type="button" title="恢复为系统推荐的常用 AI 域名规则">恢复预设</button>
+      </div>
+
+      <form class="warp-add-form" id="form-add-warp-rule">
+        <input class="warp-domain-input" id="input-warp-domain" type="text" placeholder="输入要走 WARP 的域名，例如 netflix.com / bing.com" required>
+        <button class="warp-add-btn" type="submit">＋ 添加分流域名</button>
+      </form>
+
+      <div class="warp-presets-bar">
+        <span>常用推荐快捷添加:</span>
+        <a href="javascript:void(0)" class="warp-preset-chip preset-rule" data-domain="netflix.com">+ Netflix</a>
+        <a href="javascript:void(0)" class="warp-preset-chip preset-rule" data-domain="disneyplus.com">+ Disney+</a>
+        <a href="javascript:void(0)" class="warp-preset-chip preset-rule" data-domain="spotify.com">+ Spotify</a>
+        <a href="javascript:void(0)" class="warp-preset-chip preset-rule" data-domain="bing.com">+ Bing/Copilot</a>
+        <a href="javascript:void(0)" class="warp-preset-chip preset-rule" data-domain="twitter.com">+ Twitter/X</a>
+      </div>
+
+      <div class="warp-tags-wrap" id="warp-tags-cloud">
+        <span style="font-size:12px;color:var(--muted)">正在拉取规则...</span>
       </div>
     </div>
   </section>
@@ -3595,6 +3622,12 @@ net.ipv4.tcp_slow_start_after_idle = 0
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
                 with data_lock:
                     enabled = data.get('warp_enabled', False)
+                    rules = list(data.get('warp_rules', [
+                        'ipify.org', 'cloudflare.com',
+                        'openai.com', 'chatgpt.com', 'oaistatic.com', 'oaiusercontent.com', 'ai.com',
+                        'anthropic.com', 'claude.ai',
+                        'gemini.google.com', 'aistudio.google.com', 'generativelanguage.googleapis.com'
+                    ]))
                 import shutil; is_installed = shutil.which('warp-cli') is not None
                 connected = False
                 outbound_ip = ''
@@ -3616,7 +3649,8 @@ net.ipv4.tcp_slow_start_after_idle = 0
                     'installed': is_installed,
                     'enabled': enabled,
                     'connected': connected,
-                    'ip': outbound_ip
+                    'ip': outbound_ip,
+                    'rules': rules
                 })
 
             if subpath == 'user-config' or subpath.startswith('user-config?'):
