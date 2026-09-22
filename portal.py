@@ -2676,7 +2676,10 @@ def serve(path):
                     regenerate_page()
 
                     m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
-                    uri, clash_yaml, sing_json = artifacts(m, auth_override=pwd, name_override=f"Hy2-{user_id}")
+                    uri, clash_yaml, sing_json = artifacts(m, auth_override=pwd, name_override=f"Teyir-Hy2-{user_id}")
+                    with data_lock:
+                        rcfg = dict(data.get('reality_config', {}))
+                    reality_uri = rcfg.get('uri', '')
                     return self.reply_json(200, {
                         'ok': True,
                         'user_id': user_id,
@@ -2685,6 +2688,7 @@ def serve(path):
                         'traffic_gb': traffic_gb,
                         'expires_at': expires,
                         'uri': uri,
+                        'reality_uri': reality_uri,
                         'clash': clash_yaml,
                         'sing_box': sing_json
                     })
