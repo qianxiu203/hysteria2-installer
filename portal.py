@@ -6,8 +6,10 @@ import hashlib
 import hmac
 import html
 import json
+import random
 import re
 import secrets
+import socket
 import subprocess
 import sys
 import threading
@@ -2334,7 +2336,7 @@ def serve(path):
     session_secret = data.get('session_secret', data['auth_hash'])
     meta_path = portal_path.parent / 'client_meta.json'
 
-    data_lock = threading.Lock()
+    data_lock = threading.RLock()
     ip_tracker = {}
     IP_TIMEOUT_SECONDS = 180
     VALID_USER_ID_RE = re.compile(r'^[a-zA-Z0-9_\-\.]{1,64}$')
@@ -2401,15 +2403,30 @@ def serve(path):
             pass
 
     def reload_gost():
-        """通过 systemctl reload 或 SIGHUP 平滑重载 gost 配置。"""
+        """通过 systemctl reload 或 SIGHUP 平滑重载 gost 配置. 未安装 gost 时静默跳过.
+        关键: reload 必须异步执行 (Popen + 短 timeout), 避免 gost 卡住导致 portal do_POST 永久挂起."""
+        if not gost_status():
+            return
         write_gost_config()
-        try:
-            subprocess.run(['systemctl', 'reload', 'gost'], capture_output=True, timeout=3)
-        except Exception:
+        # 异步触发 reload, 进程退出/超时都不阻塞 portal HTTP 响应
+        def _do_reload():
             try:
-                subprocess.run(['systemctl', 'restart', 'gost'], capture_output=True, timeout=5)
+                subprocess.run(['systemctl', 'reload', 'gost'],
+                               capture_output=True, timeout=2)
             except Exception:
-                pass
+                try:
+                    r = subprocess.run(['systemctl', 'show', '-p', 'MainPID', '--value', 'gost'],
+                                       capture_output=True, text=True, timeout=2)
+                    pid = r.stdout.strip()
+                    if pid.isdigit():
+                        subprocess.run(['kill', '-HUP', pid], capture_output=True, timeout=2)
+                except Exception:
+                    try:
+                        subprocess.run(['systemctl', 'restart', 'gost'],
+                                       capture_output=True, timeout=3)
+                    except Exception:
+                        pass
+        threading.Thread(target=_do_reload, daemon=True).start()
 
     def gost_status():
         """检测 gost 服务运行状态。"""
@@ -2570,8 +2587,19 @@ def serve(path):
             self.send_header('Content-Type', 'application/json; charset=utf-8')
             self.send_header('Content-Length', str(len(body)))
             self.send_header('Cache-Control', 'no-store')
+            # BUGFIX portal hang: 强制短连接避免 keepalive 导致 server 端等待 client 下一请求挂死
+            self.send_header('Connection', 'close')
             self.end_headers()
             self.wfile.write(body)
+            try:
+                self.wfile.flush()
+            except Exception:
+                pass
+            try:
+                # 显式关闭 TCP, 防止 HTTP server keepalive 阻塞后续请求
+                self.connection.shutdown(socket.SHUT_WR)
+            except Exception:
+                pass
 
         def check_rate_limit(self, bucket='web'):
             now = time.monotonic()
@@ -2762,6 +2790,102 @@ def serve(path):
                         return self.reply_json(200, {'ok': True, 'message': 'User deleted'})
                     return self.reply_json(404, {'ok': False, 'error': 'User not found'})
 
+                elif sub == 'users/list':
+                    # BUGFIX #10: 商城节点对账用, 列出所有动态用户 (脱敏不返回 password)
+                    now_ts = int(time.time())
+                    users_out = []
+                    with data_lock:
+                        for uid, info in data.get('users', {}).items():
+                            entry = {
+                                'user_id': uid,
+                                'expires_at': info.get('expires_at', 0),
+                                'active': info.get('expires_at', 0) > now_ts,
+                                'traffic_limit_bytes': info.get('limit_bytes', 0),
+                                'traffic_used_bytes': info.get('used_bytes', 0),
+                                'ip_limit': info.get('ip_limit', 0),
+                                'created_at': info.get('created_at', now_ts),
+                            }
+                            users_out.append(entry)
+                    return self.reply_json(200, {'ok': True, 'count': len(users_out), 'users': users_out})
+
+                elif sub == 'proxy-services/add':
+                    # BUGFIX #9: 商城/agent 程序化添加 gost 入站代理账号
+                    ptype = (params.get('protocol') or params.get('type') or 'socks5').lower()
+                    if ptype not in ('socks5', 'http', 'https'):
+                        return self.reply_json(400, {'ok': False, 'error': 'Invalid protocol (socks5|http|https)'})
+                    try:
+                        port = int(params.get('port', 0))
+                    except Exception:
+                        return self.reply_json(400, {'ok': False, 'error': 'Invalid port'})
+                    username = (params.get('username') or '').strip() or secrets.token_hex(4)
+                    password = (params.get('password') or '').strip() or secrets.token_urlsafe(16)
+                    note = (params.get('note') or '').strip()
+
+                    with data_lock:
+                        existing_ports = set(s.get('port') for s in data.get('proxy_services', []))
+                    if port <= 0 or port > 65535:
+                        # BUGFIX: 不再用 socket bind 做端口探测 (在某些环境会卡住),
+                        # 改为纯随机选 + 跳过已知占用端口. 若用户没传 port 则强制要求传.
+                        allocated = None
+                        attempts = 0
+                        while attempts < 50:
+                            attempts += 1
+                            cand = random.randint(30000, 50000)
+                            if 20000 <= cand <= 40000 or cand in existing_ports or cand in (8443, 19898, 40000, 22, 80, 443):
+                                continue
+                            allocated = cand
+                            break
+                        if not allocated:
+                            return self.reply_json(500, {'ok': False, 'error': '请显式指定可用端口 (port), 自动分配失败'})
+                        port = allocated
+                    else:
+                        if port in existing_ports:
+                            return self.reply_json(400, {'ok': False, 'error': f'端口 {port} 已被其他代理服务占用'})
+
+                    proxy_id = secrets.token_hex(6)
+                    now_ts = int(time.time())
+                    with data_lock:
+                        data.setdefault('proxy_services', []).append({
+                            'id': proxy_id,
+                            'type': ptype,
+                            'port': port,
+                            'username': username,
+                            'password': password,
+                            'created_at': now_ts,
+                            'note': note,
+                        })
+                        save_data()
+                    reload_gost()
+
+                    m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+                    host = m.get('public_ip', '127.0.0.1') if m.get('is_insecure') else m.get('server_name', 'localhost')
+                    uri_link = f"{ptype}://{username}:{password}@{host}:{port}"
+                    return self.reply_json(200, {
+                        'ok': True, 'id': proxy_id, 'type': ptype, 'host': host, 'port': port,
+                        'username': username, 'password': password, 'note': note,
+                        'url': uri_link, 'format': f"{host}:{port}:{username}:{password}"
+                    })
+
+                elif sub == 'proxy-services/list':
+                    with data_lock:
+                        items = list(data.get('proxy_services', []))
+                    # 不脱敏 password, 调用方是受信 API key
+                    return self.reply_json(200, {'ok': True, 'count': len(items), 'services': items})
+
+                elif sub == 'proxy-services/delete':
+                    proxy_id = (params.get('id') or '').strip()
+                    if not proxy_id:
+                        return self.reply_json(400, {'ok': False, 'error': 'Missing id'})
+                    with data_lock:
+                        services = data.get('proxy_services', [])
+                        new_services = [s for s in services if s.get('id') != proxy_id]
+                        if len(new_services) == len(services):
+                            return self.reply_json(404, {'ok': False, 'error': 'Proxy service not found'})
+                        data['proxy_services'] = new_services
+                    save_data()
+                    reload_gost()
+                    return self.reply_json(200, {'ok': True, 'message': 'Proxy service deleted'})
+
                 return self.reply_json(404, {'ok': False, 'error': 'API endpoint not found'})
 
             # 普通 Web 请求限流
@@ -2802,9 +2926,6 @@ def serve(path):
                         ptype = form.get('type', ['socks5'])[0]
                         if ptype not in ('socks5', 'http', 'https'):
                             return self.reply_json(400, {'ok': False, 'error': 'Invalid proxy type'})
-                        
-                        import random
-                        import socket
 
                         raw_port = form.get('port', [''])[0].strip()
                         port = 0
@@ -3368,6 +3489,27 @@ net.ipv4.tcp_slow_start_after_idle = 0
                     with data_lock:
                         users_count = len(data.get('users', {}))
                     return self.reply_json(200, {'ok': True, 'meta': m, 'users_count': users_count, 'time': int(time.time())})
+                if sub == 'users/list':
+                    # BUGFIX #10: 商城节点对账用, 列出所有动态用户 (脱敏不返回 password)
+                    now_ts = int(time.time())
+                    users_out = []
+                    with data_lock:
+                        for uid, info in data.get('users', {}).items():
+                            users_out.append({
+                                'user_id': uid,
+                                'expires_at': info.get('expires_at', 0),
+                                'active': info.get('expires_at', 0) > now_ts,
+                                'traffic_limit_bytes': info.get('limit_bytes', 0),
+                                'traffic_used_bytes': info.get('used_bytes', 0),
+                                'ip_limit': info.get('ip_limit', 0),
+                                'created_at': info.get('created_at', now_ts),
+                                'status': info.get('status', 'active'),
+                            })
+                    return self.reply_json(200, {'ok': True, 'count': len(users_out), 'users': users_out})
+                if sub == 'proxy-services/list':
+                    with data_lock:
+                        items = list(data.get('proxy_services', []))
+                    return self.reply_json(200, {'ok': True, 'count': len(items), 'services': items})
                 return self.reply_json(404, {'ok': False, 'error': 'API endpoint not found'})
 
             if not self.check_rate_limit(bucket='web'):
@@ -3719,12 +3861,22 @@ net.ipv4.tcp_slow_start_after_idle = 0
             self.send_header('Referrer-Policy', 'no-referrer')
             self.send_header('X-Robots-Tag', 'noindex, nofollow, noarchive')
             self.send_header('Content-Security-Policy', content_policy())
+            # BUGFIX portal hang: 强制 Connection: close, HTTP server 处理完即关闭 TCP
+            self.send_header('Connection', 'close')
             if www_auth:
                 self.send_header('WWW-Authenticate', 'Basic realm="Private", charset="UTF-8"')
             if code == 429:
                 self.send_header('Retry-After', '60')
             self.end_headers()
             self.wfile.write(body)
+            try:
+                self.wfile.flush()
+            except Exception:
+                pass
+            try:
+                self.connection.shutdown(socket.SHUT_WR)
+            except Exception:
+                pass
 
     class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
         daemon_threads = True
