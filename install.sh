@@ -98,7 +98,7 @@ install_binary() {
     if curl -fL --progress-bar "$DOWNLOAD_URL" -o "${HY2_BIN}.tmp"; then
         mv "${HY2_BIN}.tmp" "$HY2_BIN"
         chmod +x "$HY2_BIN"
-        log_info "Hysteria 2 二进制安装成功！版本信息: $($HY2_BIN version | head -n 1)"
+        log_info "Hysteria 2 二进制安装成功！版本信息: $($HY2_BIN version 2>&1 | grep -E '^Version:' | head -n1 || echo '未知')"
     else
         rm -f "${HY2_BIN}.tmp"
         log_err "下载失败，请检查网络连接。"
@@ -333,14 +333,23 @@ PYPORT
 
 clear_all_hopping_rules() {
     # 彻底扫描并清理所有历史残留的 REDIRECT 到 hysteria 端口的 iptables 规则，防止旧端口重定向死循环
+    # BUGFIX #12: 同时清理 PREROUTING + OUTPUT 链
     while iptables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | grep -q "REDIRECT.*udp"; do
         local line_num=$(iptables -t nat -L PREROUTING -n --line-numbers | grep "REDIRECT.*udp" | head -n 1 | awk '{print $1}')
         [ -n "$line_num" ] && iptables -t nat -D PREROUTING "$line_num" 2>/dev/null || break
+    done
+    while iptables -t nat -L OUTPUT -n --line-numbers 2>/dev/null | grep -q "REDIRECT.*udp"; do
+        local line_num=$(iptables -t nat -L OUTPUT -n --line-numbers | grep "REDIRECT.*udp" | head -n 1 | awk '{print $1}')
+        [ -n "$line_num" ] && iptables -t nat -D OUTPUT "$line_num" 2>/dev/null || break
     done
     if command -v ip6tables >/dev/null 2>&1; then
         while ip6tables -t nat -L PREROUTING -n --line-numbers 2>/dev/null | grep -q "REDIRECT.*udp"; do
             local line_num=$(ip6tables -t nat -L PREROUTING -n --line-numbers | grep "REDIRECT.*udp" | head -n 1 | awk '{print $1}')
             [ -n "$line_num" ] && ip6tables -t nat -D PREROUTING "$line_num" 2>/dev/null || break
+        done
+        while ip6tables -t nat -L OUTPUT -n --line-numbers 2>/dev/null | grep -q "REDIRECT.*udp"; do
+            local line_num=$(ip6tables -t nat -L OUTPUT -n --line-numbers | grep "REDIRECT.*udp" | head -n 1 | awk '{print $1}')
+            [ -n "$line_num" ] && ip6tables -t nat -D OUTPUT "$line_num" 2>/dev/null || break
         done
     fi
     systemctl disable --now hy2-iptables.service >/dev/null 2>&1 || true
@@ -357,9 +366,12 @@ setup_iptables_port_hopping() {
     clear_all_hopping_rules
     
     # 注入新规则 (IPv4 + IPv6)
+    # BUGFIX #12: 同时加 PREROUTING + OUTPUT 链, 这样本机 loopback 拨测也能跳到主监听端口
     iptables -t nat -A PREROUTING -p udp --dport "${s_port}:${e_port}" -j REDIRECT --to-ports "${l_port}"
+    iptables -t nat -A OUTPUT     -p udp --dport "${s_port}:${e_port}" -j REDIRECT --to-ports "${l_port}"
     if command -v ip6tables >/dev/null 2>&1; then
         ip6tables -t nat -A PREROUTING -p udp --dport "${s_port}:${e_port}" -j REDIRECT --to-ports "${l_port}" 2>/dev/null || true
+        ip6tables -t nat -A OUTPUT     -p udp --dport "${s_port}:${e_port}" -j REDIRECT --to-ports "${l_port}" 2>/dev/null || true
     fi
 
     # 保存规则持久化（兼顾 netfilter-persistent 与原生 systemd 自愈守护）
@@ -379,7 +391,7 @@ Before=hysteria-server.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c "iptables -t nat -C PREROUTING -p udp --dport ${s_port}:${e_port} -j REDIRECT --to-ports ${l_port} 2>/dev/null || iptables -t nat -A PREROUTING -p udp --dport ${s_port}:${e_port} -j REDIRECT --to-ports ${l_port}"
+ExecStart=/bin/bash -c "iptables -t nat -C PREROUTING -p udp --dport ${s_port}:${e_port} -j REDIRECT --to-ports ${l_port} 2>/dev/null || iptables -t nat -A PREROUTING -p udp --dport ${s_port}:${e_port} -j REDIRECT --to-ports ${l_port}; iptables -t nat -C OUTPUT -p udp --dport ${s_port}:${e_port} -j REDIRECT --to-ports ${l_port} 2>/dev/null || iptables -t nat -A OUTPUT -p udp --dport ${s_port}:${e_port} -j REDIRECT --to-ports ${l_port}"
 
 [Install]
 WantedBy=multi-user.target
@@ -387,7 +399,7 @@ EOF
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl enable hy2-iptables.service >/dev/null 2>&1 || true
 
-    log_info "端口跳跃 iptables 规则与开机持久化守护已生效。"
+    log_info "端口跳跃 iptables 规则与开机持久化守护已生效 (PREROUTING + OUTPUT 双链)."
 }
 
 # 5. 生成服务端配置文件与 Systemd 服务
@@ -587,9 +599,19 @@ EOF
 setup_systemd() {
     log_step "配置 systemd 系统守护服务: ${HY2_SERVICE}..."
     
-    # 系统内核网络与 UDP 缓冲优化
-    sysctl -w net.core.rmem_max=8388608 >/dev/null 2>&1 || true
-    sysctl -w net.core.wmem_max=8388608 >/dev/null 2>&1 || true
+    # 系统内核网络与 UDP 缓冲优化 (BUGFIX #13: 同时持久化到 /etc/sysctl.d/)
+    cat > /etc/sysctl.d/99-hysteria2.conf <<EOF
+# Hysteria 2 内核网络与 UDP 缓冲调优 (由 hysteria2-installer 自动生成)
+net.core.rmem_max = 8388608
+net.core.wmem_max = 8388608
+net.core.rmem_default = 1048576
+net.core.wmem_default = 1048576
+net.core.netdev_max_backlog = 5000
+net.ipv4.udp_mem = 102400 873800 16777216
+net.ipv4.udp_rmem_min = 8192
+net.ipv4.udp_wmem_min = 8192
+EOF
+    sysctl -p /etc/sysctl.d/99-hysteria2.conf >/dev/null 2>&1 || true
     
     cat > "$HY2_SERVICE" <<EOF
 [Unit]
@@ -659,8 +681,10 @@ import hashlib
 import hmac
 import html
 import json
+import random
 import re
 import secrets
+import socket
 import subprocess
 import sys
 import threading
@@ -881,10 +905,94 @@ footer{display:flex;justify-content:space-between;margin-top:32px;color:#879996;
 .bbr-stat-val { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--accent); font-weight: 800; font-size: 14px; }
 .bbr-sub-text { font-size: 12px; color: var(--muted); margin-top: 3px; }
 
+/* 全局自定义高颜值确认弹窗与 Toast 样式 */
+.confirm-card { width: 100%; max-width: 440px; background: #ffffff; border: 1.5px solid var(--line); border-radius: 20px; padding: 24px; box-shadow: 0 20px 50px rgba(18, 43, 49, 0.22); animation: scaleUp .18s cubic-bezier(0.16, 1, 0.3, 1); }
+@keyframes scaleUp { from { opacity: 0; transform: scale(0.94); } to { opacity: 1; transform: scale(1); } }
+.confirm-icon-box { width: 48px; height: 48px; border-radius: 14px; background: #eaf5ef; color: var(--accent); display: flex; align-items: center; justify-content: center; font-size: 24px; margin-bottom: 14px; }
+.confirm-icon-box.danger { background: #fdf2f2; color: var(--danger); }
+.confirm-icon-box.warn { background: #fff8e6; color: #d46b08; }
+.confirm-title { font-size: 17px; font-weight: 800; color: var(--ink); margin-bottom: 8px; }
+.confirm-text { font-size: 13px; color: var(--muted); line-height: 1.6; margin-bottom: 22px; }
+.confirm-actions { display: flex; gap: 10px; justify-content: flex-end; }
+.confirm-btn { height: 40px; padding: 0 18px; border-radius: 10px; font-size: 13px; font-weight: 700; cursor: pointer; transition: all .15s ease; border: 1px solid transparent; }
+.confirm-btn.cancel { background: #f3f7f6; color: var(--ink); border-color: #d8e5e2; }
+.confirm-btn.cancel:hover { background: #e5eeec; }
+.confirm-btn.primary { background: var(--accent); color: #fff; }
+.confirm-btn.primary:hover { filter: brightness(0.92); }
+.confirm-btn.danger { background: var(--danger); color: #fff; }
+.confirm-btn.danger:hover { filter: brightness(0.92); }
+
+/* 全局 Toast 通知栏 */
+.toast-container { position: fixed; top: 24px; right: 24px; z-index: 99999; display: flex; flex-direction: column; gap: 10px; pointer-events: none; }
+.toast-item { background: #122b31; color: #ffffff; border-radius: 12px; padding: 12px 20px; font-size: 13px; font-weight: 650; box-shadow: 0 10px 30px rgba(0,0,0,0.18); display: flex; align-items: center; gap: 10px; pointer-events: auto; animation: toastIn .2s cubic-bezier(0.16, 1, 0.3, 1); }
+.toast-item.success { background: #087f74; }
+.toast-item.error { background: #cf3c3c; }
+@keyframes toastIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+
+
 
 """
 
 SCRIPT = """
+
+// 全局高颜值 Promise 确认框与 Toast 机制
+function showToast(msg, type = 'info') {
+  const container = document.getElementById('toast-container');
+  if (!container) { alert(msg); return; }
+  const toast = document.createElement('div');
+  toast.className = 'toast-item ' + type;
+  const icon = type === 'success' ? '✓ ' : (type === 'error' ? '✕ ' : 'ℹ ');
+  toast.textContent = icon + msg;
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.style.transition = 'all .25s ease';
+    toast.style.opacity = '0';
+    toast.style.transform = 'translateY(-8px)';
+    setTimeout(() => toast.remove(), 250);
+  }, 2800);
+}
+
+function showConfirm(options = {}) {
+  return new Promise((resolve) => {
+    const modal = document.getElementById('custom-confirm-modal');
+    const titleEl = document.getElementById('confirm-title');
+    const textEl = document.getElementById('confirm-text');
+    const iconEl = document.getElementById('confirm-icon');
+    const okBtn = document.getElementById('confirm-btn-ok');
+    const cancelBtn = document.getElementById('confirm-btn-cancel');
+
+    if (!modal || !titleEl || !textEl || !okBtn || !cancelBtn) {
+      resolve(confirm(options.text || '确定执行吗？'));
+      return;
+    }
+
+    titleEl.textContent = options.title || '操作确认';
+    textEl.textContent = options.text || '确定要继续执行吗？';
+    if (iconEl) {
+      iconEl.textContent = options.icon || '💡';
+      iconEl.className = 'confirm-icon-box ' + (options.isDanger ? 'danger' : (options.isWarn ? 'warn' : ''));
+    }
+
+    okBtn.textContent = options.confirmText || '确定执行';
+    okBtn.className = 'confirm-btn ' + (options.isDanger ? 'danger' : 'primary');
+
+    modal.classList.add('show');
+
+    function cleanup(result) {
+      modal.classList.remove('show');
+      okBtn.removeEventListener('click', onOk);
+      cancelBtn.removeEventListener('click', onCancel);
+      resolve(result);
+    }
+
+    function onOk() { cleanup(true); }
+    function onCancel() { cleanup(false); }
+
+    okBtn.addEventListener('click', onOk);
+    cancelBtn.addEventListener('click', onCancel);
+  });
+}
+
 function switchTab(tabId) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
@@ -1094,15 +1202,20 @@ if (btnInstallWarp) {
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
       });
+      if (!res.ok) {
+        const errText = await res.text();
+        showToast('安装失败 (HTTP ' + res.status + '): ' + errText, 'error');
+        return;
+      }
       const json = await res.json();
       if (json.ok) {
-        alert(json.message || 'Cloudflare WARP 安装成功！服务已自动就绪。');
+        showToast(json.message || 'Cloudflare WARP 安装成功！服务已自动就绪。', 'success');
         await checkWarpStatus();
       } else {
-        alert(json.error || '安装失败，请检查网络');
+        showToast(json.error || '安装失败，请检查网络', 'error');
       }
     } catch (e) {
-      alert('安装请求异常: ' + e.message);
+      showToast('安装请求异常: ' + e.message, 'error');
     } finally {
       btnInstallWarp.disabled = false;
       btnInstallWarp.textContent = origText;
@@ -1346,7 +1459,13 @@ document.querySelectorAll('.btn-apply-bbr').forEach(btn => {
   btn.addEventListener('click', async () => {
     const ver = btn.getAttribute('data-version') || 'v1';
     const label = { v1: 'BBR V1 (经典官方)', v2: 'BBR V2 (低丢包)', v3: 'BBR V3 (极限吞吐)' }[ver];
-    if (!confirm('确定要一键配置 ' + label + ' 加速引擎吗？系统将自动写入内核持久化配置，部分环境重启后生效。')) return;
+    const confirmed = await showConfirm({
+      title: '开启 ' + label + ' 加速引擎',
+      text: '系统将自动将拥塞控制与排队规则写入 Linux 内核持久化配置（/etc/sysctl.d/99-bbr.conf）。配置后可能需要安全重启服务器以完成生效。',
+      icon: '🚀',
+      confirmText: '立即开启 ' + ver.toUpperCase()
+    });
+    if (!confirmed) return;
 
     btn.disabled = true;
     const orig = btn.textContent;
@@ -1360,10 +1479,10 @@ document.querySelectorAll('.btn-apply-bbr').forEach(btn => {
       });
       const json = await res.json();
       if (json.ok) {
-        alert(json.message || '配置成功！');
+        showToast(json.message || '配置成功！', 'success');
         await checkBbrStatus();
       } else {
-        alert(json.error || '配置失败');
+        showToast(json.error || '配置失败', 'error');
       }
     } catch (e) {
       alert('请求异常: ' + e.message);
@@ -1376,7 +1495,14 @@ document.querySelectorAll('.btn-apply-bbr').forEach(btn => {
 
 if (btnRebootServer) {
   btnRebootServer.addEventListener('click', async () => {
-    if (!confirm("确定要立即安全重启服务器以生效新 BBR 内核网络参数吗？服务器将在 10 秒后完成重启，页面将自动重连。")) return;
+    const confirmed = await showConfirm({
+      title: '安全重启服务器',
+      text: '确定要立即重启服务器以完成新 BBR 内核网络参数生效吗？服务器将在 10 秒内安全完成重启，页面将自动发起 25 秒倒计时并在就绪后重连。',
+      icon: '🔄',
+      confirmText: '确定立即重启',
+      isWarn: true
+    });
+    if (!confirmed) return;
     btnRebootServer.disabled = true;
     btnRebootServer.textContent = '⏳ 重启指令已发送...';
     try {
@@ -2184,7 +2310,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
   </section>
 
   <!-- 区块 2: Cloudflare WARP 智能分流出口 -->
-  <section class="card">
+  <section class="card warp-section">
     <div class="user-header">
       <div>
         <h2>⚡ Cloudflare WARP 智能分流出口 (AI 加速)</h2>
@@ -2196,12 +2322,39 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
         <button class="toggle-btn off" id="btn-toggle-warp" type="button">切换中...</button>
       </div>
     </div>
-    <div class="switch-box" id="warp-box" style="margin-bottom:0">
-      <div class="switch-info">
-        <div class="switch-title"><span>🛡️ 防封号与验证码保护机制</span></div>
-        <div class="switch-desc">
-          开启后，针对 OpenAI (chatgpt.com / openai.com / ai.com)、Anthropic (claude.ai)、Google (gemini.google.com / aistudio.google.com) 的出站流量将经由 Cloudflare 干净网络出口，有效避开数据中心 IP 拦截与高频 Cloudflare 盾；其余全球流量均维持 VPS 原生网卡直连。
+
+    <div class="warp-switch-card">
+      <div class="warp-desc-title">🛡️ 出口路由与防封号保护机制</div>
+      <p class="warp-desc-text">
+        开启后，名单内的目标网站出站流量将由 Cloudflare WARP 干净网络出口分流，有效避开数据中心 IP 拦截与高频验证码挑战；其余全球网站维持原生网卡直连。
+      </p>
+    </div>
+
+    <div class="warp-rules-card">
+      <div class="warp-rules-head">
+        <div class="warp-rules-title-box">
+          <span class="warp-rules-title">🎯 自定义分流域名列表 (走 WARP 出口)</span>
+          <span class="warp-count-badge" id="warp-rules-count">加载中...</span>
         </div>
+        <button class="warp-reset-btn" id="btn-reset-warp-rules" type="button" title="恢复为系统推荐的常用 AI 域名规则">恢复预设</button>
+      </div>
+
+      <form class="warp-add-form" id="form-add-warp-rule">
+        <input class="warp-domain-input" id="input-warp-domain" type="text" placeholder="输入要走 WARP 的域名，例如 netflix.com / bing.com" required>
+        <button class="warp-add-btn" type="submit">＋ 添加分流域名</button>
+      </form>
+
+      <div class="warp-presets-bar">
+        <span>常用推荐快捷添加:</span>
+        <a href="javascript:void(0)" class="warp-preset-chip preset-rule" data-domain="netflix.com">+ Netflix</a>
+        <a href="javascript:void(0)" class="warp-preset-chip preset-rule" data-domain="disneyplus.com">+ Disney+</a>
+        <a href="javascript:void(0)" class="warp-preset-chip preset-rule" data-domain="spotify.com">+ Spotify</a>
+        <a href="javascript:void(0)" class="warp-preset-chip preset-rule" data-domain="bing.com">+ Bing/Copilot</a>
+        <a href="javascript:void(0)" class="warp-preset-chip preset-rule" data-domain="twitter.com">+ Twitter/X</a>
+      </div>
+
+      <div class="warp-tags-wrap" id="warp-tags-cloud">
+        <span style="font-size:12px;color:var(--muted)">正在拉取规则...</span>
       </div>
     </div>
   </section>
@@ -2519,6 +2672,21 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
     </div>
   </div>
 </div>
+
+
+<!-- 全局高颜值自定义确认弹窗 -->
+<div class="modal-backdrop" id="custom-confirm-modal">
+  <div class="confirm-card">
+    <div class="confirm-icon-box" id="confirm-icon">🚀</div>
+    <div class="confirm-title" id="confirm-title">请确认操作</div>
+    <div class="confirm-text" id="confirm-text">确定要执行此操作吗？</div>
+    <div class="confirm-actions">
+      <button class="confirm-btn cancel" id="confirm-btn-cancel" type="button">取消</button>
+      <button class="confirm-btn primary" id="confirm-btn-ok" type="button">确定执行</button>
+    </div>
+  </div>
+</div>
+<div class="toast-container" id="toast-container"></div>
 
 <!-- 专属用户连接模态框 -->
 <div class="modal-backdrop" id="user-modal">
@@ -2843,7 +3011,7 @@ def serve(path):
     session_secret = data.get('session_secret', data['auth_hash'])
     meta_path = portal_path.parent / 'client_meta.json'
 
-    data_lock = threading.Lock()
+    data_lock = threading.RLock()
     ip_tracker = {}
     IP_TIMEOUT_SECONDS = 180
     VALID_USER_ID_RE = re.compile(r'^[a-zA-Z0-9_\-\.]{1,64}$')
@@ -2910,15 +3078,30 @@ def serve(path):
             pass
 
     def reload_gost():
-        """通过 systemctl reload 或 SIGHUP 平滑重载 gost 配置。"""
+        """通过 systemctl reload 或 SIGHUP 平滑重载 gost 配置. 未安装 gost 时静默跳过.
+        关键: reload 必须异步执行 (Popen + 短 timeout), 避免 gost 卡住导致 portal do_POST 永久挂起."""
+        if not gost_status():
+            return
         write_gost_config()
-        try:
-            subprocess.run(['systemctl', 'reload', 'gost'], capture_output=True, timeout=3)
-        except Exception:
+        # 异步触发 reload, 进程退出/超时都不阻塞 portal HTTP 响应
+        def _do_reload():
             try:
-                subprocess.run(['systemctl', 'restart', 'gost'], capture_output=True, timeout=5)
+                subprocess.run(['systemctl', 'reload', 'gost'],
+                               capture_output=True, timeout=2)
             except Exception:
-                pass
+                try:
+                    r = subprocess.run(['systemctl', 'show', '-p', 'MainPID', '--value', 'gost'],
+                                       capture_output=True, text=True, timeout=2)
+                    pid = r.stdout.strip()
+                    if pid.isdigit():
+                        subprocess.run(['kill', '-HUP', pid], capture_output=True, timeout=2)
+                except Exception:
+                    try:
+                        subprocess.run(['systemctl', 'restart', 'gost'],
+                                       capture_output=True, timeout=3)
+                    except Exception:
+                        pass
+        threading.Thread(target=_do_reload, daemon=True).start()
 
     def gost_status():
         """检测 gost 服务运行状态。"""
@@ -3079,8 +3262,19 @@ def serve(path):
             self.send_header('Content-Type', 'application/json; charset=utf-8')
             self.send_header('Content-Length', str(len(body)))
             self.send_header('Cache-Control', 'no-store')
+            # BUGFIX portal hang: 强制短连接避免 keepalive 导致 server 端等待 client 下一请求挂死
+            self.send_header('Connection', 'close')
             self.end_headers()
             self.wfile.write(body)
+            try:
+                self.wfile.flush()
+            except Exception:
+                pass
+            try:
+                # 显式关闭 TCP, 防止 HTTP server keepalive 阻塞后续请求
+                self.connection.shutdown(socket.SHUT_WR)
+            except Exception:
+                pass
 
         def check_rate_limit(self, bucket='web'):
             now = time.monotonic()
@@ -3217,7 +3411,10 @@ def serve(path):
                     regenerate_page()
 
                     m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
-                    uri, clash_yaml, sing_json = artifacts(m, auth_override=pwd, name_override=f"Hy2-{user_id}")
+                    uri, clash_yaml, sing_json = artifacts(m, auth_override=pwd, name_override=f"Teyir-Hy2-{user_id}")
+                    with data_lock:
+                        rcfg = dict(data.get('reality_config', {}))
+                    reality_uri = rcfg.get('uri', '')
                     return self.reply_json(200, {
                         'ok': True,
                         'user_id': user_id,
@@ -3226,6 +3423,7 @@ def serve(path):
                         'traffic_gb': traffic_gb,
                         'expires_at': expires,
                         'uri': uri,
+                        'reality_uri': reality_uri,
                         'clash': clash_yaml,
                         'sing_box': sing_json
                     })
@@ -3267,6 +3465,102 @@ def serve(path):
                         return self.reply_json(200, {'ok': True, 'message': 'User deleted'})
                     return self.reply_json(404, {'ok': False, 'error': 'User not found'})
 
+                elif sub == 'users/list':
+                    # BUGFIX #10: 商城节点对账用, 列出所有动态用户 (脱敏不返回 password)
+                    now_ts = int(time.time())
+                    users_out = []
+                    with data_lock:
+                        for uid, info in data.get('users', {}).items():
+                            entry = {
+                                'user_id': uid,
+                                'expires_at': info.get('expires_at', 0),
+                                'active': info.get('expires_at', 0) > now_ts,
+                                'traffic_limit_bytes': info.get('limit_bytes', 0),
+                                'traffic_used_bytes': info.get('used_bytes', 0),
+                                'ip_limit': info.get('ip_limit', 0),
+                                'created_at': info.get('created_at', now_ts),
+                            }
+                            users_out.append(entry)
+                    return self.reply_json(200, {'ok': True, 'count': len(users_out), 'users': users_out})
+
+                elif sub == 'proxy-services/add':
+                    # BUGFIX #9: 商城/agent 程序化添加 gost 入站代理账号
+                    ptype = (params.get('protocol') or params.get('type') or 'socks5').lower()
+                    if ptype not in ('socks5', 'http', 'https'):
+                        return self.reply_json(400, {'ok': False, 'error': 'Invalid protocol (socks5|http|https)'})
+                    try:
+                        port = int(params.get('port', 0))
+                    except Exception:
+                        return self.reply_json(400, {'ok': False, 'error': 'Invalid port'})
+                    username = (params.get('username') or '').strip() or secrets.token_hex(4)
+                    password = (params.get('password') or '').strip() or secrets.token_urlsafe(16)
+                    note = (params.get('note') or '').strip()
+
+                    with data_lock:
+                        existing_ports = set(s.get('port') for s in data.get('proxy_services', []))
+                    if port <= 0 or port > 65535:
+                        # BUGFIX: 不再用 socket bind 做端口探测 (在某些环境会卡住),
+                        # 改为纯随机选 + 跳过已知占用端口. 若用户没传 port 则强制要求传.
+                        allocated = None
+                        attempts = 0
+                        while attempts < 50:
+                            attempts += 1
+                            cand = random.randint(30000, 50000)
+                            if 20000 <= cand <= 40000 or cand in existing_ports or cand in (8443, 19898, 40000, 22, 80, 443):
+                                continue
+                            allocated = cand
+                            break
+                        if not allocated:
+                            return self.reply_json(500, {'ok': False, 'error': '请显式指定可用端口 (port), 自动分配失败'})
+                        port = allocated
+                    else:
+                        if port in existing_ports:
+                            return self.reply_json(400, {'ok': False, 'error': f'端口 {port} 已被其他代理服务占用'})
+
+                    proxy_id = secrets.token_hex(6)
+                    now_ts = int(time.time())
+                    with data_lock:
+                        data.setdefault('proxy_services', []).append({
+                            'id': proxy_id,
+                            'type': ptype,
+                            'port': port,
+                            'username': username,
+                            'password': password,
+                            'created_at': now_ts,
+                            'note': note,
+                        })
+                        save_data()
+                    reload_gost()
+
+                    m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+                    host = m.get('public_ip', '127.0.0.1') if m.get('is_insecure') else m.get('server_name', 'localhost')
+                    uri_link = f"{ptype}://{username}:{password}@{host}:{port}"
+                    return self.reply_json(200, {
+                        'ok': True, 'id': proxy_id, 'type': ptype, 'host': host, 'port': port,
+                        'username': username, 'password': password, 'note': note,
+                        'url': uri_link, 'format': f"{host}:{port}:{username}:{password}"
+                    })
+
+                elif sub == 'proxy-services/list':
+                    with data_lock:
+                        items = list(data.get('proxy_services', []))
+                    # 不脱敏 password, 调用方是受信 API key
+                    return self.reply_json(200, {'ok': True, 'count': len(items), 'services': items})
+
+                elif sub == 'proxy-services/delete':
+                    proxy_id = (params.get('id') or '').strip()
+                    if not proxy_id:
+                        return self.reply_json(400, {'ok': False, 'error': 'Missing id'})
+                    with data_lock:
+                        services = data.get('proxy_services', [])
+                        new_services = [s for s in services if s.get('id') != proxy_id]
+                        if len(new_services) == len(services):
+                            return self.reply_json(404, {'ok': False, 'error': 'Proxy service not found'})
+                        data['proxy_services'] = new_services
+                    save_data()
+                    reload_gost()
+                    return self.reply_json(200, {'ok': True, 'message': 'Proxy service deleted'})
+
                 return self.reply_json(404, {'ok': False, 'error': 'API endpoint not found'})
 
             # 普通 Web 请求限流
@@ -3307,9 +3601,6 @@ def serve(path):
                         ptype = form.get('type', ['socks5'])[0]
                         if ptype not in ('socks5', 'http', 'https'):
                             return self.reply_json(400, {'ok': False, 'error': 'Invalid proxy type'})
-                        
-                        import random
-                        import socket
 
                         raw_port = form.get('port', [''])[0].strip()
                         port = 0
@@ -3555,14 +3846,22 @@ WantedBy=multi-user.target
                             if not in_acl:
                                 clean_lines.append(line)
 
+                        cfg_text = '\n'.join(clean_lines)
                         if new_state:
-                            clean_lines.append('acl:')
-                            clean_lines.append('  inline:')
-                            for d in current_rules:
-                                clean_lines.append(f'    - warp_socks(suffix:{d})')
-                            clean_lines.append('    - direct_ipv4(all)')
+                            if 'name: warp_socks' not in cfg_text:
+                                warp_outbound = "\n  - name: warp_socks\n    type: socks5\n    socks5:\n      addr: 127.0.0.1:40000"
+                                if 'outbounds:' in cfg_text:
+                                    cfg_text = cfg_text.replace('outbounds:', 'outbounds:' + warp_outbound)
+                                else:
+                                    cfg_text += '\noutbounds:' + warp_outbound
 
-                        cfg_path.write_text('\n'.join(clean_lines) + '\n', encoding='utf-8')
+                            acl_block = '\nacl:\n  inline:\n'
+                            for d in current_rules:
+                                acl_block += f'    - warp_socks(suffix:{d})\n'
+                            acl_block += '    - direct_ipv4(all)\n'
+                            cfg_text += acl_block
+
+                        cfg_path.write_text(cfg_text.strip() + '\n', encoding='utf-8')
                         subprocess.run(['systemctl', 'restart', 'hysteria-server'], capture_output=True, timeout=10)
 
                     threading.Thread(target=apply_hy2_acl, daemon=True).start()
@@ -3797,6 +4096,60 @@ net.ipv4.tcp_slow_start_after_idle = 0
                 self.end_headers()
                 return
 
+            if self.path == prefix + 'install-warp':
+                if not self.is_authenticated():
+                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+                try:
+                    install_warp_sh = '''
+                    set -eo pipefail
+                    export DEBIAN_FRONTEND=noninteractive
+                    if which apt-get >/dev/null 2>&1; then
+                        apt-get update && apt-get install -y gnupg lsb-release curl
+                        CODENAME=$(grep VERSION_CODENAME /etc/os-release | cut -d= -f2)
+                        CODENAME=${CODENAME:-bookworm}
+                        curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+                        curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /etc/apt/trusted.gpg.d/cloudflare-warp.gpg 2>/dev/null || true
+                        echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ ${CODENAME} main" | tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null
+                        apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 6E2DD2174FA1C3BA 2>/dev/null || true
+                        apt-get update -o Acquire::AllowInsecureRepositories=true -y || apt-get update -y
+                        apt-get install -y --no-install-recommends cloudflare-warp
+                    elif which yum >/dev/null 2>&1; then
+                        yum-config-manager --add-repo https://pkg.cloudflareclient.com/cloudflare-warp-ascii.repo 2>/dev/null || true
+                        yum install -y cloudflare-warp
+                    fi
+
+                    if ! which warp-cli >/dev/null 2>&1; then
+                        echo "未能成功安装 warp-cli 客户端！" >&2
+                        exit 1
+                    fi
+
+                    systemctl enable --now warp-svc
+                    sleep 2
+                    warp-cli --accept-tos registration new 2>/dev/null || warp-cli --accept-tos register 2>/dev/null || true
+                    warp-cli --accept-tos mode proxy
+                    warp-cli --accept-tos proxy port 40000
+                    warp-cli --accept-tos tunnel protocol set MASQUE 2>/dev/null || true
+                    warp-cli --accept-tos connect
+                    '''
+                    res = subprocess.run(['bash', '-c', install_warp_sh], capture_output=True, text=True, timeout=180)
+                    if res.returncode != 0:
+                        err_detail = (res.stderr or res.stdout or '安装失败').strip()
+                        return self.reply_json(500, {'ok': False, 'error': f'安装失败: {err_detail}'})
+
+                    # 自动开启 WARP 并热重载
+                    with data_lock:
+                        data['warp_enabled'] = True
+                    save_data()
+                    try:
+                        subprocess.run(['/etc/hysteria/toggle_warp.sh', 'enable'], capture_output=True, timeout=10)
+                    except Exception:
+                        pass
+
+                    return self.reply_json(200, {'ok': True, 'message': 'Cloudflare WARP 客户端安装成功并已就绪！'})
+                except Exception as e:
+                    return self.reply_json(500, {'ok': False, 'error': f'执行异常: {str(e)}'})
+
+
             return self.reply(404, b'Not found')
 
         def do_GET(self):
@@ -3811,6 +4164,27 @@ net.ipv4.tcp_slow_start_after_idle = 0
                     with data_lock:
                         users_count = len(data.get('users', {}))
                     return self.reply_json(200, {'ok': True, 'meta': m, 'users_count': users_count, 'time': int(time.time())})
+                if sub == 'users/list':
+                    # BUGFIX #10: 商城节点对账用, 列出所有动态用户 (脱敏不返回 password)
+                    now_ts = int(time.time())
+                    users_out = []
+                    with data_lock:
+                        for uid, info in data.get('users', {}).items():
+                            users_out.append({
+                                'user_id': uid,
+                                'expires_at': info.get('expires_at', 0),
+                                'active': info.get('expires_at', 0) > now_ts,
+                                'traffic_limit_bytes': info.get('limit_bytes', 0),
+                                'traffic_used_bytes': info.get('used_bytes', 0),
+                                'ip_limit': info.get('ip_limit', 0),
+                                'created_at': info.get('created_at', now_ts),
+                                'status': info.get('status', 'active'),
+                            })
+                    return self.reply_json(200, {'ok': True, 'count': len(users_out), 'users': users_out})
+                if sub == 'proxy-services/list':
+                    with data_lock:
+                        items = list(data.get('proxy_services', []))
+                    return self.reply_json(200, {'ok': True, 'count': len(items), 'services': items})
                 return self.reply_json(404, {'ok': False, 'error': 'API endpoint not found'})
 
             if not self.check_rate_limit(bucket='web'):
@@ -4065,6 +4439,12 @@ net.ipv4.tcp_slow_start_after_idle = 0
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
                 with data_lock:
                     enabled = data.get('warp_enabled', False)
+                    rules = list(data.get('warp_rules', [
+                        'ipify.org', 'cloudflare.com',
+                        'openai.com', 'chatgpt.com', 'oaistatic.com', 'oaiusercontent.com', 'ai.com',
+                        'anthropic.com', 'claude.ai',
+                        'gemini.google.com', 'aistudio.google.com', 'generativelanguage.googleapis.com'
+                    ]))
                 import shutil; is_installed = shutil.which('warp-cli') is not None
                 connected = False
                 outbound_ip = ''
@@ -4086,58 +4466,9 @@ net.ipv4.tcp_slow_start_after_idle = 0
                     'installed': is_installed,
                     'enabled': enabled,
                     'connected': connected,
-                    'ip': outbound_ip
+                    'ip': outbound_ip,
+                    'rules': rules
                 })
-
-            if self.path == prefix + 'install-warp':
-                if not self.is_authenticated():
-                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                try:
-                    install_warp_sh = '''
-                    set -eo pipefail
-                    export DEBIAN_FRONTEND=noninteractive
-                    if which apt-get >/dev/null 2>&1; then
-                        apt-get update && apt-get install -y gnupg lsb-release curl
-                        CODENAME=$(grep VERSION_CODENAME /etc/os-release | cut -d= -f2)
-                        CODENAME=${CODENAME:-bookworm}
-                        curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-                        echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ ${CODENAME} main" | tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null
-                        apt-get update && apt-get install -y --no-install-recommends cloudflare-warp
-                    elif which yum >/dev/null 2>&1; then
-                        yum-config-manager --add-repo https://pkg.cloudflareclient.com/cloudflare-warp-ascii.repo 2>/dev/null || true
-                        yum install -y cloudflare-warp
-                    fi
-
-                    if ! which warp-cli >/dev/null 2>&1; then
-                        echo "未能成功安装 warp-cli 客户端！" >&2
-                        exit 1
-                    fi
-
-                    systemctl enable --now warp-svc
-                    sleep 2
-                    warp-cli --accept-tos registration new 2>/dev/null || warp-cli --accept-tos register 2>/dev/null || true
-                    warp-cli --accept-tos mode proxy
-                    warp-cli --accept-tos proxy port 40000
-                    warp-cli --accept-tos tunnel protocol set MASQUE 2>/dev/null || true
-                    warp-cli --accept-tos connect
-                    '''
-                    res = subprocess.run(['bash', '-c', install_warp_sh], capture_output=True, text=True, timeout=180)
-                    if res.returncode != 0:
-                        err_detail = (res.stderr or res.stdout or '安装失败').strip()
-                        return self.reply_json(500, {'ok': False, 'error': f'安装失败: {err_detail}'})
-
-                    # 自动开启 WARP 并热重载
-                    with data_lock:
-                        data['warp_enabled'] = True
-                    save_data()
-                    try:
-                        subprocess.run(['/etc/hysteria/toggle_warp.sh', 'enable'], capture_output=True, timeout=10)
-                    except Exception:
-                        pass
-
-                    return self.reply_json(200, {'ok': True, 'message': 'Cloudflare WARP 客户端安装成功并已就绪！'})
-                except Exception as e:
-                    return self.reply_json(500, {'ok': False, 'error': f'执行异常: {str(e)}'})
 
             if subpath == 'user-config' or subpath.startswith('user-config?'):
                 if not self.is_authenticated():
@@ -4205,12 +4536,22 @@ net.ipv4.tcp_slow_start_after_idle = 0
             self.send_header('Referrer-Policy', 'no-referrer')
             self.send_header('X-Robots-Tag', 'noindex, nofollow, noarchive')
             self.send_header('Content-Security-Policy', content_policy())
+            # BUGFIX portal hang: 强制 Connection: close, HTTP server 处理完即关闭 TCP
+            self.send_header('Connection', 'close')
             if www_auth:
                 self.send_header('WWW-Authenticate', 'Basic realm="Private", charset="UTF-8"')
             if code == 429:
                 self.send_header('Retry-After', '60')
             self.end_headers()
             self.wfile.write(body)
+            try:
+                self.wfile.flush()
+            except Exception:
+                pass
+            try:
+                self.connection.shutdown(socket.SHUT_WR)
+            except Exception:
+                pass
 
     class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
         daemon_threads = True
@@ -4274,43 +4615,176 @@ EOF
 
 # 7. 服务状态与管理命令
 install_warp_local_proxy() {
-    log_step "准备安装并配置 Cloudflare WARP Local Proxy (端口 40000)..."
-    if ! which gpg >/dev/null 2>&1 || ! which lsb_release >/dev/null 2>&1; then
-        apt-get update && apt-get install -y gnupg lsb-release curl 2>/dev/null || yum install -y gnupg2 curl 2>/dev/null || true
+    # BUGFIX #7/#8: Cloudflare 官方 cloudflare-warp 包在 Debian 12 / bookworm 因 signed-by
+    # apt keyring 解析 bug 永远装不上，且失败会残留无效 apt 源。改为直接从 GitHub release
+    # 拉 wgcf + wireproxy 二进制，匿名注册 Warp 设备，wireproxy 起 socks5 监听，配置
+    # hysteria outbound 复用。整个流程无需 apt / 任何用户交互，失败时清理临时文件。
+    log_step "准备安装 Cloudflare WARP Local Proxy (wgcf + wireproxy · socks5 端口 19898)..."
+
+    if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+        install_dependencies
     fi
 
-    if which apt-get >/dev/null 2>&1; then
-        curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-        echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null
-        apt-get update && apt-get install -y cloudflare-warp
-    elif which yum >/dev/null 2>&1; then
-        yum-config-manager --add-repo https://pkg.cloudflareclient.com/cloudflare-warp-ascii.repo 2>/dev/null || true
-        yum install -y cloudflare-warp
+    case "$HY2_ARCH" in
+        amd64)  WGCF_ARCH="amd64";  WP_ARCH="amd64"  ;;
+        arm64)  WGCF_ARCH="arm64";  WP_ARCH="arm64"  ;;
+        armv7)  WGCF_ARCH="armv7";  WP_ARCH="armv7"  ;;
+        *) log_err "WARP 不支持当前 CPU 架构: ${HY2_ARCH}"; return 1 ;;
+    esac
+
+    WGCF_BIN="/usr/local/bin/wgcf"
+    WGCF_DIR="/etc/wireguard"
+    WGCF_CONF="${WGCF_DIR}/wgcf.conf"
+    WGCF_ACCT="${WGCF_DIR}/wgcf-account.toml"
+    WP_BIN="/usr/local/bin/wireproxy"
+    WARP_SOCKS_PORT=19898
+    WARP_SOCKS_ADDR="127.0.0.1:${WARP_SOCKS_PORT}"
+
+    # 1. 下载 wgcf (匿名注册 WARP 设备)
+    if [[ ! -x "$WGCF_BIN" ]]; then
+        log_step "下载 wgcf 二进制..."
+        # 动态探测最新 release + asset 名 (避免硬编码版本号失效)
+        WGCF_TAG=$(curl -fsSL --max-time 10 https://api.github.com/repos/ViRb3/wgcf/releases/latest 2>/dev/null | jq -r '.tag_name // "v2.3.0"')
+        WGCF_VER="${WGCF_TAG#v}"
+        [[ -z "$WGCF_VER" || "$WGCF_VER" == "null" ]] && WGCF_VER="2.3.0"
+        WGCF_DL="wgcf_${WGCF_VER}_linux_${WGCF_ARCH}"
+        WGCF_URL="https://github.com/ViRb3/wgcf/releases/download/v${WGCF_VER}/${WGCF_DL}"
+        log_info "目标 wgcf 版本: v${WGCF_VER}"
+        if ! curl -fsSL -o "$WGCF_BIN.tmp" "$WGCF_URL"; then
+            rm -f "$WGCF_BIN.tmp"
+            log_err "wgcf 下载失败 ($WGCF_URL), 请检查网络或版本号"
+            return 1
+        fi
+        install -m 755 "$WGCF_BIN.tmp" "$WGCF_BIN"
+        rm -f "$WGCF_BIN.tmp"
     fi
 
-    if ! which warp-cli >/dev/null 2>&1; then
-        log_err "Cloudflare WARP 客户端安装失败，请检查系统发行版支持情况。"
-        return 1
+    # 2. 下载 wireproxy (把 WireGuard 配置转成 socks5 代理)
+    if [[ ! -x "$WP_BIN" ]]; then
+        log_step "下载 wireproxy 二进制..."
+        WP_TAG=$(curl -fsSL --max-time 10 https://api.github.com/repos/whyvl/wireproxy/releases/latest 2>/dev/null | jq -r '.tag_name // "v1.1.3"')
+        WP_VER="${WP_TAG#v}"
+        [[ -z "$WP_VER" || "$WP_VER" == "null" ]] && WP_VER="1.1.3"
+        # wireproxy 不同版本命名约定不同 (有的 wireproxy-VER-linux-ARCH, 有的 wireproxy_linux_ARCH.tar.gz)
+        # 优先尝试 tar.gz 格式 (因为 wireproxy 实际是单文件 + 不会变)
+        WP_URL="https://github.com/whyvl/wireproxy/releases/download/${WP_TAG}/wireproxy_linux_${WP_ARCH}.tar.gz"
+        log_info "目标 wireproxy 版本: ${WP_TAG}"
+        TMP_TGZ=$(mktemp)
+        if ! curl -fsSL -o "$TMP_TGZ" "$WP_URL"; then
+            rm -f "$TMP_TGZ"
+            log_err "wireproxy 下载失败 ($WP_URL)"
+            return 1
+        fi
+        TMP_EXTRACT=$(mktemp -d)
+        tar -xzf "$TMP_TGZ" -C "$TMP_EXTRACT" 2>/dev/null
+        WP_SRC=$(find "$TMP_EXTRACT" -name wireproxy -type f -executable 2>/dev/null | head -1)
+        if [[ -z "$WP_SRC" ]]; then
+            # 兜底: 如果解压出来的不是 wireproxy 而是 wireproxy_linux_amd64 等
+            WP_SRC=$(find "$TMP_EXTRACT" -type f -executable 2>/dev/null | head -1)
+        fi
+        if [[ -z "$WP_SRC" ]]; then
+            log_err "wireproxy 解压失败，找不到可执行文件"
+            rm -rf "$TMP_TGZ" "$TMP_EXTRACT"
+            return 1
+        fi
+        install -m 755 "$WP_SRC" "$WP_BIN"
+        rm -rf "$TMP_TGZ" "$TMP_EXTRACT"
     fi
 
-    log_step "注册并配置 WARP Proxy 模式 (MASQUE · 127.0.0.1:40000)..."
-    warp-cli registration new 2>/dev/null || true
-    warp-cli tunnel protocol set MASQUE 2>/dev/null || true
-    warp-cli mode proxy 2>/dev/null || true
-    warp-cli proxy port 40000 2>/dev/null || true
-    warp-cli connect 2>/dev/null || true
+    # 3. 匿名注册 WARP 设备 (一次性)
+    mkdir -p "$WGCF_DIR"
+    # BUGFIX: wgcf generate 输出的 wgcf-profile.conf 总是写到 $HOME 不受 --config 控制,
+    # 必须先 cd 到目标目录再用相对路径生成
+    if [[ ! -f "$WGCF_ACCT" ]]; then
+        log_step "匿名注册 Cloudflare WARP 设备 (无邮件/验证码)..."
+        if ! "$WGCF_BIN" --config "$WGCF_ACCT" register --accept-tos >/tmp/wgcf-register.log 2>&1; then
+            log_err "WARP 匿名注册失败，请查看 /tmp/wgcf-register.log"
+            return 1
+        fi
+    fi
+    if [[ ! -f "$WGCF_CONF" ]]; then
+        # cd 到 /etc/wireguard/ 后, generate 输出的 wgcf-profile.conf 也会在这里
+        if ! (cd "$WGCF_DIR" && "$WGCF_BIN" --config "$WGCF_ACCT" generate >/tmp/wgcf-generate.log 2>&1); then
+            log_err "WARP 配置生成失败，请查看 /tmp/wgcf-generate.log"
+            return 1
+        fi
+    fi
+    # 把 $HOME 残留的 wgcf-profile.conf 移过来 (兼容老版本 wgcf 行为)
+    if [[ ! -f "$WGCF_CONF" && -f "/root/wgcf-profile.conf" ]]; then
+        mv /root/wgcf-profile.conf "$WGCF_CONF"
+    fi
+    # 兜底: generate 输出文件名是 wgcf-profile.conf, 重命名为 wgcf.conf 便于脚本后续解析
+    if [[ -f "${WGCF_DIR}/wgcf-profile.conf" && ! -f "$WGCF_CONF" ]]; then
+        mv "${WGCF_DIR}/wgcf-profile.conf" "$WGCF_CONF"
+    fi
+
+    # 4. 生成 wireproxy 配置 (只暴露 socks5 在 127.0.0.1)
+    WP_CFG="/etc/wireguard/wp.conf"
+    WG_PRIV=$(awk '/^PrivateKey/{print $3; exit}' "$WGCF_CONF")
+    WG_PUB=$(awk -F'= ' '/^PublicKey/{print $2; exit}' "$WGCF_CONF" | tr -d '
+')
+    WG_EP=$(awk -F'= ' '/^Endpoint/{print $2; exit}' "$WGCF_CONF" | tr -d '
+')
+    cat > "$WP_CFG" <<EOF
+# wireproxy config (managed by hysteria2-installer, do not edit)
+[Interface]
+Address = 172.16.0.2/32
+PrivateKey = ${WG_PRIV}
+DNS = 1.1.1.1
+
+[Peer]
+PublicKey = ${WG_PUB}
+Endpoint = ${WG_EP}
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25
+
+[Socks5]
+BindAddress = 127.0.0.1:${WARP_SOCKS_PORT}
+EOF
+    chmod 600 "$WP_CFG"
+
+    # 5. wireproxy systemd 守护
+    cat > /etc/systemd/system/wireproxy.service <<EOF
+[Unit]
+Description=WireProxy (Cloudflare WARP SOCKS5)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${WP_BIN} -c ${WP_CFG}
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now wireproxy >/dev/null 2>&1 || true
     sleep 3
 
-    # 配置 Watchdog 探活与自愈守护
-    cat > /usr/local/bin/hy2-warp-watchdog.sh <<'EOWD'
+    # 6. 探活 wireproxy socks5
+    if curl --proxy socks5h://"$WARP_SOCKS_ADDR" --silent --fail --max-time 8 https://api4.ipify.org >/dev/null 2>&1; then
+        log_info "WARP socks5 探活成功 (上游出口 IP 已切换)"
+    else
+        log_warn "WARP socks5 探活失败 (可能上游封禁或 NAT 类型受限), 服务已启动但需手动验证"
+    fi
+
+    # 7. 把 hysteria config.yaml 的 outbound warp_socks 端口同步到 19898
+    if [[ -f "$HY2_CONFIG" ]]; then
+        sed -i "s|addr: 127.0.0.1:40000|addr: ${WARP_SOCKS_ADDR}|g" "$HY2_CONFIG"
+        systemctl restart hysteria-server 2>/dev/null || true
+    fi
+
+    # 8. Watchdog (走 WARP socks5 探活, 失败则重启 wireproxy)
+    cat > /usr/local/bin/hy2-warp-watchdog.sh <<EOWD
 #!/usr/bin/env bash
 set -u
 TEST_URL="https://api4.ipify.org"
-if ! curl --proxy socks5h://127.0.0.1:40000 --silent --fail --max-time 6 "$TEST_URL" >/dev/null 2>&1; then
-    logger -t hy2-warp-watchdog "WARP local proxy failed. Restarting warp..."
-    warp-cli disconnect >/dev/null 2>&1 || true
-    sleep 2
-    warp-cli connect >/dev/null 2>&1 || true
+if ! curl --proxy socks5h://${WARP_SOCKS_ADDR} --silent --fail --max-time 6 "\$TEST_URL" >/dev/null 2>&1; then
+    logger -t hy2-warp-watchdog "WARP local proxy failed. Restarting wireproxy..."
+    systemctl restart wireproxy >/dev/null 2>&1 || true
 fi
 EOWD
     chmod 755 /usr/local/bin/hy2-warp-watchdog.sh
@@ -4337,10 +4811,10 @@ Unit=hy2-warp-watchdog.service
 [Install]
 WantedBy=timers.target
 EOF
-
     systemctl daemon-reload
     systemctl enable --now hy2-warp-watchdog.timer >/dev/null 2>&1 || true
-    log_info "Cloudflare WARP Local Proxy 与 3 分钟探活自愈 Watchdog 安装完成！"
+
+    log_info "Cloudflare WARP Local Proxy (wgcf+wireproxy) 与 3 分钟探活 Watchdog 安装完成！"
     log_info "你现在可以在 Web 控制台一键启闭 AI 专线分流。"
 }
 
@@ -4468,8 +4942,15 @@ uninstall_all() {
         systemctl disable hysteria-server 2>/dev/null || true
         systemctl disable --now hysteria-portal 2>/dev/null || true
         systemctl disable --now gost 2>/dev/null || true
+        # BUGFIX: 卸载时同时清理 WARP 相关服务与配置
+        systemctl disable --now wireproxy 2>/dev/null || true
+        systemctl disable --now hy2-warp-watchdog.timer 2>/dev/null || true
+        systemctl disable --now hy2-warp-watchdog.service 2>/dev/null || true
         rm -f /etc/systemd/system/hysteria-portal.service
         rm -f /etc/systemd/system/gost.service
+        rm -f /etc/systemd/system/wireproxy.service
+        rm -f /etc/systemd/system/hy2-warp-watchdog.service
+        rm -f /etc/systemd/system/hy2-warp-watchdog.timer
         clear_all_hopping_rules
         rm -f "$HY2_SERVICE"
         systemctl daemon-reload
@@ -4477,8 +4958,12 @@ uninstall_all() {
         log_step "清理二进制与配置目录..."
         rm -f "$HY2_BIN"
         rm -f /usr/local/bin/gost
+        rm -f /usr/local/bin/wgcf
+        rm -f /usr/local/bin/wireproxy
+        rm -f /usr/local/bin/hy2-warp-watchdog.sh
         rm -rf "$HY2_DIR"
-        
+        rm -rf /etc/wireguard
+
         log_info "Hysteria 2 已彻底卸载完成！"
     else
         log_info "已取消卸载。"
@@ -4494,9 +4979,9 @@ menu() {
     echo -e "${CYAN}================================================================${PLAIN}"
     
     if [[ -f "$HY2_BIN" ]] && systemctl is-active hysteria-server >/dev/null 2>&1; then
-        echo -e "核心状态: ${GREEN}运行中 (Active)${PLAIN} | 版本: $($HY2_BIN version | head -n 1 2>/dev/null || echo '未知')"
+        echo -e "核心状态: ${GREEN}运行中 (Active)${PLAIN} | 版本: $($HY2_BIN version 2>/dev/null | grep -E '^Version:' | head -n1 || echo '未知')"
     elif [[ -f "$HY2_BIN" ]]; then
-        echo -e "核心状态: ${RED}已停止 (Inactive)${PLAIN} | 版本: $($HY2_BIN version | head -n 1 2>/dev/null || echo '未知')"
+        echo -e "核心状态: ${RED}已停止 (Inactive)${PLAIN} | 版本: $($HY2_BIN version 2>/dev/null | grep -E '^Version:' | head -n1 || echo '未知')"
     else
         echo -e "核心状态: ${YELLOW}未安装 (Not Installed)${PLAIN}"
     fi
@@ -4521,8 +5006,8 @@ menu() {
         1)
             check_root
             check_arch
-            get_public_ip
             install_dependencies
+            get_public_ip || exit 1
             install_binary
             setup_certificates
             setup_ports_and_obfs
@@ -4542,7 +5027,8 @@ menu() {
             ;;
         4)
             check_root
-            get_public_ip
+            install_dependencies
+            get_public_ip || exit 1
             setup_certificates
             setup_ports_and_obfs
             generate_server_config
@@ -4592,8 +5078,8 @@ check_arch
 if [[ $# -gt 0 ]]; then
     case "$1" in
         install)
-            get_public_ip
             install_dependencies
+            get_public_ip || exit 1
             install_binary
             setup_certificates
             setup_ports_and_obfs
