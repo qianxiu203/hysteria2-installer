@@ -107,6 +107,16 @@ bash <(wget -qO- https://raw.githubusercontent.com/yys9253462-gif/hysteria2-inst
 - 在云厂商安全组中放行 **TCP 80**；若启用 Clash 订阅，还需放行脚本显示的订阅 TCP 端口（优先使用 8443，如被占用会自动选择空闲高位端口）。
 - 脚本会自动放行本机 UFW/firewalld 的 TCP 80，但云安全组需要自行放行。
 
+**脚本会先做 DNS 解析预校验**：自动查询 `${SERVER_NAME}` 的 A 记录并与本机公网 IPv4 比对，三种结果——
+
+| 解析结果 | 脚本行为 |
+|---|---|
+| 命中本机公网 IP | 直接继续申请证书 |
+| 解析到其他 IP | 输出明确告警，询问是否仍要继续（默认 **N** 中止） |
+| 无 A 记录 | 输出可能原因清单，询问是否仍要继续（默认 **N** 中止） |
+
+这样可避免 Let's Encrypt HTTP-01 必然失败导致 `hysteria-server` 反复重启、日志刷屏却没有任何中文提示的尴尬。
+
 成功后客户端会使用该域名作为服务器地址和 SNI，且不再需要开启 `skip-cert-verify` / `insecure`。
 
 ### 服务端配置模板 (`config.yaml`)

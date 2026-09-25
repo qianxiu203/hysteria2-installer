@@ -64,6 +64,78 @@ get_public_ip() {
                 echo "127.0.0.1")
 }
 
+# 解析域名 A/AAAA 记录(三重后备: getent -> dig -> nslookup + 系统解析器)
+# 输出: 第一行 stdout 为 DNS 返回的 IPv4 列表(空格分隔); 失败则返回非 0 且 stdout 为空。
+resolve_domain_ips() {
+    local domain="$1" ips=""
+    # 1) getent (glibc NSS, 走 /etc/resolv.conf)
+    ips=$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ')
+    if [[ -z "$ips" ]] && command -v dig >/dev/null 2>&1; then
+        ips=$(dig +short +time=3 +tries=2 A "$domain" 2>/dev/null | grep -E '^[0-9.]+$' | sort -u | tr '\n' ' ')
+    fi
+    if [[ -z "$ips" ]] && command -v nslookup >/dev/null 2>&1; then
+        ips=$(nslookup -timeout=3 "$domain" 2>/dev/null | awk '/^Address: /{print $2}' | grep -E '^[0-9.]+$' | sort -u | tr '\n' ' ')
+    fi
+    if [[ -z "$ips" ]] && command -v host >/dev/null 2>&1; then
+        ips=$(host -W 3 "$domain" 2>/dev/null | awk '/has address/{print $NF}' | sort -u | tr '\n' ' ')
+    fi
+    # 4) 最后兜底: 用 python3 走系统解析器(总有一个能用)
+    if [[ -z "$ips" ]] && command -v python3 >/dev/null 2>&1; then
+        ips=$(python3 -c "import socket,sys;
+try:
+    addrs=sorted(set(a[4][0] for a in socket.getaddrinfo(sys.argv[1], None, socket.AF_INET)))
+    print(' '.join(addrs))
+except Exception:
+    pass" "$domain" 2>/dev/null)
+    fi
+    [[ -n "$ips" ]] || return 1
+    echo "$ips"
+}
+
+# 校验 ACME 域名是否已正确解析到本机公网 IP。
+# 返回 0 = 通过(包含本机 IP); 1 = 未解析; 2 = 解析到了别的 IP。
+verify_domain_resolves_to_this_host() {
+    local domain="$1"
+    local my_ip="${PUBLIC_IP:-}"
+    local resolved_ips resolved_display
+
+    if [[ -z "$my_ip" || "$my_ip" == "127.0.0.1" ]]; then
+        log_warn "未能识别本机公网 IP，跳过 DNS 解析预校验（请手动确认 A 记录）。"
+        return 0
+    fi
+
+    resolved_ips=$(resolve_domain_ips "$domain") || resolved_ips=""
+    resolved_display="${resolved_ips:-<未返回任何 A 记录>}"
+
+    if [[ -z "$resolved_ips" ]]; then
+        log_err "============================================================"
+        log_err " DNS 解析失败: ${domain} 没有返回任何 A 记录"
+        log_err "============================================================"
+        log_err " 可能原因:"
+        log_err "   1) 域名还没添加到 DNS 解析，或 A 记录尚未生效"
+        log_err "   2) 域名拼写错误（本脚本无法替你判断拼写正确性）"
+        log_err "   3) 本机 DNS 配置异常（检查 /etc/resolv.conf）"
+        log_err "   4) DNS 污染（少数地区/网络下 8.8.8.8 被劫持）"
+        log_err ""
+        log_err " 本机公网 IP: ${my_ip}"
+        log_err " 建议先把 ${domain} 的 A 记录指向 ${my_ip}，再重新运行本脚本。"
+        return 1
+    fi
+
+    if [[ " $resolved_ips " == *" $my_ip "* ]]; then
+        log_info "DNS 解析校验通过: ${domain} -> ${resolved_ips}（含本机公网 IP ${my_ip}）"
+        return 0
+    fi
+
+    log_err "============================================================"
+    log_err " DNS 解析警告: ${domain} 当前解析到 ${resolved_display}"
+    log_err " 但本机公网 IP 是 ${my_ip}"
+    log_err "============================================================"
+    log_err " Let's Encrypt 的 HTTP-01 验证将无法通过，证书申请必然失败。"
+    log_err " 请到 DNS 服务商把 ${domain} 的 A 记录改成 ${my_ip}，等 TTL 生效后再来。"
+    return 2
+}
+
 install_dependencies() {
     log_step "检查并安装基础依赖 (curl, wget, jq, openssl, iptables, tar)..."
     if command -v apt-get >/dev/null 2>&1; then
@@ -205,6 +277,32 @@ setup_acme_certificate() {
     if [[ -z "$ACME_EMAIL" || "$ACME_EMAIL" != *"@"* ]]; then
         log_err "请输入有效的通知邮箱。"
         return 1
+    fi
+
+    # DNS 解析预校验：避免 Let's Encrypt HTTP-01 必然失败导致服务反复重启
+    log_step "正在校验 ${SERVER_NAME} 的 DNS A 记录是否指向本机公网 IP ${PUBLIC_IP:-<未知>}..."
+    verify_domain_resolves_to_this_host "$SERVER_NAME"
+    local dns_rc=$?
+    if [[ $dns_rc -eq 1 ]]; then
+        # 完全没解析到任何记录 — 强烈不建议继续
+        echo -e "${RED}若继续，Let's Encrypt HTTP-01 验证几乎必然失败，Hysteria 服务将反复重启。${PLAIN}"
+        read -rp "仍要继续申请 ACME 证书吗? [y/N, 默认 N]: " force_continue
+        force_continue=${force_continue:-N}
+        if [[ ! "$force_continue" =~ ^[Yy]$ ]]; then
+            log_err "已中止 ACME 证书申请。请先把 DNS A 记录指向本机 IP 后再重试。"
+            return 1
+        fi
+        log_warn "已忽略 DNS 解析失败警告，将继续（你已被警告过一次）。"
+    elif [[ $dns_rc -eq 2 ]]; then
+        # 解析到了别的 IP — 同样不推荐继续
+        echo -e "${RED}域名当前指向的不是本机，Let's Encrypt 验证必然失败。${PLAIN}"
+        read -rp "仍要继续申请 ACME 证书吗? [y/N, 默认 N]: " force_continue
+        force_continue=${force_continue:-N}
+        if [[ ! "$force_continue" =~ ^[Yy]$ ]]; then
+            log_err "已中止 ACME 证书申请。请先把 DNS A 记录修正为本机 IP 后再重试。"
+            return 1
+        fi
+        log_warn "已忽略 DNS 解析不一致警告，将继续（你已被警告过一次）。"
     fi
 
     CERT_TYPE="acme"
