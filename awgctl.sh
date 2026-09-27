@@ -861,6 +861,10 @@ cmd_uninstall() {
     fi
 
     rm -rf "$AWG_DIR"
+    # 再清掉可能因此变空的厂商级父目录（/etc/amnezia）。
+    # 用 rmdir 而不是 rm -rf：只在它确实为空时删除，
+    # 万一用户在该目录下还有别的东西（例如官方包的其他组件）不会被误删。
+    rmdir "$(dirname "$AWG_DIR")" 2>/dev/null || true
     log_info "已移除配置目录 ${AWG_DIR}"
     log_info "AmneziaWG 已彻底卸载。"
     log_warn "云安全组里为该端口放行的 UDP 规则需要你自行清理。"
