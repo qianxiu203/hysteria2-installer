@@ -14,7 +14,7 @@
 - 🛡️ **自签 / 自定义 / 域名证书**：支持一键生成 ECC (prime256v1) 自签证书、指定已有 acme.sh / certbot 证书，或绑定域名并自动申请 Let's Encrypt 证书。
 - 🔀 **端口跳跃 (Port Hopping) 默认启用**：内置自动化 `iptables` 多端口转发规则（默认 UDP 20000-40000），有效突破单一 UDP 端口被运营商 QoS 限速或丢包。
 - 🎭 **Salamander 混淆 默认启用**：全自动生成高熵随机密码，将 QUIC 数据报文伪装为完全随机的杂波，彻底免疫 GFW 主动探测与深度包检测。
-- 🌐 **Cloudflare WARP 智能分流 (AI 加速)**：支持一键配置 WARP Local Proxy（端口 40000 · MASQUE 协议），配合 3 分钟探活自愈 Watchdog，并在 Web 控制台独立扩展页面提供一键按需启闭开关，实现 OpenAI、Claude、Gemini 干净住宅出口与 VPS 原生极速直连。
+- 🌐 **Cloudflare WARP 智能分流 (AI 加速)**：内置 `wgcf` + `wireproxy` 自建本地出口（socks5 `127.0.0.1:19898`，免 apt、无需官方 MASQUE 客户端，绕开 Debian 12 上 `cloudflare-warp` 因 apt keyring bug 装不上的问题），配合 3 分钟探活自愈 Watchdog，并在 Web 控制台独立扩展页面提供一键按需启闭开关，实现 OpenAI、Claude、Gemini 干净住宅出口与 VPS 原生极速直连。
 - 🔄 **Web 端双重版本检测与一键升级**：在 Web 仪表盘在线比对 Hysteria 2 官方内核与控制面板自身版本，发现新版一键平滑无损热升级。
 - 🕳️ **独立「入站代理 & WARP」扩展专区 (SOCKS5 / HTTP / HTTPS)**：集成 GOST 引擎，支持 Web 端一键安装/修复核心；解耦独立页面一键添加/删除三种入站代理服务（独立账号密码认证），客户端无需安装 Hysteria 也能直接把服务器当普通代理用，配置动态生成并平滑热重载。
 - 📱 **多客户端格式全覆盖**：
@@ -152,7 +152,7 @@ outbounds:
   - name: warp_socks
     type: socks5
     socks5:
-      addr: 127.0.0.1:40000
+      addr: 127.0.0.1:19898
 
 # 默认开启 Salamander 混淆
 obfs:

@@ -2,6 +2,16 @@
 
 ## 未发布
 
+### WARP 实现统一 (wgcf + wireproxy)
+- **统一出口实现为 `wgcf` + `wireproxy`（socks5 `127.0.0.1:19898`）**，彻底废弃官方 `cloudflare-warp` / `warp-cli` / `warp-svc`（`127.0.0.1:40000`）那套 —— 原方案在 Debian 12 / bookworm 上因 apt keyring 解析缺陷永远装不上。此前「命令行主菜单装一套新版、Web 控制台却装另一套旧版」的分裂已全部对齐：
+  - `install.sh`：config 模板默认 outbound、主菜单第 5 项 `install_warp_local_proxy()`、`toggle_warp.sh` 的出口探活；
+  - `portal.py`（及 `install.sh` 内嵌副本，二者重新保持逐字节一致）：Web 控制台「一键安装 WARP」接口、`warp-status` 状态检测、出口探活、动态 ACL 注入、前端确认文案。
+- **修复 32 位 ARM 资产名映射错误**：`wireproxy` 的 armv7 资产实际名为 `wireproxy_linux_arm.tar.gz`，原代码拼成 `armv7` 必然 404，已拆分为独立架构映射（`wgcf` 仍使用 `armv7`）。
+- **版本探测不再强依赖 `jq`**：实测部分服务器未安装 `jq`，无 `jq` 时自动回退到 `grep` + `cut` 解析 `tag_name`，避免整段安装中断。
+- **自动清理旧出口残留**：部署新版时若检测到 `warp-svc`，在 wireproxy 探活成功之后自动 `disable --now`，杜绝两套 WARP 并存互相打架。
+- **WARP 开关不再无谓重启**：`toggle_warp.sh` 仅在 ACL 段实际发生变化时才 `systemctl restart hysteria-server`，避免「点一次开关就掐断全部在线用户」。
+- **兼容过渡不误报**：`warp-status` 同时识别 `wireproxy` 与旧的 `warp-cli`，探活按 `19898` → `40000` 顺序回退，尚未升级的存量节点不会被误判为「未安装 WARP」。
+
 ### Security & Performance
 - 引入 `ThreadingHTTPServer` 多线程并发模型与全局数据锁，彻底解决单线程 HTTP 服务下并发阻塞与数据竞争问题。
 - 本地 `/auth` 动态鉴权通道豁免外部限流，同时将 REST API 与 Web 访问的限流桶解耦，杜绝误伤高频合法握手。

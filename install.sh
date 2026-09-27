@@ -578,7 +578,7 @@ outbounds:
   - name: warp_socks
     type: socks5
     socks5:
-      addr: 127.0.0.1:40000
+      addr: 127.0.0.1:19898
 EOF
 
     # 写入 toggle_warp.sh 控制脚本，供 portal.py 或命令行无感知调用
@@ -588,13 +588,18 @@ ACTION="$1" # 1: enable, 0: disable
 CONFIG="/etc/hysteria/config.yaml"
 [[ -f "$CONFIG" ]] || exit 1
 
+# 记录改动前的 acl 段，供收尾判断是否需要重启
+BEFORE_ACL=$(sed -n '/^acl:/,$p' "$CONFIG")
+
 # 清理旧 acl 段
 sed -i "/^acl:/,\$d" "$CONFIG"
 
 if [[ "$ACTION" == "1" ]]; then
-    which warp-cli >/dev/null 2>&1 && {
-        warp-cli --accept-tos status 2>/dev/null | grep -qi "connected" || warp-cli --accept-tos connect >/dev/null 2>&1 || true
-    }
+    # 统一走 wgcf + wireproxy 出口（不再依赖官方 warp-cli）：探活失败则拉起 wireproxy
+    if ! curl --proxy "socks5h://127.0.0.1:19898" --silent --fail --max-time 6 https://api4.ipify.org >/dev/null 2>&1; then
+        systemctl restart wireproxy >/dev/null 2>&1 || true
+        sleep 2
+    fi
     cat >> "$CONFIG" <<'EOF'
 acl:
   inline:
@@ -624,7 +629,10 @@ acl:
 EOF
 fi
 
-systemctl restart hysteria-server 2>/dev/null || true
+# acl 段无实际变化时不重启，避免无谓掐断所有在线用户
+if [[ "${BEFORE_ACL:-}" != "$(sed -n '/^acl:/,$p' "$CONFIG")" ]]; then
+    systemctl restart hysteria-server 2>/dev/null || true
+fi
 EOTW
     chmod +x "$HY2_DIR/toggle_warp.sh"
 
@@ -1290,7 +1298,7 @@ if (btnToggleWarp) {
 
 if (btnInstallWarp) {
   btnInstallWarp.addEventListener('click', async () => {
-    if (!confirm("确定要在服务器上一键安装并注册 Cloudflare WARP 客户端吗？安装后将自动启用 40000 端口 Local Proxy 模式。")) return;
+    if (!confirm("确定要在服务器上一键部署 Cloudflare WARP 本地出口吗？将自动安装 wgcf + wireproxy，并启用 127.0.0.1:19898 的 socks5 出口。")) return;
     btnInstallWarp.disabled = true;
     const origText = btnInstallWarp.textContent;
     btnInstallWarp.textContent = '⏳ 正在安装 WARP (耗时约 30 秒)...';
@@ -3947,7 +3955,7 @@ WantedBy=multi-user.target
                         cfg_text = '\n'.join(clean_lines)
                         if new_state:
                             if 'name: warp_socks' not in cfg_text:
-                                warp_outbound = "\n  - name: warp_socks\n    type: socks5\n    socks5:\n      addr: 127.0.0.1:40000"
+                                warp_outbound = "\n  - name: warp_socks\n    type: socks5\n    socks5:\n      addr: 127.0.0.1:19898"
                                 if 'outbounds:' in cfg_text:
                                     cfg_text = cfg_text.replace('outbounds:', 'outbounds:' + warp_outbound)
                                 else:
@@ -4199,36 +4207,203 @@ net.ipv4.tcp_slow_start_after_idle = 0
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
                 try:
                     install_warp_sh = '''
-                    set -eo pipefail
-                    export DEBIAN_FRONTEND=noninteractive
-                    if which apt-get >/dev/null 2>&1; then
-                        apt-get update && apt-get install -y gnupg lsb-release curl
-                        CODENAME=$(grep VERSION_CODENAME /etc/os-release | cut -d= -f2)
-                        CODENAME=${CODENAME:-bookworm}
-                        curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-                        curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /etc/apt/trusted.gpg.d/cloudflare-warp.gpg 2>/dev/null || true
-                        echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ ${CODENAME} main" | tee /etc/apt/sources.list.d/cloudflare-client.list >/dev/null
-                        apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 6E2DD2174FA1C3BA 2>/dev/null || true
-                        apt-get update -o Acquire::AllowInsecureRepositories=true -y || apt-get update -y
-                        apt-get install -y --no-install-recommends cloudflare-warp
-                    elif which yum >/dev/null 2>&1; then
-                        yum-config-manager --add-repo https://pkg.cloudflareclient.com/cloudflare-warp-ascii.repo 2>/dev/null || true
-                        yum install -y cloudflare-warp
-                    fi
+set -eo pipefail
+export DEBIAN_FRONTEND=noninteractive
+WARP_SOCKS_ADDR="127.0.0.1:19898"
+WGCF_BIN="/usr/local/bin/wgcf"
+WP_BIN="/usr/local/bin/wireproxy"
+WG_DIR="/etc/wireguard"
+WGCF_ACCT="${WG_DIR}/wgcf-account.toml"
+WGCF_CONF="${WG_DIR}/wgcf.conf"
+WP_CFG="${WG_DIR}/wp.conf"
+HY2_CONF="/etc/hysteria/config.yaml"
+log() { echo "[warp] $*"; }
 
-                    if ! which warp-cli >/dev/null 2>&1; then
-                        echo "未能成功安装 warp-cli 客户端！" >&2
-                        exit 1
-                    fi
+for t in curl jq; do
+    command -v "$t" >/dev/null 2>&1 && continue
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq >/dev/null 2>&1 || true
+        apt-get install -y -qq "$t" >/dev/null 2>&1 || true
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y "$t" >/dev/null 2>&1 || true
+    fi
+done
+command -v curl >/dev/null 2>&1 || { echo "缺少 curl，无法继续" >&2; exit 1; }
 
-                    systemctl enable --now warp-svc
-                    sleep 2
-                    warp-cli --accept-tos registration new 2>/dev/null || warp-cli --accept-tos register 2>/dev/null || true
-                    warp-cli --accept-tos mode proxy
-                    warp-cli --accept-tos proxy port 40000
-                    warp-cli --accept-tos tunnel protocol set MASQUE 2>/dev/null || true
-                    warp-cli --accept-tos connect
-                    '''
+ARCH=$(uname -m)
+case "$ARCH" in
+    x86_64|amd64)   WG_A="amd64"; WP_A="amd64" ;;
+    aarch64|arm64)  WG_A="arm64"; WP_A="arm64" ;;
+    armv7l|armv7)   WG_A="armv7"; WP_A="arm"   ;;
+    *) echo "不支持的 CPU 架构: $ARCH" >&2; exit 1 ;;
+esac
+
+if [ ! -x "$WGCF_BIN" ]; then
+    log "下载 wgcf 二进制..."
+    RAW=$(curl -fsSL --max-time 20 https://api.github.com/repos/ViRb3/wgcf/releases/latest 2>/dev/null || true)
+    if command -v jq >/dev/null 2>&1; then
+        TAG=$(printf '%s' "$RAW" | jq -r '.tag_name // empty' 2>/dev/null || true)
+    else
+        TAG=$(printf '%s' "$RAW" | grep -o '"tag_name": *"[^"]*"' | head -1 | cut -d'"' -f4)
+    fi
+    VER="${TAG#v}"
+    case "$VER" in ""|null) VER="2.3.0" ;; esac
+    if ! curl -fsSL --max-time 90 -o "${WGCF_BIN}.tmp" "https://github.com/ViRb3/wgcf/releases/download/v${VER}/wgcf_${VER}_linux_${WG_A}"; then
+        rm -f "${WGCF_BIN}.tmp"
+        echo "wgcf 下载失败 (v${VER}/${WG_A})" >&2
+        exit 1
+    fi
+    install -m 755 "${WGCF_BIN}.tmp" "$WGCF_BIN"
+    rm -f "${WGCF_BIN}.tmp"
+fi
+
+if [ ! -x "$WP_BIN" ]; then
+    log "下载 wireproxy 二进制..."
+    RAW=$(curl -fsSL --max-time 20 https://api.github.com/repos/whyvl/wireproxy/releases/latest 2>/dev/null || true)
+    if command -v jq >/dev/null 2>&1; then
+        TAG=$(printf '%s' "$RAW" | jq -r '.tag_name // empty' 2>/dev/null || true)
+    else
+        TAG=$(printf '%s' "$RAW" | grep -o '"tag_name": *"[^"]*"' | head -1 | cut -d'"' -f4)
+    fi
+    case "$TAG" in ""|null) TAG="v1.1.3" ;; esac
+    TMP_TGZ=$(mktemp)
+    TMP_EX=$(mktemp -d)
+    if ! curl -fsSL --max-time 90 -o "$TMP_TGZ" "https://github.com/whyvl/wireproxy/releases/download/${TAG}/wireproxy_linux_${WP_A}.tar.gz"; then
+        rm -f "$TMP_TGZ"; rm -rf "$TMP_EX"
+        echo "wireproxy 下载失败 (${TAG}/${WP_A})" >&2
+        exit 1
+    fi
+    tar -xzf "$TMP_TGZ" -C "$TMP_EX" 2>/dev/null || true
+    SRC=$(find "$TMP_EX" -name wireproxy -type f -executable 2>/dev/null | head -1)
+    [ -z "$SRC" ] && SRC=$(find "$TMP_EX" -type f -executable 2>/dev/null | head -1)
+    if [ -z "$SRC" ]; then
+        rm -f "$TMP_TGZ"; rm -rf "$TMP_EX"
+        echo "wireproxy 解压失败，未找到可执行文件" >&2
+        exit 1
+    fi
+    install -m 755 "$SRC" "$WP_BIN"
+    rm -f "$TMP_TGZ"; rm -rf "$TMP_EX"
+fi
+
+mkdir -p "$WG_DIR"
+if [ ! -f "$WGCF_ACCT" ]; then
+    log "匿名注册 Cloudflare WARP 设备..."
+    if ! "$WGCF_BIN" --config "$WGCF_ACCT" register --accept-tos >/tmp/wgcf-register.log 2>&1; then
+        echo "WARP 匿名注册失败，详见 /tmp/wgcf-register.log" >&2
+        exit 1
+    fi
+fi
+if [ ! -f "$WGCF_CONF" ]; then
+    if ! ( cd "$WG_DIR" && "$WGCF_BIN" --config "$WGCF_ACCT" generate >/tmp/wgcf-generate.log 2>&1 ); then
+        echo "WARP 配置生成失败，详见 /tmp/wgcf-generate.log" >&2
+        exit 1
+    fi
+fi
+[ -f "${WG_DIR}/wgcf-profile.conf" ] && [ ! -f "$WGCF_CONF" ] && mv -f "${WG_DIR}/wgcf-profile.conf" "$WGCF_CONF"
+[ -f /root/wgcf-profile.conf ] && [ ! -f "$WGCF_CONF" ] && mv -f /root/wgcf-profile.conf "$WGCF_CONF"
+if [ ! -f "$WGCF_CONF" ]; then
+    echo "未找到 wgcf 生成的 WireGuard 配置" >&2
+    exit 1
+fi
+
+WG_PRIV=$(awk '/^PrivateKey/{print $3; exit}' "$WGCF_CONF")
+WG_PUB=$(awk -F'= ' '/^PublicKey/{print $2; exit}' "$WGCF_CONF")
+WG_EP=$(awk -F'= ' '/^Endpoint/{print $2; exit}' "$WGCF_CONF")
+if [ -z "$WG_PRIV" ] || [ -z "$WG_PUB" ] || [ -z "$WG_EP" ]; then
+    echo "WireGuard 配置解析失败 (PrivateKey/PublicKey/Endpoint 缺失)" >&2
+    exit 1
+fi
+
+cat > "$WP_CFG" <<WPEOF
+# wireproxy config (managed by hysteria2-installer, do not edit)
+[Interface]
+Address = 172.16.0.2/32
+PrivateKey = ${WG_PRIV}
+DNS = 1.1.1.1
+
+[Peer]
+PublicKey = ${WG_PUB}
+Endpoint = ${WG_EP}
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25
+
+[Socks5]
+BindAddress = ${WARP_SOCKS_ADDR}
+WPEOF
+chmod 600 "$WP_CFG"
+
+cat > /etc/systemd/system/wireproxy.service <<'WPSVCEOF'
+[Unit]
+Description=WireProxy (Cloudflare WARP SOCKS5)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/wireproxy -c /etc/wireguard/wp.conf
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+WPSVCEOF
+systemctl daemon-reload
+systemctl enable wireproxy >/dev/null 2>&1 || true
+systemctl restart wireproxy >/dev/null 2>&1 || true
+sleep 3
+
+if ! curl --proxy "socks5h://${WARP_SOCKS_ADDR}" --silent --fail --max-time 10 https://api4.ipify.org >/dev/null 2>&1; then
+    echo "wireproxy 已启动但 WARP socks5 探活失败（上游可能受限或被封禁）" >&2
+    exit 1
+fi
+log "WARP socks5 探活成功"
+
+if [ -f "$HY2_CONF" ]; then
+    sed -i "s|addr: 127.0.0.1:40000|addr: ${WARP_SOCKS_ADDR}|g" "$HY2_CONF"
+fi
+
+if systemctl list-unit-files 2>/dev/null | grep -q '^warp-svc'; then
+    log "检测到旧的 cloudflare-warp 客户端，已停用（统一走 wireproxy 出口）"
+    systemctl disable --now warp-svc >/dev/null 2>&1 || true
+fi
+
+cat > /usr/local/bin/hy2-warp-watchdog.sh <<'WDE'
+#!/usr/bin/env bash
+set -u
+if ! curl --proxy socks5h://127.0.0.1:19898 --silent --fail --max-time 6 https://api4.ipify.org >/dev/null 2>&1; then
+    logger -t hy2-warp-watchdog "WARP local proxy failed. Restarting wireproxy..."
+    systemctl restart wireproxy >/dev/null 2>&1 || true
+fi
+WDE
+chmod 755 /usr/local/bin/hy2-warp-watchdog.sh
+
+cat > /etc/systemd/system/hy2-warp-watchdog.service <<'WDSE'
+[Unit]
+Description=Cloudflare WARP Watchdog for Hysteria 2
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/hy2-warp-watchdog.sh
+WDSE
+
+cat > /etc/systemd/system/hy2-warp-watchdog.timer <<'WDTE'
+[Unit]
+Description=Run WARP Watchdog every 3 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=3min
+Unit=hy2-warp-watchdog.service
+
+[Install]
+WantedBy=timers.target
+WDTE
+systemctl daemon-reload
+systemctl enable --now hy2-warp-watchdog.timer >/dev/null 2>&1 || true
+log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
+'''
                     res = subprocess.run(['bash', '-c', install_warp_sh], capture_output=True, text=True, timeout=180)
                     if res.returncode != 0:
                         err_detail = (res.stderr or res.stdout or '安装失败').strip()
@@ -4543,22 +4718,29 @@ net.ipv4.tcp_slow_start_after_idle = 0
                         'anthropic.com', 'claude.ai',
                         'gemini.google.com', 'aistudio.google.com', 'generativelanguage.googleapis.com'
                     ]))
-                import shutil; is_installed = shutil.which('warp-cli') is not None
+                import shutil
+                # 统一到 wgcf + wireproxy(127.0.0.1:19898)；同时兼容尚未升级、
+                # 仍跑官方 cloudflare-warp(127.0.0.1:40000) 的旧节点，避免误报「未安装」
+                is_installed = (shutil.which('wireproxy') is not None
+                                or shutil.which('warp-cli') is not None
+                                or Path('/etc/systemd/system/wireproxy.service').exists())
                 connected = False
                 outbound_ip = ''
                 if is_installed and enabled:
-                    try:
-                        import urllib.request
-                        proxy_handler = urllib.request.ProxyHandler({'http': 'socks5h://127.0.0.1:40000',
-                                                                     'https': 'socks5h://127.0.0.1:40000'})
-                        opener = urllib.request.build_opener(proxy_handler)
-                        req = urllib.request.Request('https://api4.ipify.org', headers={'User-Agent': 'curl/7.88.1'})
-                        with opener.open(req, timeout=3) as resp:
-                            if resp.status == 200:
-                                outbound_ip = resp.read().decode('utf-8').strip()
-                                connected = True
-                    except Exception:
-                        connected = False
+                    for warp_addr in ('127.0.0.1:19898', '127.0.0.1:40000'):
+                        try:
+                            import urllib.request
+                            proxy_handler = urllib.request.ProxyHandler({'http': 'socks5h://' + warp_addr,
+                                                                         'https': 'socks5h://' + warp_addr})
+                            opener = urllib.request.build_opener(proxy_handler)
+                            req = urllib.request.Request('https://api4.ipify.org', headers={'User-Agent': 'curl/7.88.1'})
+                            with opener.open(req, timeout=3) as resp:
+                                if resp.status == 200:
+                                    outbound_ip = resp.read().decode('utf-8').strip()
+                                    connected = True
+                                    break
+                        except Exception:
+                            connected = False
                 return self.reply_json(200, {
                     'ok': True,
                     'installed': is_installed,
@@ -4724,9 +4906,10 @@ install_warp_local_proxy() {
     fi
 
     case "$HY2_ARCH" in
+        # 注意 wireproxy 的 armv7 asset 实际叫 wireproxy_linux_arm.tar.gz（不是 armv7）
         amd64)  WGCF_ARCH="amd64";  WP_ARCH="amd64"  ;;
         arm64)  WGCF_ARCH="arm64";  WP_ARCH="arm64"  ;;
-        armv7)  WGCF_ARCH="armv7";  WP_ARCH="armv7"  ;;
+        armv7)  WGCF_ARCH="armv7";  WP_ARCH="arm"    ;;
         *) log_err "WARP 不支持当前 CPU 架构: ${HY2_ARCH}"; return 1 ;;
     esac
 
@@ -4742,7 +4925,12 @@ install_warp_local_proxy() {
     if [[ ! -x "$WGCF_BIN" ]]; then
         log_step "下载 wgcf 二进制..."
         # 动态探测最新 release + asset 名 (避免硬编码版本号失效)
-        WGCF_TAG=$(curl -fsSL --max-time 10 https://api.github.com/repos/ViRb3/wgcf/releases/latest 2>/dev/null | jq -r '.tag_name // "v2.3.0"')
+        RAW=$(curl -fsSL --max-time 20 https://api.github.com/repos/ViRb3/wgcf/releases/latest 2>/dev/null || true)
+        if command -v jq >/dev/null 2>&1; then
+            WGCF_TAG=$(printf '%s' "$RAW" | jq -r '.tag_name // empty' 2>/dev/null || true)
+        else
+            WGCF_TAG=$(printf '%s' "$RAW" | grep -o '"tag_name": *"[^"]*"' | head -1 | cut -d'"' -f4)
+        fi
         WGCF_VER="${WGCF_TAG#v}"
         [[ -z "$WGCF_VER" || "$WGCF_VER" == "null" ]] && WGCF_VER="2.3.0"
         WGCF_DL="wgcf_${WGCF_VER}_linux_${WGCF_ARCH}"
@@ -4760,7 +4948,12 @@ install_warp_local_proxy() {
     # 2. 下载 wireproxy (把 WireGuard 配置转成 socks5 代理)
     if [[ ! -x "$WP_BIN" ]]; then
         log_step "下载 wireproxy 二进制..."
-        WP_TAG=$(curl -fsSL --max-time 10 https://api.github.com/repos/whyvl/wireproxy/releases/latest 2>/dev/null | jq -r '.tag_name // "v1.1.3"')
+        RAW=$(curl -fsSL --max-time 20 https://api.github.com/repos/whyvl/wireproxy/releases/latest 2>/dev/null || true)
+        if command -v jq >/dev/null 2>&1; then
+            WP_TAG=$(printf '%s' "$RAW" | jq -r '.tag_name // empty' 2>/dev/null || true)
+        else
+            WP_TAG=$(printf '%s' "$RAW" | grep -o '"tag_name": *"[^"]*"' | head -1 | cut -d'"' -f4)
+        fi
         WP_VER="${WP_TAG#v}"
         [[ -z "$WP_VER" || "$WP_VER" == "null" ]] && WP_VER="1.1.3"
         # wireproxy 不同版本命名约定不同 (有的 wireproxy-VER-linux-ARCH, 有的 wireproxy_linux_ARCH.tar.gz)
@@ -4911,6 +5104,12 @@ WantedBy=timers.target
 EOF
     systemctl daemon-reload
     systemctl enable --now hy2-warp-watchdog.timer >/dev/null 2>&1 || true
+
+    # 统一出口：机器上若还残留官方 cloudflare-warp 客户端，停用避免两套 WARP 并存打架
+    if systemctl list-unit-files 2>/dev/null | grep -q '^warp-svc'; then
+        log_info "检测到旧的 cloudflare-warp (warp-svc)，已停用并禁用（统一走 wireproxy 19898）"
+        systemctl disable --now warp-svc >/dev/null 2>&1 || true
+    fi
 
     log_info "Cloudflare WARP Local Proxy (wgcf+wireproxy) 与 3 分钟探活 Watchdog 安装完成！"
     log_info "你现在可以在 Web 控制台一键启闭 AI 专线分流。"
