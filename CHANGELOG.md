@@ -38,6 +38,28 @@
   - 卸载后 `/etc/amnezia`、服务单元、二进制、接口全部清理，AWG 自己的 `MASQUERADE` / `FORWARD` 规则归零，且 **Hysteria2 服务与其端口跳跃规则毫发无伤**。
 - 踩到的两个"假故障"值得记录：判定 iptables 残留时**不能比对整张表** —— 本机跑着 Docker，它会在任意时刻动态增删自己的 `br-*` 规则，导致误报（本测试先后用行数比较和全表比对各误报过一次）；改为只比对 AWG 自己的规则。
 
+### 🔴 修复（线上事故：门户点一下 WARP 开关会把 Hysteria 打成「连上没网」）
+- **根因**：`apply_hy2_acl()` 重写 `config.yaml` 时用的是「**从 `acl:` 那行一路删到文件尾**」，
+  而 `install.sh` 是把 `obfs` 段**追加在配置末尾**的（排在 `acl:` 之后）——
+  于是混淆配置被一起删掉。服务端不再有 obfs，客户端却仍带着 salamander 混淆去连，
+  **QUIC 握手直接超时**。
+- **现象极具误导性**：客户端报 `connect error: timeout: no recent network activity`，
+  而**服务端一行日志都没有**；`systemctl is-active` 是 active、端口在监听、
+  REDIRECT 规则计数正常增长 —— 每个单点看起来都是好的，唯独连不上。
+- **修法**：新增模块级 `strip_acl_block()`，**只删 `acl:` 块**（从顶格的 `acl:` 到下一个
+  顶格非空行为止），保留文件里其它所有内容。
+- **验证**：新增 `tests/test_portal_config_edit.py`（7 项）。核心回归是
+  「acl 之后的 obfs 段必须原样保留」。做了反向验证：把实现换回旧逻辑后 7 项里
+  **4 项立刻失败**（含核心那条），证明测试不是空转。
+  端到端实测：通过门户点一次 WARP 开关 → `obfs` 段仍在、salamander 密码仍在、
+  Hysteria 仍 active；外部客户端（Windows）连 `rd.hejige.com:21242` 成功，
+  `www.baidu.com`/`www.google.com` 均 HTTP 200、`api4.ipify.org` 按 ACL 走 WARP 出口。
+
+  > 这次是**在按钮冒烟测试里点 WARP 开关时触发的**，把测试机 `se` 的 Hysteria
+  > 打成了上述状态。教训：**凡是"重写配置文件某一段"的代码，都必须按块替换、
+  > 绝不能按"从这里删到结尾"处理** —— 因为追加在末尾的段落（本项目就是 `obfs`）
+  > 会被无声吞掉，而且症状与原因隔得很远。
+
 ### 修复（用户报「AmneziaWG 连上了但没网」）
 - 🔴 **服务端 PostUp 只放行了 FORWARD 的去程，回程被丢 —— 表现就是"握手成功但上不了网"**。
   原规则只有 `-i awg0 -j ACCEPT`（客户端→公网）。而**回程包是 `in=<出口网卡> out=awg0`**，

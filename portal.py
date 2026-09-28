@@ -29,6 +29,38 @@ from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, quote, urlencode
 
 
+def strip_acl_block(text):
+    """去掉 Hysteria config.yaml 里的 acl: 块，保留其余【所有】内容。
+
+    🔴 为什么必须只删 acl 块、而不能"从 acl: 一路删到文件尾"：
+    `install.sh` 是把 `obfs` 段**追加在配置末尾**的，也就是排在 `acl:` 之后。
+    原实现一路删到底，会连混淆配置一起删掉 —— 服务端不再有 obfs，而客户端
+    仍带着 salamander 混淆去连，QUIC 握手直接超时。现象是「能连上但没网」，
+    而且**服务端一行日志都没有**，极难定位（真实事故：门户里点一下 WARP 开关
+    就把线上节点的 Hysteria 打成了这样）。
+
+    acl 块的范围：从顶格的 `acl:` 起，到下一个顶格（非空、非注释）行之前为止。
+    """
+    out, i = [], 0
+    lines = text.split('\n')
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        if line[:1] not in (' ', '\t') and line.strip().startswith('acl:'):
+            i += 1
+            while i < n:
+                nxt = lines[i]
+                if nxt.strip() and nxt[:1] not in (' ', '\t'):
+                    break
+                i += 1
+            continue
+        out.append(line)
+        i += 1
+    while out and not out[-1].strip():
+        out.pop()
+    return '\n'.join(out)
+
+
 STYLE = """
 :root{color-scheme:light;--ink:#122b31;--muted:#667c81;--line:#dce7e6;--accent:#087f74;--accent-hover:#066960;--danger:#cf3c3c;--danger-bg:#fdf2f2;--brand-bg:#eaf5ef;--card-bg:#ffffff}
 *{box-sizing:border-box}body{margin:0;background:#f3f7f6;color:var(--ink);font:15px/1.6 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
@@ -3883,17 +3915,13 @@ WantedBy=multi-user.target
                         cfg_path = Path('/etc/hysteria/config.yaml')
                         if not cfg_path.exists():
                             return
-                        lines = cfg_path.read_text(encoding='utf-8').splitlines()
-                        clean_lines = []
-                        in_acl = False
-                        for line in lines:
-                            if line.strip().startswith('acl:'):
-                                in_acl = True
-                                continue
-                            if not in_acl:
-                                clean_lines.append(line)
+                        raw_text = cfg_path.read_text(encoding='utf-8')
 
-                        cfg_text = '\n'.join(clean_lines)
+                        # 只删掉 acl: 块，保留其余全部内容 —— 详见模块级
+                        # strip_acl_block() 的注释（那里记录了踩过的坑：
+                        # 原来的"删到文件尾"会把末尾的 obfs 段一起删掉，
+                        # 导致"能连上但没网"）。
+                        cfg_text = strip_acl_block(raw_text)
 
                         def has_outbound(name):
                             return re.search(r'^\s*-\s*name:\s*' + name + r'\s*$',
