@@ -188,12 +188,14 @@ else
 fi
 
 # WARP 规则：加一条探针域名再删掉（净零）。
-# 刻意不碰 toggle —— 那会改 ACL 并重启 hysteria，没必要为冒烟付这个代价。
 code=$(post manage-warp "action=add_rule&domain=probe-smoketest.example")
 if [[ "$code" == "200" ]]; then
     ok "POST manage-warp add_rule → 200"
+    sleep 3
+    chk "  加规则后 Hysteria 仍 active" "$(systemctl is-active hysteria-server 2>/dev/null)" "active"
     code=$(post manage-warp "action=del_rule&domain=probe-smoketest.example")
     chk "POST manage-warp del_rule → 200" "$code" "200"
+    sleep 3
     get warp-status >/dev/null
     if jq -e '.rules | index("probe-smoketest.example")' /tmp/pb.out >/dev/null 2>&1; then
         bad "  探针域名未被清理干净"
@@ -202,6 +204,32 @@ if [[ "$code" == "200" ]]; then
     fi
 else
     bad "POST manage-warp add_rule → $code $(head -c 150 /tmp/pb.out)"
+fi
+
+# WARP 开关本身：这条路径会【真的重写 config.yaml 并重启 hysteria】，
+# 也正是历史上把 Hysteria 打成 failed 的那条路径 ——
+# 门户曾无条件往 ACL 里写 direct_ipv4(all)，而该出站可能已被
+# toggle_warp.sh 连 outbounds 段一起删掉，于是 hysteria 启动即 FATAL：
+#   invalid config: acl.inline: error at line N: outbound direct_ipv4 not found
+# 所以必须真的点一次，并确认 hysteria 活着。
+WARP_BEFORE=$(get warp-status >/dev/null; jqv '.enabled')
+WARP_FLIP=$([[ "$WARP_BEFORE" == "true" ]] && echo false || echo true)
+code=$(post manage-warp "action=toggle")
+chk "POST manage-warp toggle → 200" "$code" "200"
+sleep 6
+chk "  ★ 切换后 Hysteria 仍 active（防「开关打挂服务」回归）" \
+    "$(systemctl is-active hysteria-server 2>/dev/null)" "active"
+chk "  WARP 状态已翻转" "$(get warp-status >/dev/null; jqv '.enabled')" "$WARP_FLIP"
+
+# 切回原状态
+code=$(post manage-warp "action=toggle")
+sleep 6
+chk "  ★ 再切回后 Hysteria 仍 active" "$(systemctl is-active hysteria-server 2>/dev/null)" "active"
+chk "  WARP 状态已还原" "$(get warp-status >/dev/null; jqv '.enabled')" "$WARP_BEFORE"
+if [[ "$(systemctl is-active hysteria-server 2>/dev/null)" != "active" ]]; then
+    echo "      ⚠️ Hysteria 未恢复，尝试 reset-failed 后重启"
+    systemctl reset-failed hysteria-server 2>/dev/null || true
+    systemctl restart hysteria-server 2>/dev/null || true
 fi
 
 # Reality：本机没装 xray，用非法 action 做接线校验（期望 400 而非 500）

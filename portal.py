@@ -3880,22 +3880,65 @@ WantedBy=multi-user.target
                                 clean_lines.append(line)
 
                         cfg_text = '\n'.join(clean_lines)
+
+                        def has_outbound(name):
+                            return re.search(r'^\s*-\s*name:\s*' + name + r'\s*$',
+                                             cfg_text, re.M) is not None
+
                         if new_state:
-                            if 'name: warp_socks' not in cfg_text:
-                                warp_outbound = "\n  - name: warp_socks\n    type: socks5\n    socks5:\n      addr: 127.0.0.1:19898"
+                            # 出站名要探测实际存在的那个：config 模板用 warp_socks，
+                            # 而某些版本的 toggle_warp.sh 会把它改写成 warp。
+                            warp_name = 'warp_socks' if has_outbound('warp_socks') else 'warp'
+                            if not has_outbound(warp_name):
+                                warp_outbound = ("\n  - name: warp_socks\n    type: socks5\n"
+                                                 "    socks5:\n      addr: 127.0.0.1:19898")
                                 if 'outbounds:' in cfg_text:
-                                    cfg_text = cfg_text.replace('outbounds:', 'outbounds:' + warp_outbound)
+                                    cfg_text = cfg_text.replace('outbounds:', 'outbounds:' + warp_outbound, 1)
                                 else:
                                     cfg_text += '\noutbounds:' + warp_outbound
+                                warp_name = 'warp_socks'
+
+                            # 🔴 ACL 末尾引用的出站必须【真实存在】，否则 hysteria 直接
+                            # 起不来，报错形如：
+                            #   invalid config: acl.inline: error at line N:
+                            #   outbound direct_ipv4 not found
+                            # 历史教训：这里曾无条件写 direct_ipv4(all)。该出站由 config
+                            # 模板定义，而 toggle_warp.sh 重写配置时可能把它连 outbounds
+                            # 段一起删掉 —— 于是 Web 端点一下 WARP 开关就把 Hysteria
+                            # 打成 failed，整台机器的 Hysteria 全挂。
+                            # 现在先探测：存在才用 direct_ipv4（保留强制 IPv4 的意图），
+                            # 否则退回 hysteria 内置的 direct。
+                            tail_name = 'direct_ipv4' if has_outbound('direct_ipv4') else 'direct'
 
                             acl_block = '\nacl:\n  inline:\n'
                             for d in current_rules:
-                                acl_block += f'    - warp_socks(suffix:{d})\n'
-                            acl_block += '    - direct_ipv4(all)\n'
+                                acl_block += '    - %s(suffix:%s)\n' % (warp_name, d)
+                            acl_block += '    - %s(all)\n' % tail_name
                             cfg_text += acl_block
 
-                        cfg_path.write_text(cfg_text.strip() + '\n', encoding='utf-8')
-                        subprocess.run(['systemctl', 'restart', 'hysteria-server'], capture_output=True, timeout=10)
+                        new_text = cfg_text.strip() + '\n'
+
+                        # 改配置前留备份，重启后校验；起不来就自动回滚。
+                        # 光靠"写对了"不够 —— 一个引用错出站的 ACL 就足以让服务起不来，
+                        # 所以必须有一层兜底，不能让 Web 上的一个开关把服务打挂。
+                        backup = cfg_path.read_text(encoding='utf-8')
+                        cfg_path.write_text(new_text, encoding='utf-8')
+                        subprocess.run(['systemctl', 'restart', 'hysteria-server'],
+                                       capture_output=True, timeout=15)
+                        time.sleep(2)
+                        state = subprocess.run(['systemctl', 'is-active', 'hysteria-server'],
+                                               capture_output=True, text=True, timeout=5).stdout.strip()
+                        if state != 'active':
+                            cfg_path.write_text(backup, encoding='utf-8')
+                            subprocess.run(['systemctl', 'restart', 'hysteria-server'],
+                                           capture_output=True, timeout=15)
+                            with data_lock:
+                                data['warp_apply_error'] = 'ACL 写入后 Hysteria 启动失败，已自动回滚配置'
+                        else:
+                            with data_lock:
+                                data.pop('warp_apply_error', None)
+                        # data_lock 是可重入锁，save_data 内部会再取一次，安全
+                        save_data()
 
                     threading.Thread(target=apply_hy2_acl, daemon=True).start()
 

@@ -38,9 +38,33 @@
   - 卸载后 `/etc/amnezia`、服务单元、二进制、接口全部清理，AWG 自己的 `MASQUERADE` / `FORWARD` 规则归零，且 **Hysteria2 服务与其端口跳跃规则毫发无伤**。
 - 踩到的两个"假故障"值得记录：判定 iptables 残留时**不能比对整张表** —— 本机跑着 Docker，它会在任意时刻动态增删自己的 `br-*` 规则，导致误报（本测试先后用行数比较和全表比对各误报过一次）；改为只比对 AWG 自己的规则。
 
+### 修复（真机按钮冒烟测试发现）
+- 🔴 **Web 端点一下 WARP 开关会把 Hysteria 打成 failed，整台机器的 Hysteria 全挂**（严重）。
+  门户的 `manage-warp` 无条件往 `config.yaml` 的 ACL 末尾写 `direct_ipv4(all)`，但**从不确保该出站存在**。而 `direct_ipv4` 出站是由 config 模板定义的，`toggle_warp.sh` 重写配置时可能把它连 `outbounds` 段一起删掉 —— 一旦两条路径混用，写出的 ACL 就引用了悬空出站，hysteria 启动即 FATAL：
+
+  ```
+  invalid config: acl.inline: error at line N: outbound direct_ipv4 not found
+  ```
+
+  且因为 `hysteria-server.service` 配了 `StartLimitBurst=5`，连续失败 5 次后 systemd 直接放弃（`Start request repeated too quickly`），**必须手工 `reset-failed` 才能恢复**。
+  修复：写 ACL 前先探测实际存在的出站 —— `direct_ipv4` 存在才用它（保留强制 IPv4 的意图），否则退回 hysteria 内置的 `direct`；出站名同样探测（`warp_socks` / `warp`），不再假定模板布局。
+- **给 WARP 配置写入加了「校验 + 自动回滚」兜底**：改配置前留备份，重启后确认 `systemctl is-active`；起不来就自动还原备份并重启，把失败信息记进 `portal_data['warp_apply_error']`。光靠"写对了"不够 —— 一个引用错出站的 ACL 就足以让服务起不来。
+- **门户与 `toggle_warp.sh` 的出站命名不一致**：门户用旧名 `warp_socks`，而某些版本的 `toggle_warp.sh` 已迁移到 `warp`，导致配置里两个出站并存、ACL 引用哪一个全靠运气。现在按实际存在者取值。
+- **`awg-conf` 查不存在的客户端返回 500**，语义上应是 404（前端需要区分「查无此人」与「服务端出错」）。
+
+### 新增：Web 端更新面板
+- **修好「更新面板」按钮不显示**：`portal_has_update` 依赖 `data['portal_sha']`，而该字段**只被读取、从未被写入**（全仓库 grep 只有两处读取、零处写入），导致它恒为 `False`、按钮永远 `display:none`。改用 **git blob sha 比对文件内容**（本地算 `sha1("blob <len>\0" + content)`，远端从 contents API 的 JSON 取 sha），并把写死的 `portal_current = '2026.09.21'` 一并换掉。
+- **面板自更新不再走 `do_upgrade.sh`**：那个脚本从 `raw.githubusercontent.com` 拉 portal.py，会踩 raw 的 CDN 缓存（push 后数分钟仍是旧内容）。改为 portal.py 内部用三级回退取文件、留 `.bak` 备份后原子替换、`start_new_session=True` 延迟重启。
+- 更新面板新增 **AmneziaWG 引擎** 一行（支持 `do-upgrade target=awg`）与「🔄 重新检测」按钮；版本文案区分「未安装 / 远端未取到 / 有新版本 / 最新」四种情况，避免拿不到远端时误报「最新」。
+- 版本检查的远端结果**服务端缓存 5 分钟**，并改用「目录列表」接口一次取回所有文件 sha —— 版本检查每次页面加载都会触发，而 GitHub 未认证 API 限 60 次/小时/IP。
+
 ### 测试
-- 新增 `.github/workflows/tests.yml`：在 push / PR 时校验三份 shell 脚本语法、**强制校验 `install.sh` 内嵌的 `portal.py` 副本与 `portal.py` 逐字节一致**（这条不变量极易悄悄退化，本次开发中就差一点把门户改动丢掉），并跑完整测试套件。- 新增 `tests/test_awgctl.sh`（纯逻辑，无需 root，可跨平台运行）：覆盖混淆参数的**全部上游硬约束**、端口跳跃区间避让、**服务端与客户端配置的 11 个参数逐字节一致性**、peer 生命周期与地址回收、meta 读写、随机数边界、命令行参数解析。做了反向验证（故意注入 `H2=H1` 与"客户端 S1 不一致"两个缺陷，确认测试能抓到）。
+- 新增 `.github/workflows/tests.yml`：在 push / PR 时校验 shell 脚本语法、**强制校验 `install.sh` 内嵌的 `portal.py` 副本与 `portal.py` 逐字节一致**（这条不变量极易悄悄退化，本次开发中就差一点把门户改动丢掉），并跑完整测试套件。
+- 新增 `tests/test_awgctl.sh`（纯逻辑，无需 root，可跨平台运行）：覆盖混淆参数的**全部上游硬约束**、端口跳跃区间避让、**服务端与客户端配置的 11 个参数逐字节一致性**、peer 生命周期与地址回收、meta 读写、随机数边界、命令行参数解析。做了反向验证（故意注入 `H2=H1` 与"客户端 S1 不一致"两个缺陷，确认测试能抓到）。
 - 新增 `tests/test_portal_awg.py`：页面渲染（含 **f-string 无残留占位符** 回归检查）、**CSP `sha256` 白名单跟随 `SCRIPT` 变化**、端点鉴权、路径穿越与非法名称拦截、端口区间拦截、**私钥不泄露**、`awg-conf` 路由可达性。
+- 新增 `tests/portal-buttons-smoke.sh`：逐个调用每个按钮背后的端点，**走成功路径**而不只是验错误路径。在 se 上实测 **58 项断言全部通过**。其中专门为上面那个 WARP bug 加了回归断言：真的点一次 WARP 开关，并确认 Hysteria 仍然 active（两次切换各验一次）。
+- 新增 `tests/portal-update-cycle.sh`：验证「推送后 Web 端能真的更新过去」的完整循环 —— 起点一致 → 扰动本地 → 检测到差异 → 点更新 → **内容逐字节收敛到 main**。在 se 上实测 15 项全过。
+- 三个真机脚本（`awg-e2e-smoke.sh` / `portal-buttons-smoke.sh` / `portal-update-cycle.sh`）都需要 root + 已部署服务（会真的装/卸 AWG、创建删除用户、重启面板），因此 CI 里只做 `bash -n` 语法校验。
 - 迭代轮数可用 `AWG_TEST_ROUNDS` 调整（CI/Linux 默认 1500；Windows 上每次 `awg_rand` 都要起 `od` 子进程，建议调低）。
 
 ### WARP 实现统一 (wgcf + wireproxy)
