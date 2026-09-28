@@ -45,6 +45,74 @@ log_warn() { echo -e "${YELLOW}[WARN]${PLAIN} $1"; }
 log_err()  { echo -e "${RED}[ERROR]${PLAIN} $1"; }
 log_step() { echo -e "${CYAN}==>${PLAIN} ${BLUE}$1${PLAIN}"; }
 
+# 端口合法性：1-65535 的纯数字。
+# 抽成公共函数，保证「交互输入」和「环境变量传入」走同一套校验 ——
+# 之前交互路径不校验、环境变量路径更不校验，输错会一路写进配置，
+# 表现是「显示安装成功但服务起不来」，新手完全想不到是自己打错了。
+is_valid_port() {
+    [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 65535 ))
+}
+
+# ==============================================================================
+# 交互环境自愈（必须在所有交互之前）
+# ------------------------------------------------------------------------------
+# 必须区分两种"stdin 不是终端"的情况，处置方式完全相反：
+#
+#   A) 脚本本身来自 stdin —— curl … | bash、cat install.sh | bash
+#      特征：BASH_SOURCE[0] 为空（bash 直接把 stdin 当脚本来读）。
+#      此时脚本里每一条 read 都会去读【脚本体】，表现为「菜单一闪而过 /
+#      装到一半卡住 / 选项莫名乱跳」，而且没有任何有意义的报错，新手无从自查。
+#      → 把 stdin 接到终端，交互恢复正常。
+#
+#   B) 脚本是文件、只是"答案"来自 stdin —— printf '1\n\n' | bash install.sh
+#      特征：BASH_SOURCE[0] 是脚本路径。
+#      这是正常的脚本化/自动化用法，**绝不能**劫持它的 stdin。
+# ==============================================================================
+if [[ -z "${BASH_SOURCE[0]:-}" ]]; then
+    if { true </dev/tty; } 2>/dev/null; then
+        # 有可用终端：把 stdin 接到终端，交互恢复正常
+        exec </dev/tty
+    elif [[ $# -eq 0 ]]; then
+        # 既没有终端、又没带子命令 —— 接下来必然要弹交互菜单，无法进行
+        log_err "检测到脚本是从 stdin 读入的（典型的 'curl … | bash' 用法）。"
+        log_err "这样运行时脚本里的交互提问会把脚本自身读掉，导致菜单乱跳或卡住。"
+        echo
+        echo -e "  请改用下面任一方式重新执行："
+        echo -e "    ${GREEN}bash <(curl -fsSL <脚本URL>)${PLAIN}                    # 推荐"
+        echo -e "    ${GREEN}curl -fsSL <脚本URL> -o install.sh && bash install.sh${PLAIN}"
+        echo
+        echo -e "  或改用免交互方式（不需要终端）："
+        echo -e "    ${GREEN}HY2_CERT_TYPE=3 HY2_DOMAIN=hy2.example.com HY2_EMAIL=me@example.com bash install.sh install${PLAIN}"
+        exit 1
+    fi
+    # 带子命令且确实没有终端：允许继续（子命令本身可能不需要输入）
+fi
+
+# 免交互环境变量：提前校验，别等装到一半才报错
+if [[ -n "${HY2_PORT:-}" ]] && ! is_valid_port "$HY2_PORT"; then
+    log_err "环境变量 HY2_PORT='${HY2_PORT}' 不是合法端口（需为 1-65535 的整数）。"
+    exit 1
+fi
+if [[ -n "${HY2_CERT_TYPE:-}" ]] && [[ ! "${HY2_CERT_TYPE}" =~ ^[1-4]$ ]]; then
+    log_err "环境变量 HY2_CERT_TYPE='${HY2_CERT_TYPE}' 无效，只能是 1 / 2 / 3 / 4。"
+    exit 1
+fi
+if [[ -n "${HY2_NODE_MODE:-}" ]] && [[ ! "${HY2_NODE_MODE}" =~ ^[12]$ ]]; then
+    log_err "环境变量 HY2_NODE_MODE='${HY2_NODE_MODE}' 无效，只能是 1（单机）或 2（集群 Agent）。"
+    exit 1
+fi
+if [[ "${HY2_CERT_TYPE:-}" == "3" && -z "${HY2_DOMAIN:-}" ]]; then
+    log_err "HY2_CERT_TYPE=3 需要同时提供 HY2_DOMAIN=<你的域名>。"
+    exit 1
+fi
+
+# 中断保护：Ctrl+C 时明确告知状态，别让用户对着半成品不知所措
+trap '
+    echo
+    log_warn "已中断（Ctrl+C）。已完成的步骤不会回滚，重新运行脚本即可从当前状态继续。"
+    exit 130
+' INT
+
 # 1. 基础环境检查
 check_root() {
     if [[ $EUID -ne 0 ]]; then
@@ -199,13 +267,23 @@ setup_certificates() {
     
     echo -e "\n${CYAN}------------------------------------------------------------${PLAIN}"
     echo -e "${GREEN}TLS 证书配置方式：${PLAIN}"
-    echo -e "  ${YELLOW}1.${PLAIN} 使用自动生成的自签名证书 (最简单快捷，客户端需开启 skip-cert-verify / insecure)"
-    echo -e "  ${YELLOW}2.${PLAIN} 自定义已有证书文件路径 (例如 acme.sh / certbot 已签发的 fullchain.pem 与 privkey.pem)"
-    echo -e "  ${YELLOW}3.${PLAIN} 绑定域名并自动申请 Let's Encrypt 证书 (推荐)"
-    echo -e "  ${YELLOW}4.${PLAIN} 自动扫描并使用本机已有证书 (Let's Encrypt / acme.sh)"
+    echo -e "  ${YELLOW}1.${PLAIN} 自签名证书 —— 最快，但客户端必须开「跳过证书校验」，个别客户端不支持"
+    echo -e "  ${YELLOW}2.${PLAIN} 使用已有证书文件 (acme.sh / certbot 签发的 fullchain.pem + privkey.pem)"
+    echo -e "  ${YELLOW}3.${PLAIN} 绑定域名自动申请 Let's Encrypt —— ${GREEN}已有域名的话强烈建议选这个${PLAIN}"
+    echo -e "  ${YELLOW}4.${PLAIN} 自动扫描本机已装证书 (Let's Encrypt / acme.sh)"
     echo -e "${CYAN}------------------------------------------------------------${PLAIN}"
-    read -rp "请选择证书类型 [默认: 1]: " cert_choice
-    cert_choice=${cert_choice:-1}
+    echo -e "  ${YELLOW}怎么选：有域名 → 选 3（客户端零额外设置）；没域名 → 选 1（记得客户端开 insecure）。${PLAIN}"
+    if [[ -n "${HY2_CERT_TYPE:-}" ]]; then
+        cert_choice="$HY2_CERT_TYPE"
+        log_info "已使用环境变量 HY2_CERT_TYPE=${cert_choice} 选择证书方式。"
+    else
+        read -rp "请选择证书类型 [默认: 1]: " cert_choice || true
+        cert_choice=${cert_choice:-1}
+    fi
+    if [[ "$cert_choice" == "1" ]]; then
+        log_info "已选自签名证书：客户端需开启「跳过证书校验 / insecure」。"
+        log_info "本脚本生成的客户端直链已自动附带 pinSHA256 + insecure=1，按直链导入即可。"
+    fi
 
     if [[ "$cert_choice" == "2" ]]; then
         read -rp "请输入证书公钥文件完整路径 (fullchain.pem/cert.crt): " input_cert
@@ -283,12 +361,22 @@ select_local_certificate() {
 
 setup_acme_certificate() {
     echo -e "${YELLOW}申请 ACME 证书前，请确认域名 A/AAAA 记录已指向本机，且云安全组与本机防火墙允许 TCP 80。${PLAIN}"
-    read -rp "请输入要绑定的域名 (例如 hy2.example.com): " SERVER_NAME
+    if [[ -n "${HY2_DOMAIN:-}" ]]; then
+        SERVER_NAME="$HY2_DOMAIN"
+        log_info "已使用环境变量 HY2_DOMAIN=${SERVER_NAME} 指定域名。"
+    else
+        read -rp "请输入要绑定的域名 (例如 hy2.example.com): " SERVER_NAME || true
+    fi
     if [[ -z "$SERVER_NAME" || "$SERVER_NAME" == *"/"* || "$SERVER_NAME" == *":"* ]]; then
         log_err "域名不能为空，且不能包含协议、路径或端口。"
         return 1
     fi
-    read -rp "请输入 ACME 通知邮箱: " ACME_EMAIL
+    if [[ -n "${HY2_EMAIL:-}" ]]; then
+        ACME_EMAIL="$HY2_EMAIL"
+        log_info "已使用环境变量 HY2_EMAIL 指定通知邮箱。"
+    else
+        read -rp "请输入 ACME 通知邮箱: " ACME_EMAIL || true
+    fi
     if [[ -z "$ACME_EMAIL" || "$ACME_EMAIL" != *"@"* ]]; then
         log_err "请输入有效的通知邮箱。"
         return 1
@@ -345,21 +433,59 @@ setup_ports_and_obfs() {
     echo -e "${GREEN}服务端口与端口跳跃配置：${PLAIN}"
     echo -e "${CYAN}------------------------------------------------------------${PLAIN}"
     
+    # 默认端口避开 20000-40000：那是端口跳跃区间，主监听端口落在里面会与
+    # 跳跃的 REDIRECT 规则互相干扰（本项目 AWG 选端口也是刻意避开该区间的）。
     DEFAULT_PORT=$((RANDOM % 40000 + 10000))
-    read -rp "请输入主监听 UDP 端口 [1-65535, 默认: ${DEFAULT_PORT}]: " LISTEN_PORT
-    LISTEN_PORT=${LISTEN_PORT:-$DEFAULT_PORT}
+    while (( DEFAULT_PORT >= 20000 && DEFAULT_PORT <= 40000 )); do
+        DEFAULT_PORT=$((RANDOM % 40000 + 10000))
+    done
+
+    # 端口合法性校验：原来不做任何校验，输错（abc / 99999 / 0）会一路写进配置，
+    # 装完表现为「显示安装成功但服务起不来」，新手根本想不到是自己打错了。
+    if [[ -n "${HY2_PORT:-}" ]]; then
+        if ! is_valid_port "$HY2_PORT"; then
+            log_err "环境变量 HY2_PORT='${HY2_PORT}' 不是合法端口（需为 1-65535 的整数）。"
+            exit 1
+        fi
+        LISTEN_PORT="$HY2_PORT"
+        log_info "已使用环境变量 HY2_PORT=${LISTEN_PORT} 指定监听端口。"
+    else
+        while true; do
+            read -rp "请输入主监听 UDP 端口 [1-65535, 默认: ${DEFAULT_PORT}]: " LISTEN_PORT || true
+            LISTEN_PORT=${LISTEN_PORT:-$DEFAULT_PORT}
+            if is_valid_port "$LISTEN_PORT"; then
+                break
+            fi
+            log_err "端口必须是 1-65535 之间的整数，请重新输入。"
+        done
+    fi
+    if is_valid_port "$LISTEN_PORT" && (( LISTEN_PORT >= 20000 && LISTEN_PORT <= 40000 )); then
+        log_warn "所选端口 ${LISTEN_PORT} 落在端口跳跃区间 20000-40000 内。"
+        log_warn "该区间会被 REDIRECT 到主监听端口，两者重叠时行为容易混乱，建议换区间外的端口。"
+    fi
 
     # 密码生成
     RANDOM_PASS=$(openssl rand -hex 16)
-    read -rsp "请输入连接认证密码 [回车自动生成]: " AUTH_PASSWORD; echo
-    AUTH_PASSWORD=${AUTH_PASSWORD:-$RANDOM_PASS}
+    if [[ -n "${HY2_PASSWORD:-}" ]]; then
+        AUTH_PASSWORD="$HY2_PASSWORD"
+        log_info "已使用环境变量 HY2_PASSWORD 指定认证密码。"
+    else
+        read -rsp "请输入连接认证密码 [回车自动生成]: " AUTH_PASSWORD || true; echo
+        AUTH_PASSWORD=${AUTH_PASSWORD:-$RANDOM_PASS}
+    fi
 
     # 运行模式选择 (单机私密 vs 商城集群 Agent 模式)
-    echo -e "\n请选择当前 Hysteria 2 节点的运行模式："
-    echo -e "  ${GREEN}1.${PLAIN} 单机私密模式 (默认：单用户/自用，提供 Web 信息中心)"
-    echo -e "  ${GREEN}2.${PLAIN} 商城集群 Agent 模式 (开启 REST API 接口，支持动态开户/续费，对接商城)"
-    read -rp "请输入选项 [1-2, 默认 1]: " node_mode_choice
-    node_mode_choice=${node_mode_choice:-1}
+    if [[ -n "${HY2_NODE_MODE:-}" ]]; then
+        node_mode_choice="$HY2_NODE_MODE"
+        log_info "已使用环境变量 HY2_NODE_MODE=${node_mode_choice} 指定运行模式。"
+    else
+        echo -e "\n请选择当前 Hysteria 2 节点的运行模式："
+        echo -e "  ${GREEN}1.${PLAIN} 单机私密模式 (默认：单用户/自用，提供 Web 信息中心)"
+        echo -e "  ${GREEN}2.${PLAIN} 商城集群 Agent 模式 (开启 REST API 接口，支持动态开户/续费，对接商城)"
+        echo -e "  ${YELLOW}拿不准就选 1${PLAIN}：自用或几个朋友共用选 1；要接发卡商城自动开户才选 2。"
+        read -rp "请输入选项 [1-2, 默认 1]: " node_mode_choice || true
+        node_mode_choice=${node_mode_choice:-1}
+    fi
 
     if [[ "$node_mode_choice" == "2" ]]; then
         NODE_MODE="agent"
@@ -796,17 +922,59 @@ show_client_configs() {
         log_err "尚未生成信息页，请重新配置。"
         return 1
     fi
-    jq -r '"私密信息页: " + .url, "用户名: " + .username, "密码: " + .password' "$HY2_DIR/portal-access.json"
-    local key=$(jq -r '.api_key // empty' "$HY2_DIR/portal-access.json")
+
+    local url user pass
+    url=$(jq -r '.url' "$HY2_DIR/portal-access.json")
+    user=$(jq -r '.username' "$HY2_DIR/portal-access.json")
+    pass=$(jq -r '.password' "$HY2_DIR/portal-access.json")
+
+    # 原来这里只吐一串凭据就结束了，新手装完完全不知道下一步该做什么。
+    # 实际上「装完」只是完成了一半 —— 真正要用起来还需要：打开信息页 → 导入客户端
+    # → 确认云安全组放行。这三步是新手卡住最多的地方，所以直接在收尾时讲清楚。
+    echo
+    echo -e "${CYAN}================================================================${PLAIN}"
+    echo -e "${GREEN}                       接下来怎么用？${PLAIN}"
+    echo -e "${CYAN}================================================================${PLAIN}"
+    echo
+    echo -e "${YELLOW}第 1 步 · 打开你的私密信息页${PLAIN}（浏览器访问，会要求输入下面的账号密码）"
+    echo -e "    ${GREEN}${url}${PLAIN}"
+    echo -e "    用户名: ${GREEN}${user}${PLAIN}"
+    echo -e "    密  码: ${GREEN}${pass}${PLAIN}"
+    echo
+    echo -e "${YELLOW}第 2 步 · 在信息页里把节点导入客户端${PLAIN}"
+    echo -e "    「节点导入」标签页里有二维码和节点直链，手机直接扫码、电脑复制直链即可。"
+    echo -e "    支持 v2rayN / Nekobox / Shadowrocket / Clash.Meta / Sing-box 等。"
+    echo
+    echo -e "${YELLOW}第 3 步 · 确认云服务商安全组已放行端口${PLAIN}"
+    echo -e "    ${RED}装好了却连不上，十有八九是这里没放行。${PLAIN}"
+    echo -e "    ${GREEN}UDP ${HOP_START:-20000}-${HOP_END:-40000}${PLAIN}   节点连接用的端口跳跃区间（要放行整个区间，不是单个端口）"
+    echo -e "    ${GREEN}TCP ${HY2_SUB_PORT}${PLAIN}        私密信息页（就是上面那个 URL 的端口）"
+    if [[ "${CERT_TYPE:-}" == "acme" ]]; then
+        echo -e "    ${GREEN}TCP 80${PLAIN}        申请 / 续期 Let's Encrypt 证书用"
+    fi
+
+    local key
+    key=$(jq -r '.api_key // empty' "$HY2_DIR/portal-access.json" 2>/dev/null) || true
     if [[ -n "$key" ]]; then
-        echo -e "${YELLOW}节点通信 API Key (供商城集群对接): ${GREEN}${key}${PLAIN}"
+        echo
+        echo -e "${YELLOW}节点通信 API Key${PLAIN}（只有商城集群 Agent 模式才需要，自用可忽略）"
+        echo -e "    ${GREEN}${key}${PLAIN}"
     fi
-    local pin=$(jq -r '.pin_sha256 // empty' "$HY2_META_FILE" 2>/dev/null)
+
+    local pin
+    pin=$(jq -r '.pin_sha256 // empty' "$HY2_META_FILE" 2>/dev/null) || true
     if [[ -n "$pin" ]]; then
-        echo -e "${YELLOW}自签证书 SHA-256 指纹 (HEX，已写入直链 pinSHA256): ${GREEN}${pin}${PLAIN}"
+        echo
+        echo -e "${YELLOW}自签证书 SHA-256 指纹${PLAIN}（已自动写进客户端直链，一般不用手动处理）"
+        echo -e "    ${GREEN}${pin}${PLAIN}"
+        log_warn "自签证书靠指纹校验客户端；若能给域名签一张正式证书，可彻底免去指纹维护。"
     fi
-    log_info "请在云安全组放行信息页 URL 中的 TCP 端口。"
-    log_warn "自签证书模式已在直链中附带 pinSHA256(HEX) + insecure=1；生产环境强烈推荐改用有效域名证书，可免去全部指纹维护。"
+
+    echo
+    echo -e "${CYAN}----------------------------------------------------------------${PLAIN}"
+    echo -e "  以后想再看本节内容，直接执行：  ${GREEN}bash install.sh info${PLAIN}"
+    echo -e "  查看服务状态：                  ${GREEN}bash install.sh status${PLAIN}"
+    echo -e "${CYAN}================================================================${PLAIN}"
 }
 
 write_portal_program() {
@@ -2571,7 +2739,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
 <div class="tab-bar">
   <button class="tab-btn active" data-tab="connect">🚀 节点导入 (Connect)</button>
   <button class="tab-btn" data-tab="users">👥 多用户管理 ({active_count}/{len(users)})</button>
-  <button class="tab-btn" data-tab="proxies">🌐 入站代理 & WARP</button>
+  <button class="tab-btn" data-tab="proxies">🧩 代理 · WARP · AWG</button>
   <button class="tab-btn" data-tab="reality">🛡️ VLESS-Reality (备用)</button>
   <button class="tab-btn" data-tab="cluster">🔑 通用 REST API 对接</button>
   <button class="tab-btn" data-tab="configs">⚙️ 高级配置</button>
@@ -2701,6 +2869,15 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
 
 <!-- Tab 3: 入站代理与 WARP 扩展服务视图 (独立专区) -->
 <div class="tab-pane" id="pane-proxies">
+  <!-- 本页三块：入站代理 / WARP 分流 / AmneziaWG。
+       标签原来只写「入站代理 & WARP」，而 AmneziaWG 是 README 的重点功能，
+       藏在第三张卡片里新手根本找不到 —— 所以标签和页内都补上说明。 -->
+  <div style="margin-bottom:16px;padding:12px 14px;background:#f3f7f6;border-radius:10px;font-size:12.5px;color:#456972;line-height:1.75">
+    本页是三块<b>互相独立</b>的功能，只想要其中某一项就找到对应卡片操作，互不影响：<br>
+    <b>① 入站代理</b> —— 把服务器当普通 SOCKS5 / HTTP 代理用（客户端不用装 Hysteria）<br>
+    <b>② Cloudflare WARP 分流</b> —— 让指定域名走干净的住宅出口，用于解锁 AI 服务<br>
+    <b>③ AmneziaWG</b> —— 抗 DPI 的 WireGuard 分支，需要客户端额外装一个 WireGuard 类 App
+  </div>
   <!-- 区块 1: 入站代理服务 (GOST 驱动) -->
   <section class="card" style="margin-bottom:22px">
     <div class="user-header">
@@ -6711,6 +6888,7 @@ uninstall_all() {
 
 # 主控制台菜单
 menu() {
+  while true; do
     clear 2>/dev/null || true
     echo -e "${CYAN}================================================================${PLAIN}"
     echo -e "${GREEN}       Hysteria 2 全功能生产级管理脚本 (${HY2_ARCH:-$(uname -m)})         ${PLAIN}"
@@ -6752,12 +6930,31 @@ menu() {
     echo -e "  ${GREEN}13.${PLAIN} 彻底卸载 Hysteria 2"
     echo -e "  ${GREEN}0.${PLAIN} 退出脚本"
     echo -e "${CYAN}================================================================${PLAIN}"
-    read -rp "请输入选项 [0-13]: " choice
+    # read 失败 = stdin 到 EOF（管道输入用尽，或用户按了 Ctrl+D）。
+    # 不显式处理的话会由 set -e 直接以退出码 1 静默结束，用户看不懂发生了什么。
+    if ! read -rp "请输入选项 [0-13]: " choice; then
+        echo
+        log_info "输入已结束（EOF），退出脚本。"
+        exit 0
+    fi
 
     case "$choice" in
         1)
             check_root
             check_arch
+            # 已装机再按「1」会重生成配置、可能换掉端口/密码/证书，
+            # 已发放的客户端配置随之失效 —— 必须让用户确认一次。
+            if [[ -f "$HY2_CONFIG" ]]; then
+                echo
+                log_warn "检测到本机已安装 Hysteria 2。"
+                log_warn "继续将重新生成服务端配置；若中途更换了端口/密码/证书，"
+                log_warn "已发放的客户端配置会失效，需要重新导出。"
+                read -rp "确定要重新安装吗？[y/N]: " _reinstall_hint || true
+                if [[ ! "$_reinstall_hint" =~ ^[Yy]$ ]]; then
+                    log_info "已取消。如需修改端口/密码/证书，请用菜单第 4 项「重新修改配置」。"
+                    continue
+                fi
+            fi
             install_dependencies
             get_public_ip || exit 1
             install_binary
@@ -6800,8 +6997,6 @@ menu() {
             # AmneziaWG 安装入口。用 || true 兜住失败，避免 set -e 把整个菜单打断，
             # 让用户能看到报错后返回菜单重试。
             install_amneziawg || true
-            echo ""
-            read -rp "按回车返回主菜单..." _
             ;;
         8)
             menu_amneziawg || true
@@ -6828,9 +7023,25 @@ menu() {
         *)
             log_err "无效选项，请重新选择！"
             sleep 1
-            menu
+            continue
             ;;
     esac
+
+    # 操作完成后回到主菜单，而不是把用户直接丢回 shell。
+    # 放这里而不是每个分支各写一遍 —— 原来只有第 7 项会停留，其余都会直接退出，
+    # 新手装完想接着做点别的就得重新跑一遍脚本。
+    echo
+    # 同上：EOF 时给个明确交代，而不是静默退出码 1
+    if ! read -rp "按回车返回主菜单（输入 q 退出脚本）: " _back; then
+        echo
+        log_info "输入已结束（EOF），退出脚本。"
+        exit 0
+    fi
+    if [[ "$_back" =~ ^[Qq]$ ]]; then
+        echo -e "${GREEN}已退出。${PLAIN}"
+        exit 0
+    fi
+  done
 }
 
 # 命令行直通参数 (如: ./install.sh install / update / status / info)

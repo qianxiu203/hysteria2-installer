@@ -1758,7 +1758,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
 <div class="tab-bar">
   <button class="tab-btn active" data-tab="connect">🚀 节点导入 (Connect)</button>
   <button class="tab-btn" data-tab="users">👥 多用户管理 ({active_count}/{len(users)})</button>
-  <button class="tab-btn" data-tab="proxies">🌐 入站代理 & WARP</button>
+  <button class="tab-btn" data-tab="proxies">🧩 代理 · WARP · AWG</button>
   <button class="tab-btn" data-tab="reality">🛡️ VLESS-Reality (备用)</button>
   <button class="tab-btn" data-tab="cluster">🔑 通用 REST API 对接</button>
   <button class="tab-btn" data-tab="configs">⚙️ 高级配置</button>
@@ -1888,6 +1888,15 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
 
 <!-- Tab 3: 入站代理与 WARP 扩展服务视图 (独立专区) -->
 <div class="tab-pane" id="pane-proxies">
+  <!-- 本页三块：入站代理 / WARP 分流 / AmneziaWG。
+       标签原来只写「入站代理 & WARP」，而 AmneziaWG 是 README 的重点功能，
+       藏在第三张卡片里新手根本找不到 —— 所以标签和页内都补上说明。 -->
+  <div style="margin-bottom:16px;padding:12px 14px;background:#f3f7f6;border-radius:10px;font-size:12.5px;color:#456972;line-height:1.75">
+    本页是三块<b>互相独立</b>的功能，只想要其中某一项就找到对应卡片操作，互不影响：<br>
+    <b>① 入站代理</b> —— 把服务器当普通 SOCKS5 / HTTP 代理用（客户端不用装 Hysteria）<br>
+    <b>② Cloudflare WARP 分流</b> —— 让指定域名走干净的住宅出口，用于解锁 AI 服务<br>
+    <b>③ AmneziaWG</b> —— 抗 DPI 的 WireGuard 分支，需要客户端额外装一个 WireGuard 类 App
+  </div>
   <!-- 区块 1: 入站代理服务 (GOST 驱动) -->
   <section class="card" style="margin-bottom:22px">
     <div class="user-header">

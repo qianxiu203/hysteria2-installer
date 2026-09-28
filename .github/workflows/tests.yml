@@ -46,6 +46,46 @@ jobs:
           bash -n tests/portal-update-cycle.sh
           bash -n fix_cert_chain.sh
 
+      - name: 交互逻辑行为测试
+        # 这些不是语法检查，而是真的把脚本跑起来验行为 ——
+        # 下面几条都是新手真实踩过的坑，必须锁住。
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+
+          # 1) 脚本从 stdin 读入（curl … | bash）必须被拦住，并告知正确用法。
+          #    拦不住的话，所有 read 都会去读脚本体，表现为菜单乱跳/卡住且无报错。
+          set +e
+          out=$(cat install.sh | bash 2>&1); rc=$?
+          set -e
+          echo "$out" | grep -q '脚本是从 stdin 读入' || fail "未拦截 curl|bash 用法"
+          [ "$rc" -ne 0 ] || fail "拦截后未以非零码退出"
+
+          # 2) 答案从 stdin 喂入（printf '1\n' | bash install.sh）是正常自动化用法，
+          #    不能被上面的检测误杀。
+          #    注意：bash 的 `read -p` 提示符【只在输入来自终端时】才打印，
+          #    stdin 是管道时看不到提示符，所以这里断言菜单项（echo 输出）而不是提示符。
+          out2=$(printf '0\n' | bash install.sh 2>&1 || true)
+          echo "$out2" | grep -q '彻底卸载 Hysteria 2' || fail "管道喂答案被误拦（应正常打印菜单）"
+
+          # 3) 端口校验：合法放行、非法拒绝
+          eval "$(sed -n '/^is_valid_port()/,/^}/p' install.sh)"
+          for p in 1 80 8443 65535; do
+            is_valid_port "$p" || fail "合法端口被拒: $p"
+          done
+          for p in 0 65536 abc '' '80 ' -1 8080x; do
+            if is_valid_port "$p"; then fail "非法端口被放行: [$p]"; fi
+          done
+
+          # 4) 免交互环境变量必须在动工之前就校验（否则装到一半才报错）
+          out4=$(HY2_PORT=abc bash install.sh install 2>&1 || true)
+          echo "$out4" | grep -q '不是合法端口' || fail "HY2_PORT 非法值未被拦"
+          out5=$(HY2_CERT_TYPE=9 bash install.sh install 2>&1 || true)
+          echo "$out5" | grep -q 'HY2_CERT_TYPE' || fail "HY2_CERT_TYPE 非法值未被拦"
+          out6=$(HY2_CERT_TYPE=3 bash install.sh install 2>&1 || true)
+          echo "$out6" | grep -q 'HY2_DOMAIN' || fail "选了 ACME 但缺 HY2_DOMAIN 未被拦"
+
+          echo "✅ 交互逻辑行为测试全部通过"
+
       - name: 确认 node 可用
         # tests/test_portal_assets.py 会用 node --check 做内嵌 JS 的语法检查。
         # 缺 node 时该测试会静默 skip —— 那样就等于没有防护，所以这里显式失败。
