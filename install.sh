@@ -3549,13 +3549,41 @@ def serve(path):
         except Exception:
             return False
 
+    def _awg_fetch_bytes():
+        """从多个源依次尝试获取 awgctl.sh，返回内容字节；全失败返回 None。
+
+        ⚠️ 不能只用 raw.githubusercontent.com：实测 push 后数分钟仍返回旧内容，
+        而且【不把查询串算进缓存键】—— 加 ?cb=<时间戳> 也没用。
+        实测同一时刻：api.github.com（Accept: vnd.github.raw）与 jsDelivr 都是最新，
+        raw 滞后。顺序：API（权威）→ jsDelivr（无限速）→ raw（兜底）。
+        与 install.sh 中 awg_fetch_ctl 的策略保持一致。
+        """
+        import urllib.request
+        sources = [
+            ('https://api.github.com/repos/' + AWG_REPO + '/contents/awgctl.sh?ref=main',
+             {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/vnd.github.raw'}),
+            ('https://cdn.jsdelivr.net/gh/' + AWG_REPO + '@main/awgctl.sh',
+             {'User-Agent': 'Mozilla/5.0'}),
+            ('https://raw.githubusercontent.com/' + AWG_REPO + '/main/awgctl.sh',
+             {'User-Agent': 'Mozilla/5.0'}),
+        ]
+        for url, headers in sources:
+            try:
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    content = resp.read()
+                # 体积与关键字双重校验，挡住错误页
+                if len(content) > 2048 and b'hy2-awgctl' in content:
+                    return content
+            except Exception:
+                continue
+        return None
+
     def ensure_awgctl(force=False):
         """确保 hy2-awgctl 可用；缺失时从主仓库拉取（与 install.sh 的策略一致）。
 
         force=True 时即使已存在也重新获取，且仅在内容变化时才替换 —— 否则已经装过
         AWG 的机器会把引擎永久冻结在首次安装的版本上。
-        URL 带 cache-busting 参数：raw.githubusercontent.com 有 CDN 缓存，
-        push 之后数分钟仍可能返回旧内容。
         """
         if not force and Path(AWG_CTL).exists():
             return True
@@ -3563,14 +3591,8 @@ def serve(path):
             import os
             import shutil
             import tempfile
-            import urllib.request
-            url = ('https://raw.githubusercontent.com/' + AWG_REPO
-                   + '/main/awgctl.sh?cb=' + str(int(time.time())))
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                content = resp.read()
-            # 太小说明拿到的是错误页而不是脚本
-            if len(content) < 2048 or b'hy2-awgctl' not in content:
+            content = _awg_fetch_bytes()
+            if content is None:
                 return False
             # 内容一致就直接返回，避免无谓改写
             if force and Path(AWG_CTL).exists():
@@ -5799,6 +5821,48 @@ EOF
 # 这样命令行菜单与 Web 门户共用同一套实现，不会出现两份配置生成逻辑漂移。
 # ==============================================================================
 
+# 依次尝试多个源获取 awgctl.sh 到指定文件；全部失败返回 1。
+#
+# ⚠️ 为什么不能只用 raw.githubusercontent.com：
+#   实测它 push 之后数分钟仍返回旧内容，而且【不把查询串算进缓存键】——
+#   加 ?cb=<时间戳> 也没用（用三个不同的 cb 值请求，返回的是同一份旧文件）。
+#   实测（同一时刻、同一台机器）：
+#     api.github.com + Accept: application/vnd.github.raw  → 最新内容
+#     cdn.jsdelivr.net/gh/<repo>@main/...                  → 最新内容
+#     raw.githubusercontent.com/...                        → 旧内容（滞后）
+#   所以顺序是：API（权威、始终最新，未认证限 60 次/小时/IP）
+#   → jsDelivr（无速率限制）→ raw（最后兜底，接受可能滞后）。
+#   这与项目里 gost 安装用多镜像回退的做法一致。
+awg_fetch_ctl() {
+    local out="$1"
+
+    # 1) GitHub API：权威且始终最新（未认证限 60 次/小时/IP，安装场景绰绰有余）
+    if curl -fsSL --max-time 30 -H "Accept: application/vnd.github.raw" \
+         "https://api.github.com/repos/${AWG_REPO}/contents/awgctl.sh?ref=main" \
+         -o "$out" 2>/dev/null \
+       && [[ -s "$out" ]] && grep -q 'hy2-awgctl' "$out" 2>/dev/null; then
+        return 0
+    fi
+
+    # 2) jsDelivr CDN：无速率限制
+    if curl -fsSL --max-time 30 \
+         "https://cdn.jsdelivr.net/gh/${AWG_REPO}@main/awgctl.sh" \
+         -o "$out" 2>/dev/null \
+       && [[ -s "$out" ]] && grep -q 'hy2-awgctl' "$out" 2>/dev/null; then
+        return 0
+    fi
+
+    # 3) raw：最后兜底，接受可能滞后
+    if curl -fsSL --max-time 30 \
+         "https://raw.githubusercontent.com/${AWG_REPO}/main/awgctl.sh" \
+         -o "$out" 2>/dev/null \
+       && [[ -s "$out" ]] && grep -q 'hy2-awgctl' "$out" 2>/dev/null; then
+        return 0
+    fi
+
+    return 1
+}
+
 # 确保 hy2-awgctl 就位。优先用与 install.sh 同目录的 awgctl.sh（本地克隆场景），
 # 否则从仓库拉取。注意本脚本常以 `bash <(curl ...)` 方式运行，此时 BASH_SOURCE
 # 指向 /dev/fd/NN，不是真实文件，所以必须做存在性判断。
@@ -5807,8 +5871,7 @@ EOF
 # 存在的意义：hy2-awgctl 本身也需要能更新，否则已经装过 AWG 的机器会把引擎
 # 永久冻结在首次安装的版本上（awg_ensure_ctl 原本一看到文件存在就直接返回）。
 #
-# 拉取 URL 带 cache-busting 参数是有意的：raw.githubusercontent.com 有 CDN 缓存，
-# 实测 push 之后数分钟仍会返回旧内容，导致刚修好的问题在测试里复现不出来。
+# 拉取走 awg_fetch_ctl 的多源回退，原因见该函数的注释。
 awg_ensure_ctl() {
     local force="no"
     if [[ "${1:-}" == "--refresh" ]]; then
@@ -5829,9 +5892,7 @@ awg_ensure_ctl() {
 
     if [[ -z "$src" ]]; then
         tmp="$(mktemp)"
-        if curl -fsSL --max-time 30 \
-             "https://raw.githubusercontent.com/${AWG_REPO}/main/awgctl.sh?cb=$(date +%s)" \
-             -o "$tmp" 2>/dev/null; then
+        if awg_fetch_ctl "$tmp"; then
             src="$tmp"
         else
             rm -f "$tmp"
@@ -5839,7 +5900,7 @@ awg_ensure_ctl() {
                 log_warn "刷新 awgctl.sh 失败（网络问题？），继续沿用现有版本。"
                 return 0
             fi
-            log_err "无法获取 awgctl.sh（本地不存在，且从仓库下载失败）"
+            log_err "无法获取 awgctl.sh（三个源均失败：GitHub API / jsDelivr / raw）"
             return 1
         fi
     fi

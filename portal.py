@@ -2753,13 +2753,41 @@ def serve(path):
         except Exception:
             return False
 
+    def _awg_fetch_bytes():
+        """从多个源依次尝试获取 awgctl.sh，返回内容字节；全失败返回 None。
+
+        ⚠️ 不能只用 raw.githubusercontent.com：实测 push 后数分钟仍返回旧内容，
+        而且【不把查询串算进缓存键】—— 加 ?cb=<时间戳> 也没用。
+        实测同一时刻：api.github.com（Accept: vnd.github.raw）与 jsDelivr 都是最新，
+        raw 滞后。顺序：API（权威）→ jsDelivr（无限速）→ raw（兜底）。
+        与 install.sh 中 awg_fetch_ctl 的策略保持一致。
+        """
+        import urllib.request
+        sources = [
+            ('https://api.github.com/repos/' + AWG_REPO + '/contents/awgctl.sh?ref=main',
+             {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/vnd.github.raw'}),
+            ('https://cdn.jsdelivr.net/gh/' + AWG_REPO + '@main/awgctl.sh',
+             {'User-Agent': 'Mozilla/5.0'}),
+            ('https://raw.githubusercontent.com/' + AWG_REPO + '/main/awgctl.sh',
+             {'User-Agent': 'Mozilla/5.0'}),
+        ]
+        for url, headers in sources:
+            try:
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    content = resp.read()
+                # 体积与关键字双重校验，挡住错误页
+                if len(content) > 2048 and b'hy2-awgctl' in content:
+                    return content
+            except Exception:
+                continue
+        return None
+
     def ensure_awgctl(force=False):
         """确保 hy2-awgctl 可用；缺失时从主仓库拉取（与 install.sh 的策略一致）。
 
         force=True 时即使已存在也重新获取，且仅在内容变化时才替换 —— 否则已经装过
         AWG 的机器会把引擎永久冻结在首次安装的版本上。
-        URL 带 cache-busting 参数：raw.githubusercontent.com 有 CDN 缓存，
-        push 之后数分钟仍可能返回旧内容。
         """
         if not force and Path(AWG_CTL).exists():
             return True
@@ -2767,14 +2795,8 @@ def serve(path):
             import os
             import shutil
             import tempfile
-            import urllib.request
-            url = ('https://raw.githubusercontent.com/' + AWG_REPO
-                   + '/main/awgctl.sh?cb=' + str(int(time.time())))
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                content = resp.read()
-            # 太小说明拿到的是错误页而不是脚本
-            if len(content) < 2048 or b'hy2-awgctl' not in content:
+            content = _awg_fetch_bytes()
+            if content is None:
                 return False
             # 内容一致就直接返回，避免无谓改写
             if force and Path(AWG_CTL).exists():

@@ -25,7 +25,7 @@
 ### 修复（由真实 Debian 12 端到端验证发现）
 - **卸载后残留空的 `/etc/amnezia` 目录**：`rm -rf /etc/amnezia/amneziawg` 只删子目录，父目录留成空壳，与"彻底卸载"不符。改为删完子目录后用 `rmdir` 收拾父目录 —— 用 `rmdir` 而非 `rm -rf` 是有意的：只在确实为空时删除，万一用户在该目录下还有别的东西（例如官方 Amnezia 包的其他组件）不会被误删。
 - **`hy2-awgctl` 一旦存在就永不更新**：`awg_ensure_ctl` 原本看到文件存在就直接返回，导致已经装过 AWG 的机器会把引擎**永久冻结在首次安装的版本**上——后续所有引擎侧修复都下发不到。新增 `awg_ensure_ctl --refresh`（内容一致则不改写），并接入菜单「更新二进制」与 CLI `awg-update`；门户侧 `ensure_awgctl(force=True)` 同样接入 `manage-amneziawg` 的 `update` 动作。
-- **规避 `raw.githubusercontent.com` 的 CDN 缓存**：实测 push 之后数分钟，raw 仍返回旧内容（本地/远端 API/git 对象均为 40345 字节含修复，raw 返回 40040 字节的旧版），会让刚修好的问题在测试里复现不出来、用户也可能拿到旧引擎。拉取 URL 统一加 `?cb=<时间戳>` 缓存破坏参数。
+- **改用多源回退获取 `awgctl.sh`，不再依赖 `raw.githubusercontent.com`**：实测 raw 在 push 之后数分钟仍返回旧内容，导致刚修好的问题在测试里复现不出来、用户也可能拿到旧引擎。**而且它不把查询串算进缓存键** —— 用三个不同的 `?cb=<时间戳>` 请求，返回的是同一份旧文件，所以"加缓存破坏参数"这条路是走不通的（一开始就是这么写的，实测后被推翻）。同一时刻实测：`api.github.com` + `Accept: application/vnd.github.raw` 与 `cdn.jsdelivr.net/gh/<repo>@main` 都返回最新，raw 滞后。现改为 **GitHub API（权威）→ jsDelivr（无限速）→ raw（兜底）** 三级回退，与项目里 gost 安装用多镜像的做法一致。
 - **`hy2-awgctl uninstall` 不移除控制工具自身**：菜单路径会删，直接调用不会，两边行为不一致。已补上（延迟到进程退出后再删，避免删掉正在被 bash 读取的脚本；且仅当运行的确实是已安装的那份才删，不会误删用户仓库里的副本）。
 
 ### 端到端验证（真实 Debian 12）
