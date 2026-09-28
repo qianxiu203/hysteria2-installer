@@ -134,6 +134,12 @@ iptables -t nat -A PREROUTING -p udp --dport 20000:40000 -j REDIRECT --to-ports 
 
 > 标准 WireGuard 客户端**连不上**开了混淆的服务器，反之亦然 —— 混淆参数是配置的必需部分，不是可选项。
 
+> **Linux 客户端注意**：导出的配置带 `DNS = 1.1.1.1`，而 `awg-quick` 会调用 `resolvconf` 来应用它。
+> 最小化的 Debian / Ubuntu 云镜像通常**没有安装 `resolvconf`**，此时 `awg-quick up` 会报
+> `resolvconf: command not found` 并回滚掉刚建立的接口（真实 Debian 12 上实测过）。
+> 两种处理方式：`apt install resolvconf`，或直接删掉配置里的 `DNS` 行改用系统 DNS。
+> 手机端（AmneziaWG 官方客户端 / WG Tunnel）与桌面客户端不受影响。
+
 ---
 
 ## ⚡ 常用快捷命令

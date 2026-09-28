@@ -37,6 +37,9 @@ jobs:
           bash -n install.sh
           bash -n awgctl.sh
           bash -n tests/test_awgctl.sh
+          # 端到端冒烟脚本需要真实机器 + root（它会真的装/卸 AWG），
+          # 所以 CI 里只做语法校验，不在 runner 上执行。
+          bash -n tests/awg-e2e-smoke.sh
           bash -n fix_cert_chain.sh
 
       - name: 校验 install.sh 内嵌的 portal.py 副本已同步

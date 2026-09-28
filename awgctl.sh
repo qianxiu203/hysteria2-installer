@@ -37,6 +37,7 @@ AWG_SERVICE="/etc/systemd/system/${AWG_SERVICE_NAME}.service"
 AWG_META_FILE="${AWG_DIR}/awg_meta.json"
 AWG_PEERS_FILE="${AWG_DIR}/awg_peers.json"
 AWG_VERSION_FILE="${AWG_DIR}/binaries.VERSION"
+AWG_CTL_INSTALLED="/usr/local/bin/hy2-awgctl"
 
 AWG_REPO="${AWG_REPO:-yys9253462-gif/hysteria2-installer}"
 AWG_RELEASE_TAG="${AWG_RELEASE_TAG:-awg-binaries}"
@@ -866,6 +867,21 @@ cmd_uninstall() {
     # 万一用户在该目录下还有别的东西（例如官方包的其他组件）不会被误删。
     rmdir "$(dirname "$AWG_DIR")" 2>/dev/null || true
     log_info "已移除配置目录 ${AWG_DIR}"
+
+    # 自删控制工具，让「hy2-awgctl uninstall」与菜单里的卸载行为一致
+    # （install.sh 的菜单路径会另外删一次，两边都删是幂等的）。
+    # 两个细节：
+    #   1) 延迟到本进程退出后再删 —— 直接 rm 正在被 bash 逐块读取的脚本文件
+    #      有读中断风险；
+    #   2) 仅当运行的确实是【已安装的那份】才删 —— 否则用户从仓库直接跑
+    #      ./awgctl.sh uninstall 会把人家仓库里的文件删掉。
+    local self
+    self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+    if [[ "$self" == "$AWG_CTL_INSTALLED" ]]; then
+        nohup bash -c "sleep 2; rm -f '${AWG_CTL_INSTALLED}'" >/dev/null 2>&1 &
+        log_info "控制工具 ${AWG_CTL_INSTALLED} 将在本进程退出后自动移除"
+    fi
+
     log_info "AmneziaWG 已彻底卸载。"
     log_warn "云安全组里为该端口放行的 UDP 规则需要你自行清理。"
 }
