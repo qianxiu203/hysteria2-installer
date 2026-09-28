@@ -1,0 +1,199 @@
+"""门户内嵌前端资源（JS / CSS）的完整性与语法测试。
+
+这个文件的诞生原因是一次真实事故：**更新后 Web 面板的菜单整个点不动**。
+
+根因是 `SCRIPT` 常量当时写成了普通三引号字符串（不是原始字符串），
+于是源码里为 JS 字符串准备的 `\\n` 被 Python 在解析阶段转成了**真实换行**，
+塞进 JS 的单引号字符串里 —— JS 语法错误。
+
+后果不是"某个按钮失灵"，而是**整段脚本无法解析**：页面上的标签页切换、
+所有按钮、轮询全部失效。而当时的测试只验了 HTML 渲染和 CSP 哈希，
+**从来没有真正执行过 JS**，所以完全没拦住。
+
+本文件补的就是这道缺口：
+  1. 用 node --check 对每个内嵌 JS 常量做真正的语法检查；
+  2. 校验 JS 常量没有被 Python 的转义处理动过（根因层防护）；
+  3. 校验页面里的 script 块都来自常量（不出现会被 CSP 拦掉的游离内联脚本）。
+"""
+import ast
+import re
+import shutil
+import subprocess
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import portal
+
+REPO_ROOT = Path(portal.__file__).parent
+NODE = shutil.which('node')
+
+JS_CONSTANTS = ('SCRIPT', 'LOGIN_SCRIPT', 'USER_SCRIPT')
+
+
+def _source_literal(name):
+    """返回常量在 portal.py 源码里的字面量原文（含三引号），找不到返回 None。"""
+    src = Path(portal.__file__).read_text(encoding='utf-8')
+    tree = ast.parse(src)
+    for node in tree.body:
+        if (isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == name):
+            return ast.get_source_segment(src, node.value)
+    return None
+
+
+def _literal_body(segment):
+    """去掉三引号，返回 (是否原始字符串, 字面量内部原文)。"""
+    m = re.match(r'^([rRbB]{0,2})("""|\'\'\')', segment)
+    if not m:
+        return False, segment
+    prefix, quote = m.group(1), m.group(2)
+    return ('r' in prefix.lower()), segment[len(m.group(0)):-len(quote)]
+
+
+class JsAssetTest(unittest.TestCase):
+    """内嵌 JS 的语法与转义完整性。"""
+
+    def test_constants_are_raw_strings(self):
+        """JS 常量必须写成原始字符串（r\"\"\"）。
+
+        这是根因层防护：只要用了原始字符串，源码里写的 \\n 就会原样进到 JS，
+        不会再被 Python 悄悄转成真实换行。
+        """
+        for name in JS_CONSTANTS:
+            seg = _source_literal(name)
+            self.assertIsNotNone(seg, f'找不到常量 {name} 的源码字面量')
+            is_raw, _ = _literal_body(seg)
+            self.assertTrue(
+                is_raw,
+                f'{name} 必须写成原始字符串（r"""）。否则源码里的 \\n 会被 Python '
+                f'解析成真实换行塞进 JS 字符串，造成语法错误 —— 整段脚本都会失效。')
+
+    def test_no_python_escape_processing(self):
+        """JS 常量的求值结果必须与源码字面量逐字符相同。
+
+        等价于「Python 没有对内容做任何转义处理」。任何差异都意味着有 \\n / \\t 之类
+        的序列被吃掉了 —— 这正是那次事故的成因。
+        """
+        for name in JS_CONSTANTS:
+            seg = _source_literal(name)
+            _, body = _literal_body(seg)
+            value = getattr(portal, name)
+            if body != value:
+                # 定位第一处差异，便于排查
+                i = next((k for k in range(min(len(body), len(value)))
+                          if body[k] != value[k]), min(len(body), len(value)))
+                ctx = repr(body[max(0, i - 40):i + 20])
+                self.fail(f'{name} 的内容被 Python 转义处理过（首个差异在第 {i} 字符附近: {ctx}）。'
+                          f'请把该常量写成原始字符串 r"""。')
+
+    @unittest.skipUnless(NODE, '需要 node 才能做 JS 语法检查（CI 的 runner 自带）')
+    def test_js_syntax_with_node(self):
+        """用 node --check 做真正的 JS 语法检查。
+
+        这是唯一能拦住「语法错误导致整段脚本失效」的手段 ——
+        只验 HTML 渲染和 CSP 哈希是拦不住的。
+        """
+        import tempfile
+        for name in JS_CONSTANTS:
+            code = getattr(portal, name)
+            with tempfile.NamedTemporaryFile('w', suffix='.js', delete=False,
+                                             encoding='utf-8', newline='\n') as fh:
+                fh.write(code)
+                path = fh.name
+            try:
+                proc = subprocess.run([NODE, '--check', path],
+                                      capture_output=True, text=True, timeout=60)
+                self.assertEqual(
+                    proc.returncode, 0,
+                    f'{name} 存在 JS 语法错误（整段脚本都会失效，页面按钮全部失灵）:\n'
+                    f'{(proc.stderr or proc.stdout)[:800]}')
+            finally:
+                Path(path).unlink(missing_ok=True)
+
+    def test_page_has_no_stray_inline_script(self):
+        """页面里的 <script> 块必须全部来自常量。
+
+        门户的 CSP 是「脚本内容的 sha256 白名单」，游离的内联 <script>
+        没有对应哈希，会被浏览器直接拒绝执行。
+        """
+        meta = {'public_ip': '1.2.3.4', 'server_name': 'h.example.com',
+                'subscription_port': 8443, 'listen_port': 1, 'hop_port_range': '',
+                'auth_password': 'p', 'obfs_password': '', 'cert_type': 'acme',
+                'is_insecure': False, 'pin_sha256': ''}
+        page = portal.page_html(meta, 'hysteria2://x@h:1/', '#s', 'c', '{}',
+                                users={}, api_key=None, token='t', session_secret='s')
+        blocks = re.findall(r'<script[^>]*>(.*?)</script>', page, re.S)
+        known = {getattr(portal, n).strip() for n in JS_CONSTANTS}
+        for i, block in enumerate(blocks, 1):
+            self.assertIn(block.strip(), known,
+                          f'页面第 {i} 个 <script> 块不是任何已知常量 —— '
+                          f'它没有 CSP 哈希，浏览器会拒绝执行。')
+
+    def test_csp_hash_covers_every_script_constant(self):
+        """CSP 必须为每个会被内联注入的脚本常量提供 sha256。"""
+        import base64
+        import hashlib
+        policy = portal.content_policy()
+        for name in JS_CONSTANTS:
+            digest = base64.b64encode(
+                hashlib.sha256(getattr(portal, name).encode()).digest()).decode()
+            self.assertIn('sha256-' + digest, policy,
+                          f'CSP 缺少 {name} 的 sha256，该脚本会被浏览器拒绝执行')
+        self.assertNotIn('unsafe-inline', policy)
+
+
+class SourceHygieneTest(unittest.TestCase):
+    """portal.py 源码层面的卫生检查（下面每条都是真实踩过的坑）。"""
+
+    def test_no_function_level_imports(self):
+        """禁止函数内 import。
+
+        Python 的作用域规则：只要函数体里**任何位置**出现 `import X`，
+        整个函数内的 `X` 都被当作局部名；若在 import 语句执行之前使用它，
+        就会抛 UnboundLocalError。
+
+        真实事故：`install-gost` 分支用了 `os.chmod`，而 `import os` 只出现在
+        `do_POST` 的另一个分支（do-upgrade）里 —— 于是"一键安装 gost"必然失败，
+        而且报错被后续下载源的错误覆盖，只显示一个无关的 DNS 失败，极难定位。
+        把 import 全部提到模块级可以从根上消除这类 bug。
+        """
+        src = Path(portal.__file__).read_text(encoding='utf-8')
+        tree = ast.parse(src)
+        offenders = []
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)) and node.col_offset > 0:
+                offenders.append((node.lineno,
+                                  ast.get_source_segment(src, node)))
+        self.assertEqual(
+            offenders, [],
+            '发现函数内 import（必须提到模块级，否则会造成 UnboundLocalError）:\n' +
+            '\n'.join('  第 %d 行: %s' % (ln, seg) for ln, seg in offenders))
+
+    def test_core_modules_are_module_level(self):
+        """os / shutil / platform / tempfile 等必须在模块级导入。
+
+        这些是各处理器共用的基础模块；只在个别分支里导入，就会形成
+        「某分支能用、另一分支报 UnboundLocalError」的隐蔽差异。
+        """
+        src = Path(portal.__file__).read_text(encoding='utf-8')
+        tree = ast.parse(src)
+        names = set()
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                for a in node.names:
+                    names.add((a.asname or a.name).split('.')[0])
+            elif isinstance(node, ast.ImportFrom):
+                for a in node.names:
+                    names.add(a.asname or a.name)
+        for mod in ('os', 'shutil', 'platform', 'tempfile', 'urllib', 'hashlib',
+                    'tarfile', 'zipfile', 'uuid'):
+            self.assertIn(mod, names, f'{mod} 必须在模块级导入')
+
+
+if __name__ == '__main__':
+    unittest.main()

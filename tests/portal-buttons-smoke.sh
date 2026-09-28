@@ -242,6 +242,43 @@ echo "  [SKIP] install-warp / install-xray / install-gost（重型安装，会�
 echo "  [SKIP] set-bbr（会把本机从 cubic 切成 BBR，而界面没有「还原为 cubic」入口 —— 属真实配置变更）"
 
 # ==============================================================================
+step "第 8 轮：一键安装类按钮（重型，但必须真的能用）"
+# ==============================================================================
+# install-gost 曾经【必然失败】：处理函数里用了 os.chmod，而 `import os` 只出现在
+# do_POST 的另一个分支（do-upgrade）里 —— Python 把 os 视为整个函数的局部名，
+# 于是 gost 分支执行到 os.chmod 时抛 UnboundLocalError。更坑的是报错被后续
+# 下载源的错误覆盖，界面上只显示一个无关的 DNS 失败。
+# 现在所有 import 都提到模块级，这里做真实安装验证。
+#
+# 注意：这一步会真的下载 ~17MB 并安装 gost，属于重型操作。
+code=$(post install-gost "")
+chk "POST install-gost → 200" "$code" "200"
+if [[ "$code" == "200" ]]; then
+    chk "  gost 二进制已就位" "$([[ -x /usr/local/bin/gost ]] && echo yes || echo no)" "yes"
+    sleep 2
+    chk "  gost 服务 active" "$(systemctl is-active gost 2>/dev/null)" "active"
+    chk "  gost 可执行" "$(/usr/local/bin/gost -V >/dev/null 2>&1 && echo ok || echo fail)" "ok"
+else
+    echo "      响应: $(head -c 300 /tmp/pb.out)"
+fi
+
+# install-xray：报成功时服务必须真的起来；报失败则必须说明原因。
+# 修复前它会无条件回"安装成功，已在 TCP 443 就绪"，而 443 被 Caddy 占用时
+# xray 根本起不来 —— 用户看到成功却怎么都用不了，也无从排查。
+code=$(post install-xray "")
+sleep 3
+xr=$(systemctl is-active xray 2>/dev/null)
+if [[ "$code" == "200" ]]; then
+    chk "install-xray 报成功时 xray 必须真的 active" "$xr" "active"
+else
+    if grep -qE '未能启动|占用' /tmp/pb.out; then
+        ok "install-xray 如实报错并说明了原因（xray 当前状态: $xr）"
+    else
+        bad "install-xray 失败但未说明原因: $(head -c 200 /tmp/pb.out)"
+    fi
+fi
+
+# ==============================================================================
 echo
 echo "================ 结果 ================"
 echo "  通过: ${PASS_CNT}   失败: ${FAIL_CNT}"

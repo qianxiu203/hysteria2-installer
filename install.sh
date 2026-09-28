@@ -819,14 +819,22 @@ import hashlib
 import hmac
 import html
 import json
+import os
+import platform
 import random
 import re
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
+import tarfile
+import tempfile
 import threading
 import time
+import urllib.request
+import uuid
+import zipfile
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -1094,7 +1102,14 @@ footer{display:flex;justify-content:space-between;margin-top:32px;color:#879996;
 
 """
 
-SCRIPT = """
+# 🔴 必须是原始字符串（r"""），不能改成普通三引号。
+# 这是内嵌的 JS 源码，里面写的 \n 需要【原样保留】成 JS 的转义序列。
+# 若用普通字符串，Python 会在解析阶段把 \n 变成真实换行塞进 JS 的字符串字面量里，
+# 造成 JS 语法错误；而 JS 语法错误会让【整段脚本】无法解析 ——
+# 表现不是某个按钮失灵，而是页面上所有按钮、标签页、轮询全部失效
+# （历史上真发生过：更新后 Web 面板的菜单整个点不动）。
+# 同理见下面的 LOGIN_SCRIPT / USER_SCRIPT。
+SCRIPT = r"""
 
 // 全局高颜值 Promise 确认框与 Toast 机制
 function showToast(msg, type = 'info') {
@@ -2373,7 +2388,7 @@ if (btnUpdateAwg) {
 loadAwgState();
 """
 
-LOGIN_SCRIPT = """
+LOGIN_SCRIPT = r"""
 function toggleSecret(id, btn) {
   const el = document.getElementById(id);
   if (el.type === 'password') {
@@ -2386,7 +2401,7 @@ function toggleSecret(id, btn) {
 }
 """
 
-USER_SCRIPT = """
+USER_SCRIPT = r"""
 document.querySelectorAll('[data-copy]').forEach(button => {
   button.addEventListener('click', async () => {
     const field = document.getElementById(button.dataset.copy);
@@ -3583,7 +3598,6 @@ def serve(path):
         now = time.time()
         if _ver_cache['data'] is not None and now - _ver_cache['t'] < 300:
             return _ver_cache['data']
-        import urllib.request
         try:
             req = urllib.request.Request(
                 'https://api.github.com/repos/' + AWG_REPO + '/contents/?ref=main',
@@ -3673,7 +3687,6 @@ def serve(path):
         raw 滞后。顺序：API（权威）→ jsDelivr（无限速）→ raw（兜底）。
         与 install.sh 中 awg_fetch_ctl 的策略保持一致。
         """
-        import urllib.request
         sources = [
             ('https://api.github.com/repos/' + AWG_REPO + '/contents/' + filename + '?ref=main',
              {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/vnd.github.raw'}),
@@ -3700,7 +3713,6 @@ def serve(path):
         这样本地文件可以直接与 GitHub contents API 返回的 sha 比对，
         既权威又不需要下载远端内容（API 只回一个 JSON）。
         """
-        import hashlib
         return hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\x00' + data).hexdigest()
 
     def _local_blob_sha(path):
@@ -3712,7 +3724,6 @@ def serve(path):
     def _remote_blob_sha(filename, marker=None):
         """取远端文件的 git blob sha。优先走 contents API 的 JSON（便宜），
         拿不到时退回「下载内容后自己算」。"""
-        import urllib.request
         try:
             url = 'https://api.github.com/repos/' + AWG_REPO + '/contents/' + filename + '?ref=main'
             req = urllib.request.Request(url, headers={
@@ -3738,9 +3749,6 @@ def serve(path):
         if not force and Path(AWG_CTL).exists():
             return True
         try:
-            import os
-            import shutil
-            import tempfile
             content = _fetch_repo_file('awgctl.sh', marker=b'hy2-awgctl', min_size=2048)
             if content is None:
                 return False
@@ -3840,8 +3848,7 @@ def serve(path):
 
     class Handler(BaseHTTPRequestHandler):
         def _generate_and_apply_reality(self, restart=True):
-            import uuid as uuid_mod, secrets
-            new_uuid = str(uuid_mod.uuid4())
+            new_uuid = str(uuid.uuid4())
 
             priv_key = ''
             pub_key = ''
@@ -4253,8 +4260,6 @@ def serve(path):
                 if not self.is_authenticated():
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
                 try:
-                    import os
-                    import shutil
                     length = int(self.headers.get('Content-Length', 0))
                     body = self.rfile.read(length).decode('utf-8')
                     form = parse_qs(body)
@@ -4442,7 +4447,6 @@ def serve(path):
                 if not self.is_authenticated():
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
                 try:
-                    import platform, urllib.request, tarfile, tempfile, shutil
                     machine = platform.machine().lower()
                     if 'x86_64' in machine or 'amd64' in machine:
                         arch = 'linux_amd64'
@@ -4474,15 +4478,18 @@ def serve(path):
                     ]
 
                     installed = False
-                    last_err = ''
+                    errors = []
                     with tempfile.TemporaryDirectory() as tmpdir:
                         archive_path = Path(tmpdir) / 'gost.tar.gz'
                         for u in download_urls:
+                            host = u.split('/')[2] if '//' in u else u
                             try:
                                 req = urllib.request.Request(u, headers={'User-Agent': 'Mozilla/5.0'})
-                                with urllib.request.urlopen(req, timeout=30) as resp, open(archive_path, 'wb') as out_f:
+                                # 超时给足：包有 ~17MB，30 秒在慢线路上不够
+                                with urllib.request.urlopen(req, timeout=180) as resp, open(archive_path, 'wb') as out_f:
                                     shutil.copyfileobj(resp, out_f)
-                                if archive_path.stat().st_size > 1024 * 1024 and tarfile.is_tarfile(str(archive_path)):
+                                size = archive_path.stat().st_size
+                                if size > 1024 * 1024 and tarfile.is_tarfile(str(archive_path)):
                                     with tarfile.open(str(archive_path), 'r:gz') as tar:
                                         tar.extractall(path=tmpdir)
                                     src_bin = Path(tmpdir) / 'gost'
@@ -4491,11 +4498,18 @@ def serve(path):
                                         os.chmod('/usr/local/bin/gost', 0o755)
                                         installed = True
                                         break
+                                    errors.append('%s: 包内没有 gost 可执行文件' % host)
+                                else:
+                                    errors.append('%s: 内容异常（%d 字节，非有效 tar.gz）' % (host, size))
                             except Exception as e:
-                                last_err = str(e)
+                                errors.append('%s: %s: %s' % (host, type(e).__name__, e))
 
                     if not installed:
-                        return self.reply_json(500, {'ok': False, 'error': f'下载或解压 GOST 失败: {last_err}'})
+                        # 把【每个源】的错误都报出来。
+                        # 只显示最后一个源的错误会掩盖真正原因 —— 例如首个源超时、
+                        # 末个源 DNS 失败时，用户只会看到 DNS 错误，完全被带偏。
+                        return self.reply_json(500, {'ok': False,
+                                                     'error': '下载或解压 GOST 失败 —— ' + ' ｜ '.join(errors)})
 
                     # 确保 systemd 服务存在
                     service_content = '''[Unit]
@@ -4767,7 +4781,6 @@ WantedBy=multi-user.target
                 if not self.is_authenticated():
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
                 try:
-                    import os, platform, urllib.request, zipfile, tempfile, shutil
                     machine = platform.machine().lower()
                     xarch = 'arm64-v8a' if ('aarch64' in machine or 'arm64' in machine) else '64'
                     dl_urls = [
@@ -4816,6 +4829,20 @@ WantedBy=multi-user.target
                     subprocess.run(['systemctl', 'daemon-reload'], capture_output=True)
                     subprocess.run(['systemctl', 'enable', 'xray'], capture_output=True)
                     self._generate_and_apply_reality(True)
+
+                    # 不要谎报成功：xray 默认监听 TCP 443，若该端口已被别的服务
+                    # （Caddy / Nginx 等）占用就根本起不来。必须核实服务状态 ——
+                    # 否则用户只会看到"安装成功"却怎么都用不了，且不知道该查什么。
+                    time.sleep(2)
+                    xr_state = subprocess.run(['systemctl', 'is-active', 'xray'],
+                                              capture_output=True, text=True, timeout=5).stdout.strip()
+                    if xr_state != 'active':
+                        xr_log = subprocess.run(['journalctl', '-u', 'xray', '-n', '8', '--no-pager'],
+                                                capture_output=True, text=True, timeout=5).stdout
+                        return self.reply_json(500, {'ok': False, 'error':
+                            'Xray 已安装但服务未能启动（当前状态 %s）。'
+                            '最常见原因是 TCP 443 已被其他服务（如 Caddy / Nginx）占用。'
+                            '日志尾部：%s' % (xr_state, xr_log.strip()[-400:])})
 
                     return self.reply_json(200, {'ok': True, 'message': 'Xray-core 安装成功，VLESS-Reality 节点已在 TCP 443 端口就绪！'})
                 except Exception as e:
@@ -5358,7 +5385,6 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
             if subpath == 'check-version':
                 if not self.is_authenticated():
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                import urllib.request
                 core_curr = '未知'
                 core_latest = '未知'
                 core_has_update = False
@@ -5454,7 +5480,6 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
                 if not self.is_authenticated():
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
                 try:
-                    import platform
                     kernel_ver = platform.release()
                     cc_out = subprocess.run(['sysctl', '-n', 'net.ipv4.tcp_congestion_control'],
                                             capture_output=True, text=True, timeout=2).stdout.strip()
@@ -5498,7 +5523,6 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
                         'anthropic.com', 'claude.ai',
                         'gemini.google.com', 'aistudio.google.com', 'generativelanguage.googleapis.com'
                     ]))
-                import shutil
                 # 统一到 wgcf + wireproxy(127.0.0.1:19898)；同时兼容尚未升级、
                 # 仍跑官方 cloudflare-warp(127.0.0.1:40000) 的旧节点，避免误报「未安装」
                 is_installed = (shutil.which('wireproxy') is not None
@@ -5509,7 +5533,6 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
                 if is_installed and enabled:
                     for warp_addr in ('127.0.0.1:19898', '127.0.0.1:40000'):
                         try:
-                            import urllib.request
                             proxy_handler = urllib.request.ProxyHandler({'http': 'socks5h://' + warp_addr,
                                                                          'https': 'socks5h://' + warp_addr})
                             opener = urllib.request.build_opener(proxy_handler)

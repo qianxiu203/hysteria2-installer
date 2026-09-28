@@ -44,6 +44,13 @@ jobs:
           bash -n tests/portal-update-cycle.sh
           bash -n fix_cert_chain.sh
 
+      - name: 确认 node 可用
+        # tests/test_portal_assets.py 会用 node --check 做内嵌 JS 的语法检查。
+        # 缺 node 时该测试会静默 skip —— 那样就等于没有防护，所以这里显式失败。
+        # （曾因 SCRIPT 常量的换行被 Python 转义吃掉导致 JS 语法错误，
+        #   整段脚本失效、Web 面板所有按钮失灵，而当时没有任何测试能拦住。）
+        run: node --version
+
       - name: 校验 install.sh 内嵌的 portal.py 副本已同步
         run: |
           python3 - <<'PY'
