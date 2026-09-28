@@ -355,8 +355,17 @@ render_server_config() {
         if [[ "$line" == "3" && -n "$hp" ]]; then
             echo "HeaderProtectionKey = ${hp}"
         fi
-        echo "PostUp = sysctl -qw net.ipv4.ip_forward=1; iptables -I FORWARD -i ${AWG_LINK} -j ACCEPT; iptables -t nat -A POSTROUTING -o ${wan} -j MASQUERADE"
-        echo "PostDown = iptables -D FORWARD -i ${AWG_LINK} -j ACCEPT; iptables -t nat -D POSTROUTING -o ${wan} -j MASQUERADE"
+        # 🔴 FORWARD 必须【两个方向】都放行 —— 这里踩过一个极难定位的坑。
+        # 原先只写了 `-i ${AWG_LINK} -j ACCEPT`（去程：客户端→公网）。
+        # 而回程包是 in=<出口网卡> out=${AWG_LINK}，不匹配 -i，于是落到链尾的
+        # policy。多数发行版的 FORWARD 默认策略是 DROP（装了 Docker 更是必然被设成 DROP），
+        # 结果就是：握手成功、隧道也通、去程的 FORWARD 计数还在正常增长，
+        # 但客户端【上不了网】—— 现象与"没连上"很像，实际是回程被丢。
+        # WireGuard 官方文档同样是两个方向都放行。
+        # 回程方向额外用 conntrack 限定为已建立连接：比官方写法更严
+        # （避免任意来源的包都被转发进隧道），对"客户端上网"这个场景完全够用。
+        echo "PostUp = sysctl -qw net.ipv4.ip_forward=1; iptables -I FORWARD -i ${AWG_LINK} -j ACCEPT; iptables -I FORWARD -o ${AWG_LINK} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT; iptables -t nat -A POSTROUTING -o ${wan} -j MASQUERADE"
+        echo "PostDown = iptables -D FORWARD -i ${AWG_LINK} -j ACCEPT; iptables -D FORWARD -o ${AWG_LINK} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT; iptables -t nat -D POSTROUTING -o ${wan} -j MASQUERADE"
 
         if [[ -s "$AWG_PEERS_FILE" ]]; then
             jq -r '
@@ -986,7 +995,12 @@ cmd_update() {
         log_warn "  hy2-awgctl peer-list"
         log_warn "  hy2-awgctl client-conf <名称> --endpoint <域名或公网IP>"
     else
-        log_info "协议线未变 (AWG ${line}.x)，配置与客户端均不受影响。"
+        log_info "协议线未变 (AWG ${line}.x)，混淆参数与客户端均不受影响。"
+        # 即便如此也要重新渲染服务端配置 —— 否则【引擎侧的配置修复】永远下发不到
+        # 老安装上（这里踩过：PostUp 漏了 FORWARD 回程放行，导致"连上没网"，
+        # 而 update 因为"协议线未变"直接跳过了配置重建，修复根本传不下去）。
+        # 混淆参数来自 meta、此处未改动，所以已发放的客户端配置依然有效。
+        render_server_config
     fi
 
     systemctl restart "$AWG_SERVICE_NAME"

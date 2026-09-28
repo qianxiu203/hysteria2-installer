@@ -40,6 +40,8 @@ jobs:
           # 下面三个是「真机冒烟」脚本：需要 root + 已部署的服务（会真的装/卸 AWG、
           # 创建删除用户、重启面板），所以 CI 里只做语法校验，不在 runner 上执行。
           bash -n tests/awg-e2e-smoke.sh
+          bash -n tests/awg-internet-netns.sh
+          bash -n tests/awg-internet-capture.sh
           bash -n tests/portal-buttons-smoke.sh
           bash -n tests/portal-update-cycle.sh
           bash -n fix_cert_chain.sh
