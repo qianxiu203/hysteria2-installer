@@ -14,10 +14,30 @@ import portal
 
 
 class PortalTest(unittest.TestCase):
-    def test_embedded_program_and_port_selection(self):
+    def test_portal_is_fetched_not_embedded(self):
+        """install.sh 不应再内嵌 portal.py —— 已改为运行时获取。
+
+        内嵌副本曾占 install.sh 约七成行数（4948 行 / 244KB），
+        每次改 portal.py 都要手动同步一次，漏一次就是「仓库里的门户」与
+        「装到机器上的门户」不一致。这里锁住新不变量：
+
+          1. 不许再出现 PYPORTAL heredoc（否则重复维护又回来了）
+          2. 必须存在 portal_fetch_py / portal_ensure_py
+          3. 三级回退源（GitHub API / jsDelivr / raw）都在
+          4. 拿到之后必须做 Python 语法校验 —— 门户同时是 Hysteria 的 auth 后端，
+             文件写坏 = 所有客户端都连不上
+        """
         script = (Path(portal.__file__).parent/'install.sh').read_text()
-        embedded = script.split("<<'PYPORTAL'\n", 1)[1].split('\nPYPORTAL', 1)[0]
-        self.assertEqual(embedded.strip(), Path(portal.__file__).read_text().strip())
+        self.assertNotIn("<<'PYPORTAL'", script,
+                         'install.sh 又内嵌 portal.py 了；请改回运行时获取（portal_ensure_py）')
+        self.assertIn('portal_fetch_py() {', script)
+        self.assertIn('portal_ensure_py() {', script)
+        self.assertIn('ast.parse', script, '获取到 portal.py 后必须做 Python 语法校验')
+        for host in ('api.github.com', 'cdn.jsdelivr.net', 'raw.githubusercontent.com'):
+            self.assertIn(host, script, f'缺少回退源 {host}')
+
+    def test_subscription_port_selection(self):
+        script = (Path(portal.__file__).parent/'install.sh').read_text()
         function = script.split('select_subscription_port() {', 1)[1].split('\nclear_all_hopping_rules()', 1)[0]
         with socket.socket() as busy:
             busy.bind(('0.0.0.0', 0))

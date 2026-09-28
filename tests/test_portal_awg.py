@@ -207,9 +207,16 @@ class AwgEndpointTest(unittest.TestCase):
         """这条断言防的是路由匹配 bug：subpath 含查询串，若比对时没剥掉 ?query，
         带 ?name= 的路由会静默落到 404，功能直接失效。"""
         status, _, body = self.get(self.prefix + 'awg-conf?name=phone', self.auth)
-        # 本机未安装 AWG 时应为 404(未安装)；绝不能是 404(路由不存在) 之外的 200/500 以外的异常
-        self.assertEqual(status, 404, f'预期未安装返回 404，实际 {status}: {body[:200]}')
-        self.assertIn(b'not installed', body)
+        self.assertEqual(status, 404, f'预期 404，实际 {status}: {body[:200]}')
+        # 要害是「路由匹配上了」——具体文案取决于本机装没装 AWG：
+        #   未安装 AWG        -> "not installed"
+        #   已安装但无此客户端 -> "Client not found"
+        # 两种都说明路由是通的。原先把文案写死成 "not installed"，
+        # 导致在**已装 AWG 的机器上必然失败**（CI 是干净机器所以没暴露）——
+        # 这个测试套件是要能在真实机器上跑的，所以改成断言「命中其中之一」。
+        self.assertTrue(
+            b'not installed' in body or b'Client not found' in body,
+            f'路由似乎没匹配上（两种已知文案都没出现）: {body[:200]}')
 
     def test_awg_conf_rejects_path_traversal_and_bad_names(self):
         """客户端名称必须经过正则校验，挡住目录穿越与注入。"""

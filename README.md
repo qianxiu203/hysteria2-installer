@@ -302,7 +302,11 @@ Hysteria 在空闲 TCP 端口上提供 HTTPS，并将请求转发到只监听 12
 
 每次重新配置都会轮换网页路径和登录凭据，旧链接失效，客户端需更新订阅。菜单 3 仅显示已有访问凭据。卸载时停止并删除 hysteria-portal.service 及其配置。已有旧版安装需重新配置才启用网页；本次仓库更新不会自动部署到服务器。
 
-开发检查：`bash -n install.sh` 和 `python3 -m unittest discover -s tests -v`。维护 portal.py 后须同步 install.sh 的 PYPORTAL 内嵌段；回归测试会验证一致性。
+开发检查：`bash -n install.sh` 和 `python3 -m unittest discover -s tests -v`。
+`portal.py` 现在由 `install.sh` **在运行时获取**（三级回退：GitHub API → jsDelivr → raw，
+拿到后做 Python 语法校验），所以**不需要**再手动同步任何内嵌副本 —— 改完 `portal.py`
+直接提交即可，机器上重新执行一次安装/更新就会拿到新版。若要本地调试，把 `portal.py`
+放在 `install.sh` 同目录即可优先使用本地文件。
 
 ---
 

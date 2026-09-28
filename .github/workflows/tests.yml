@@ -1,8 +1,8 @@
 name: Tests
 
 # 守住几条容易悄悄退化的不变量：
-#   1. install.sh 里内嵌的 portal.py 副本必须与 portal.py 逐字节一致
-#      （tests/test_portal.py 已有断言；不一致会导致"终端重配时覆盖降级"）
+#   1. portal.py 必须走运行时获取，不允许再内嵌回 install.sh
+#      （内嵌副本曾占 install.sh 七成行数，每次改门户都要手动同步，极易漏）
 #   2. AmneziaWG 混淆参数必须始终满足上游硬约束，且服务端/客户端配置逐字节一致
 #   3. portal.py 改过 SCRIPT 之后 CSP 的 sha256 白名单必须自动跟上
 #   4. 三份 shell 脚本的语法
@@ -96,21 +96,32 @@ jobs:
         #   整段脚本失效、Web 面板所有按钮失灵，而当时没有任何测试能拦住。）
         run: node --version
 
-      - name: 校验 install.sh 内嵌的 portal.py 副本已同步
+      - name: 校验 portal.py 是运行时获取而非内嵌
+        # 内嵌副本曾占 install.sh 约七成行数（4948 行 / 244KB），每次改 portal.py
+        # 都要手动同步一次，漏一次就是「仓库里的门户」与「装到机器上的门户」不一致。
+        # 现已改为运行时获取（install.sh 已从 7121 行降到 2255 行），这里锁住新不变量。
+        # 同样的断言也在 tests/test_portal.py 里，此处单独列出是为了在 CI 输出里显眼。
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          import sys
           script = Path('install.sh').read_text(encoding='utf-8')
-          if "<<'PYPORTAL'\n" not in script:
-              sys.exit('install.sh 中找不到 PYPORTAL heredoc')
-          embedded = script.split("<<'PYPORTAL'\n", 1)[1].split('\nPYPORTAL', 1)[0]
-          live = Path('portal.py').read_text(encoding='utf-8')
-          if embedded.strip() != live.strip():
-              sys.exit('install.sh 内嵌的 portal.py 副本与 portal.py 不一致！\n'
-                       '请把 portal.py 的完整内容同步进 install.sh 的 PYPORTAL heredoc。')
-          print('内嵌副本一致，长度', len(live.strip()))
+          if "<<'PYPORTAL'" in script:
+              raise SystemExit('install.sh 又内嵌 portal.py 了；请改回运行时获取')
+          need = ['portal_fetch_py() {', 'portal_ensure_py() {', 'ast.parse',
+                  'api.github.com', 'cdn.jsdelivr.net', 'raw.githubusercontent.com']
+          missing = [t for t in need if t not in script]
+          if missing:
+              raise SystemExit('install.sh 缺少预期内容: ' + ', '.join(missing))
+          print('✅ portal.py 走运行时获取，三源回退与语法校验均在位')
           PY
+
+      - name: 门户程序获取逻辑冒烟（真跑拉取 + 失败路径）
+        # 门户现在由 install.sh 运行时获取，这条拉取路径成了新的关键链路，
+        # 所以不能只做静态检查，要真的把函数跑起来：
+        #   1. 三源都不可达时必须明确报错并中止（且不留半成品文件）
+        #   2. 语法不合法的内容必须被拒绝
+        #   3. 正常路径能取到并通过 Python 语法校验
+        run: bash tests/portal-py-fetch-smoke.sh
 
       - name: AmneziaWG 纯逻辑测试
         run: bash tests/test_awgctl.sh
