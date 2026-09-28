@@ -62,10 +62,13 @@ jobs:
 
           # 2) 答案从 stdin 喂入（printf '1\n' | bash install.sh）是正常自动化用法，
           #    不能被上面的检测误杀。
-          #    注意：bash 的 `read -p` 提示符【只在输入来自终端时】才打印，
-          #    stdin 是管道时看不到提示符，所以这里断言菜单项（echo 输出）而不是提示符。
+          #    ⚠️ 这里不能断言"菜单会出现" —— CI runner 是非 root，
+          #    check_root 会在打印菜单之前就退出；要断言的是"拦截逻辑没有触发"。
           out2=$(printf '0\n' | bash install.sh 2>&1 || true)
-          echo "$out2" | grep -q '彻底卸载 Hysteria 2' || fail "管道喂答案被误拦（应正常打印菜单）"
+          if echo "$out2" | grep -q '脚本是从 stdin 读入'; then
+            fail "管道喂答案被误拦（脚本来源检测不该触发）"
+          fi
+          echo "  ✓ 管道喂答案未被误拦"
 
           # 3) 端口校验：合法放行、非法拒绝
           eval "$(sed -n '/^is_valid_port()/,/^}/p' install.sh)"
