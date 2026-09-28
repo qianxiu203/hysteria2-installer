@@ -5931,7 +5931,8 @@ install_amneziawg() {
     if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
         install_dependencies
     fi
-    if ! awg_ensure_ctl; then
+    # 用 --refresh：安装/重装时本就该用当前版本的引擎，而不是机器上可能残留的旧版
+    if ! awg_ensure_ctl --refresh; then
         return 1
     fi
 
@@ -6515,7 +6516,7 @@ if [[ $# -gt 0 ]]; then
         awg-install)
             check_root
             check_arch
-            awg_ensure_ctl || exit 1
+            awg_ensure_ctl --refresh || exit 1
             shift
             if [[ $# -gt 0 ]]; then
                 exec "$AWG_CTL_BIN" install "$@"
