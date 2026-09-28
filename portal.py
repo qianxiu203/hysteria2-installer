@@ -2011,11 +2011,14 @@ def serve(path):
                     # 拉文件，会踩 raw 的 CDN 缓存（实测 push 后数分钟仍返回旧内容），
                     # 表现为"更新完还是旧版"。这里用多源回退直接取。
                     fetched = []
-                    for fname, minsize in (('portal.py', 20000),
-                                           ('portal_assets.py', 10000)):
-                        content = _fetch_repo_file(fname,
-                                                   marker=b'hysteria2-installer',
-                                                   min_size=minsize)
+                    # 标记必须按文件各选各的 —— 踩过：给 portal_assets.py 用了
+                    # b'hysteria2-installer'，但那个字符串只存在于 portal.py 里，
+                    # 于是三个源全被判成"内容不对"，自更新永远失败。
+                    # 现在 portal_assets.py 用 b'SCRIPT = r'：既确实存在，
+                    # 又顺带校验了「JS 常量仍是原始字符串」这个关键属性。
+                    for fname, marker, minsize in (('portal.py', b'hysteria2-installer', 20000),
+                                                   ('portal_assets.py', b'SCRIPT = r', 10000)):
+                        content = _fetch_repo_file(fname, marker=marker, min_size=minsize)
                         if content is None:
                             return self.reply_json(500, {'ok': False, 'error':
                                 '取不到 %s（三个源均失败）—— 已放弃更新，面板保持原样' % fname})

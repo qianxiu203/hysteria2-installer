@@ -9,7 +9,17 @@
 #   4. 正常路径能把两个文件都取回、通过校验，且能协同工作
 set -u
 
-# 从 install.sh 里摘出待测函数
+# 从 install.sh 里摘出 PORTAL_FILES 声明与待测函数
+# （PORTAL_FILES 是从脚本里读出来的真实值，不是在这里另抄一份 ——
+#   否则脚本改了文件清单、测试却还按旧的跑，测试就失去意义了）
+PORTAL_FILES="$(sed -n 's/^PORTAL_FILES="\(.*\)"$/\1/p' install.sh | head -1)"
+if [[ -z "$PORTAL_FILES" ]]; then
+    echo "❌ 没能从 install.sh 里读到 PORTAL_FILES" >&2
+    exit 2
+fi
+echo "（从 install.sh 读到 PORTAL_FILES = $PORTAL_FILES）"
+echo
+
 for fn in portal_files_ok portal_fetch_files portal_fetch_py portal_ensure_py; do
     eval "$(sed -n "/^${fn}() {/,/^}/p" install.sh)"
 done
