@@ -17,7 +17,23 @@
 # ==============================================================================
 set -uo pipefail
 
-INSTALL_URL="https://raw.githubusercontent.com/yys9253462-gif/hysteria2-installer/main/install.sh"
+# ⚠️ 不用 raw.githubusercontent.com 取 install.sh：它 push 后数分钟仍返回旧内容
+# （且不把查询串算进缓存键，加 ?cb= 也没用 —— 见仓库内 awgctl.sh 的 awg_fetch_ctl 注释）。
+# 本测试要验的是【当前代码】，所以走权威源；raw 仅作最后兜底。
+REPO_SLUG="yys9253462-gif/hysteria2-installer"
+fetch_install_sh() {
+    local out="$1"
+    curl -fsSL --max-time 30 -H "Accept: application/vnd.github.raw" \
+        "https://api.github.com/repos/${REPO_SLUG}/contents/install.sh?ref=main" \
+        -o "$out" 2>/dev/null && [[ -s "$out" ]] && grep -q 'Hysteria 2' "$out" && return 0
+    curl -fsSL --max-time 30 \
+        "https://cdn.jsdelivr.net/gh/${REPO_SLUG}@main/install.sh" \
+        -o "$out" 2>/dev/null && [[ -s "$out" ]] && grep -q 'Hysteria 2' "$out" && return 0
+    curl -fsSL --max-time 30 \
+        "https://raw.githubusercontent.com/${REPO_SLUG}/main/install.sh" \
+        -o "$out" 2>/dev/null && [[ -s "$out" ]] && grep -q 'Hysteria 2' "$out" && return 0
+    return 1
+}
 CTL=/usr/local/bin/hy2-awgctl
 TEST_IF=awgtest
 TEST_CONF=/etc/amnezia/amneziawg/${TEST_IF}.conf
@@ -46,8 +62,9 @@ echo "Hysteria2 测试前状态: ${PRE_HY2}"
 
 # ---------------------------------------------------------------- 1. 装
 step "1. 通过项目真实路径安装 AWG 3.x"
-curl -fsSL "$INSTALL_URL" -o /tmp/hy2-install.sh || { echo "下载 install.sh 失败"; exit 1; }
+fetch_install_sh /tmp/hy2-install.sh || { echo "下载 install.sh 失败（三个源均不可用）"; exit 1; }
 echo "    install.sh 大小: $(stat -c%s /tmp/hy2-install.sh) 字节"
+echo "    含多源回退函数 awg_fetch_ctl: $(grep -c 'awg_fetch_ctl' /tmp/hy2-install.sh) 处"
 
 bash /tmp/hy2-install.sh awg-install --line 3 --endpoint "$PUBLIC_IP" --client smoketest >/tmp/awginstall.log 2>&1
 RC=$?

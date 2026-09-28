@@ -45,6 +45,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/yys9253462-gif/hysteria2-ins
 bash <(wget -qO- https://raw.githubusercontent.com/yys9253462-gif/hysteria2-installer/main/install.sh)
 ```
 
+> 上面两条命令走的是 `raw.githubusercontent.com`，它有 CDN 缓存，**刚推送更新后的几分钟内可能仍取到上一版**。
+> 如果确认刚更新过却看不到新行为，等几分钟再执行一次即可。脚本内部拉取 `awgctl.sh` 时已改用
+> **GitHub API → jsDelivr → raw** 三级回退来规避这个问题（raw 实测不把查询串算进缓存键，加时间戳参数无效）。
+
 ---
 
 ## 📋 控制台交互菜单
