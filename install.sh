@@ -675,10 +675,27 @@ if [[ "$TARGET" == "core" ]]; then
         systemctl restart hysteria-server 2>/dev/null || true
     fi
 elif [[ "$TARGET" == "portal" ]]; then
-    # 从主仓库拉取最新 portal.py 并热重启 portal 服务
+    # 从主仓库拉取最新 portal.py 并重启 portal 服务。
+    # ⚠️ 不能只用 raw.githubusercontent.com：它有 CDN 缓存，push 后数分钟仍返回旧内容，
+    # 而且不把查询串算进缓存键（加 ?cb=<时间戳> 无效）。按 API → jsDelivr → raw 回退。
+    # 说明：Web 控制台的面板自更新已不走本脚本（它在 portal.py 内部用同一套回退
+    # 取文件并原子替换），这里保留是为了手工调用 do_upgrade.sh portal 的场景。
     TMP_PORTAL="/tmp/portal_latest.py"
-    curl -fsSL "https://raw.githubusercontent.com/yys9253462-gif/hysteria2-installer/main/portal.py" -o "$TMP_PORTAL"
-    if [[ -s "$TMP_PORTAL" ]]; then
+    REPO="yys9253462-gif/hysteria2-installer"
+    rm -f "$TMP_PORTAL"
+    curl -fsSL -H "Accept: application/vnd.github.raw" \
+        "https://api.github.com/repos/${REPO}/contents/portal.py?ref=main" \
+        -o "$TMP_PORTAL" 2>/dev/null || true
+    if ! grep -q 'hysteria2-installer' "$TMP_PORTAL" 2>/dev/null; then
+        curl -fsSL "https://cdn.jsdelivr.net/gh/${REPO}@main/portal.py" \
+            -o "$TMP_PORTAL" 2>/dev/null || true
+    fi
+    if ! grep -q 'hysteria2-installer' "$TMP_PORTAL" 2>/dev/null; then
+        curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/portal.py" \
+            -o "$TMP_PORTAL" 2>/dev/null || true
+    fi
+    if grep -q 'hysteria2-installer' "$TMP_PORTAL" 2>/dev/null; then
+        cp -f "$HY2_DIR/portal.py" "$HY2_DIR/portal.py.bak" 2>/dev/null || true
         mv -f "$TMP_PORTAL" "$HY2_DIR/portal.py"
         chmod 644 "$HY2_DIR/portal.py"
         systemctl restart hysteria-portal 2>/dev/null || true
@@ -1675,9 +1692,21 @@ checkBbrStatus();
 // 版本检测与一键更新交互
 const coreVerDisplay = document.getElementById('core-ver-display');
 const portalVerDisplay = document.getElementById('portal-ver-display');
+const awgVerDisplay = document.getElementById('awg-ver-display');
 const btnUpdateCore = document.getElementById('btn-update-core');
 const btnUpdatePortal = document.getElementById('btn-update-portal');
+const btnUpdateAwgEngine = document.getElementById('btn-update-awg-engine');
 const updateStatusMsg = document.getElementById('update-status-msg');
+const btnRecheckUpdate = document.getElementById('btn-recheck-update');
+
+// 版本展示：区分「未安装 / 拿不到远端 / 有新版本 / 最新」四种情况，
+// 避免拿不到远端时误报「最新」。
+function fmtVer(current, latest, hasUpdate, installed) {
+  if (installed === false) return '未安装';
+  if (!current || current === '未安装') return '未安装';
+  if (!latest) return current + '（远端未取到，无法比对）';
+  return hasUpdate ? (current + ' → ' + latest + ' 有新版本') : (current + '（最新）');
+}
 
 async function checkVersions() {
   if (!coreVerDisplay || !portalVerDisplay) return;
@@ -1689,44 +1718,65 @@ async function checkVersions() {
 
     // 核心展示
     coreVerDisplay.textContent = json.core_current + (json.core_has_update ? (' → 可升级至 ' + json.core_latest) : ' (最新)');
-    if (json.core_has_update && btnUpdateCore) {
-      btnUpdateCore.style.display = 'inline-flex';
+    if (btnUpdateCore) {
+      btnUpdateCore.style.display = json.core_has_update ? 'inline-flex' : 'none';
       btnUpdateCore.onclick = () => doUpgrade('core');
     }
 
     // 面板展示
-    portalVerDisplay.textContent = json.portal_current + (json.portal_has_update ? (' → 发现新版本') : ' (最新)');
-    if (json.portal_has_update && btnUpdatePortal) {
-      btnUpdatePortal.style.display = 'inline-flex';
+    portalVerDisplay.textContent = fmtVer(json.portal_current, json.portal_latest, json.portal_has_update, true);
+    if (btnUpdatePortal) {
+      btnUpdatePortal.style.display = json.portal_has_update ? 'inline-flex' : 'none';
       btnUpdatePortal.onclick = () => doUpgrade('portal');
+    }
+
+    // AmneziaWG 引擎展示
+    if (awgVerDisplay) {
+      awgVerDisplay.textContent = fmtVer(json.awg_current, json.awg_latest, json.awg_has_update, json.awg_installed);
+      if (btnUpdateAwgEngine) {
+        btnUpdateAwgEngine.style.display = json.awg_has_update ? 'inline-flex' : 'none';
+        btnUpdateAwgEngine.onclick = () => doUpgrade('awg');
+      }
     }
   } catch (_) {}
 }
 
 async function doUpgrade(target) {
-  const btn = target === 'core' ? btnUpdateCore : btnUpdatePortal;
-  if (!confirm(`确定要升级 ${target === 'core' ? 'Hysteria 2 官方核心' : '控制面板自身'} 吗？`)) return;
+  const names = { core: 'Hysteria 2 官方核心', portal: '控制面板自身', awg: 'AmneziaWG 引擎' };
+  const btns = { core: btnUpdateCore, portal: btnUpdatePortal, awg: btnUpdateAwgEngine };
+  const btn = btns[target];
+  if (!confirm('确定要升级 ' + (names[target] || target) + ' 吗？')) return;
   if (btn) { btn.disabled = true; btn.textContent = '升级中...'; }
-  if (updateStatusMsg) updateStatusMsg.textContent = '正在下载并应用更新，请稍候约 5-10 秒...';
+  if (updateStatusMsg) updateStatusMsg.textContent = '正在下载并应用更新，请稍候...';
   try {
     const res = await fetch(location.pathname + 'do-upgrade', {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'target=' + target
+      body: 'target=' + encodeURIComponent(target)
     });
     const json = await res.json();
     if (json.ok) {
-      if (updateStatusMsg) updateStatusMsg.textContent = '升级已触发！5 秒后将自动刷新页面...';
+      const msg = json.message || '升级已触发';
+      if (updateStatusMsg) updateStatusMsg.textContent = msg + '，5 秒后自动刷新页面...';
       setTimeout(() => location.reload(), 5000);
     } else {
       alert(json.error || '升级失败');
+      if (updateStatusMsg) updateStatusMsg.textContent = json.error || '升级失败';
       if (btn) { btn.disabled = false; btn.textContent = '重试升级'; }
     }
   } catch (e) {
     alert('升级请求异常: ' + e.message);
     if (btn) { btn.disabled = false; btn.textContent = '重试升级'; }
   }
+}
+
+if (btnRecheckUpdate) {
+  btnRecheckUpdate.addEventListener('click', async () => {
+    if (updateStatusMsg) updateStatusMsg.textContent = '正在检测...';
+    await checkVersions();
+    if (updateStatusMsg) updateStatusMsg.textContent = '检测完成（远端结果在服务端缓存 5 分钟）';
+  });
 }
 
 checkVersions();
@@ -2961,9 +3011,9 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
 <div class="tab-pane" id="pane-configs">
   <!-- 版本检测与一键更新卡片 -->
   <section class="card" style="margin-bottom:20px;border-left:4px solid var(--accent)">
-    <div class="card-head"><span class="step">UP</span><div><h2>系统版本与一键升级</h2><p>支持在线比对并升级 Hysteria 2 官方内核与控制面板自身</p></div></div>
-    
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+    <div class="card-head"><span class="step">UP</span><div><h2>系统版本与一键更新</h2><p>在线比对并升级 Hysteria 2 官方内核、控制面板自身与 AmneziaWG 引擎</p></div></div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px;margin-bottom:16px">
       <!-- 核心版本 -->
       <div class="api-box" style="margin-bottom:0">
         <div>
@@ -2980,8 +3030,26 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
         </div>
         <button class="button primary" id="btn-update-portal" type="button" style="display:none">一键更新面板</button>
       </div>
+      <!-- AmneziaWG 引擎版本 -->
+      <div class="api-box" style="margin-bottom:0">
+        <div>
+          <div style="font-size:11px;color:var(--muted);font-weight:700">AmneziaWG 引擎 (hy2-awgctl)</div>
+          <div style="font-size:14px;font-weight:700;margin-top:4px" id="awg-ver-display">检测中...</div>
+        </div>
+        <button class="button primary" id="btn-update-awg-engine" type="button" style="display:none">一键更新 AWG</button>
+      </div>
     </div>
-    <div id="update-status-msg" style="font-size:12px;color:var(--muted)"></div>
+
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <button class="button" id="btn-recheck-update" type="button" style="padding:5px 13px;font-size:12px">🔄 重新检测</button>
+      <div id="update-status-msg" style="font-size:12px;color:var(--muted)"></div>
+    </div>
+
+    <p style="font-size:11.5px;color:var(--muted);margin:10px 0 0;line-height:1.75">
+      版本按<b>文件内容哈希</b>（git blob sha）与仓库 main 分支当前内容比对，不是按日期或提交号 —— 面板文件本身不带 git 元数据。
+      更新面板时会先留一份 <code>.bak</code> 备份再原子替换，并自动重启面板服务；更新 AWG 引擎不会影响已发放的客户端配置。
+      远端结果在服务端缓存 5 分钟，避免触发 GitHub 的接口限流。
+    </p>
   </section>
 
   <section class="advanced" style="margin-top:0">
@@ -3505,6 +3573,51 @@ def serve(path):
                         pass
         threading.Thread(target=_do_reload, daemon=True).start()
 
+    # 远端根目录文件 sha 的短缓存。
+    # 必要性：版本检查会在每次页面加载时触发，而 GitHub 未认证 API 限 60 次/小时/IP。
+    # 用「目录列表」接口一次拿回所有文件的 sha（而不是逐文件取），再叠 5 分钟缓存，
+    # 把每次检查的 API 调用压到 1 次。
+    _ver_cache = {'t': 0.0, 'data': None}
+
+    def _remote_root_shas():
+        now = time.time()
+        if _ver_cache['data'] is not None and now - _ver_cache['t'] < 300:
+            return _ver_cache['data']
+        import urllib.request
+        try:
+            req = urllib.request.Request(
+                'https://api.github.com/repos/' + AWG_REPO + '/contents/?ref=main',
+                headers={'User-Agent': 'Mozilla/5.0',
+                         'Accept': 'application/vnd.github+json'})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                items = json.loads(resp.read().decode('utf-8'))
+            shas = {it['name']: it.get('sha', '')
+                    for it in items if isinstance(it, dict) and it.get('name')}
+            if shas:
+                _ver_cache['t'] = now
+                _ver_cache['data'] = shas
+                return shas
+        except Exception:
+            pass
+        return None
+
+    def _version_triple(local_path, remote_name):
+        """返回 (本地短sha, 远端短sha, 是否有更新)。
+
+        用 git blob sha 比对而不是「日期常量」或「提交 sha」：
+          - 面板文件本身不带 git 元数据，拿不到本地提交 sha；
+          - blob sha 只取决于文件内容，远端 sha 能从 API 的 JSON 直接取到。
+        远端取不到时返回 has_update=False —— 宁可漏报也不误报"有新版本"。
+        """
+        loc = _local_blob_sha(local_path)
+        if not loc:
+            return ('未安装', '', False)
+        shas = _remote_root_shas() or {}
+        rem = shas.get(remote_name, '')
+        if not rem:
+            return (loc[:7], '', False)
+        return (loc[:7], rem[:7], loc != rem)
+
     def gost_status():
         """检测 gost 服务运行状态。"""
         try:
@@ -3529,6 +3642,8 @@ def serve(path):
     AWG_CONF_PATH = AWG_DIR_PATH / 'awg0.conf'
     AWG_GO_PATH = Path('/usr/local/bin/amneziawg-go')
     AWG_SVC_NAME = 'amneziawg-server'
+    # 当前运行的面板文件本身（用于与远端比对版本）
+    PORTAL_SELF = Path(__file__).resolve()
 
     def awg_read_json(path, default):
         try:
@@ -3549,8 +3664,8 @@ def serve(path):
         except Exception:
             return False
 
-    def _awg_fetch_bytes():
-        """从多个源依次尝试获取 awgctl.sh，返回内容字节；全失败返回 None。
+    def _fetch_repo_file(filename, marker=None, min_size=1024):
+        """从多个源依次尝试获取仓库里的某个文件，返回内容字节；全失败返回 None。
 
         ⚠️ 不能只用 raw.githubusercontent.com：实测 push 后数分钟仍返回旧内容，
         而且【不把查询串算进缓存键】—— 加 ?cb=<时间戳> 也没用。
@@ -3560,11 +3675,11 @@ def serve(path):
         """
         import urllib.request
         sources = [
-            ('https://api.github.com/repos/' + AWG_REPO + '/contents/awgctl.sh?ref=main',
+            ('https://api.github.com/repos/' + AWG_REPO + '/contents/' + filename + '?ref=main',
              {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/vnd.github.raw'}),
-            ('https://cdn.jsdelivr.net/gh/' + AWG_REPO + '@main/awgctl.sh',
+            ('https://cdn.jsdelivr.net/gh/' + AWG_REPO + '@main/' + filename,
              {'User-Agent': 'Mozilla/5.0'}),
-            ('https://raw.githubusercontent.com/' + AWG_REPO + '/main/awgctl.sh',
+            ('https://raw.githubusercontent.com/' + AWG_REPO + '/main/' + filename,
              {'User-Agent': 'Mozilla/5.0'}),
         ]
         for url, headers in sources:
@@ -3572,12 +3687,47 @@ def serve(path):
                 req = urllib.request.Request(url, headers=headers)
                 with urllib.request.urlopen(req, timeout=30) as resp:
                     content = resp.read()
-                # 体积与关键字双重校验，挡住错误页
-                if len(content) > 2048 and b'hy2-awgctl' in content:
+                # 体积 + 关键字双重校验，挡住错误页
+                if len(content) > min_size and (marker is None or marker in content):
                     return content
             except Exception:
                 continue
         return None
+
+    def _git_blob_sha(data):
+        """按 git 的算法算 blob sha：sha1("blob <len>\\0" + content)。
+
+        这样本地文件可以直接与 GitHub contents API 返回的 sha 比对，
+        既权威又不需要下载远端内容（API 只回一个 JSON）。
+        """
+        import hashlib
+        return hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\x00' + data).hexdigest()
+
+    def _local_blob_sha(path):
+        try:
+            return _git_blob_sha(Path(path).read_bytes())
+        except Exception:
+            return None
+
+    def _remote_blob_sha(filename, marker=None):
+        """取远端文件的 git blob sha。优先走 contents API 的 JSON（便宜），
+        拿不到时退回「下载内容后自己算」。"""
+        import urllib.request
+        try:
+            url = 'https://api.github.com/repos/' + AWG_REPO + '/contents/' + filename + '?ref=main'
+            req = urllib.request.Request(url, headers={
+                'User-Agent': 'Mozilla/5.0',
+                'Accept': 'application/vnd.github+json',
+            })
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                info = json.loads(resp.read().decode('utf-8'))
+            sha = info.get('sha', '')
+            if len(sha) == 40:
+                return sha
+        except Exception:
+            pass
+        content = _fetch_repo_file(filename, marker)
+        return _git_blob_sha(content) if content else None
 
     def ensure_awgctl(force=False):
         """确保 hy2-awgctl 可用；缺失时从主仓库拉取（与 install.sh 的策略一致）。
@@ -3591,7 +3741,7 @@ def serve(path):
             import os
             import shutil
             import tempfile
-            content = _awg_fetch_bytes()
+            content = _fetch_repo_file('awgctl.sh', marker=b'hy2-awgctl', min_size=2048)
             if content is None:
                 return False
             # 内容一致就直接返回，避免无谓改写
@@ -4103,14 +4253,65 @@ def serve(path):
                 if not self.is_authenticated():
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
                 try:
+                    import os
+                    import shutil
                     length = int(self.headers.get('Content-Length', 0))
                     body = self.rfile.read(length).decode('utf-8')
                     form = parse_qs(body)
                     target = form.get('target', [''])[0]
-                    if target not in ('core', 'portal'):
+                    if target not in ('core', 'portal', 'awg'):
                         return self.reply_json(400, {'ok': False, 'error': 'Invalid target'})
 
-                    # 异步执行系统升级脚本
+                    if target == 'portal':
+                        # 面板自更新【不走 do_upgrade.sh】：那个脚本从
+                        # raw.githubusercontent.com 拉 portal.py，会踩 raw 的 CDN 缓存
+                        # （实测 push 后数分钟仍返回旧内容），"更新完还是旧版"。
+                        # 这里直接用多源回退取回新文件，原子替换并留备份。
+                        content = _fetch_repo_file('portal.py',
+                                                   marker=b'hysteria2-installer',
+                                                   min_size=20000)
+                        if content is None:
+                            return self.reply_json(500, {'ok': False, 'error':
+                                '三个源都取不到 portal.py（GitHub API / jsDelivr / raw 均失败）'})
+                        try:
+                            if PORTAL_SELF.read_bytes() == content:
+                                return self.reply_json(200, {'ok': True, 'target': target,
+                                                             'message': '面板已是最新，无需更新'})
+                        except Exception:
+                            pass
+                        try:
+                            shutil.copy2(str(PORTAL_SELF), str(PORTAL_SELF) + '.bak')
+                        except Exception:
+                            pass
+                        tmp_path = str(PORTAL_SELF) + '.new'
+                        with open(tmp_path, 'wb') as fh:
+                            fh.write(content)
+                        os.chmod(tmp_path, 0o644)
+                        os.replace(tmp_path, str(PORTAL_SELF))
+                        # 延迟重启，且必须脱离当前会话：本进程马上会被 systemctl 杀掉，
+                        # 不脱离的话重启命令会跟着一起死（start_new_session=True）。
+                        subprocess.Popen(
+                            ['bash', '-c', 'sleep 1; systemctl restart hysteria-portal'],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            start_new_session=True)
+                        return self.reply_json(200, {'ok': True, 'target': target,
+                                                     'message': '面板已更新，服务重启中'})
+
+                    if target == 'awg':
+                        if not awg_installed():
+                            return self.reply_json(400, {'ok': False,
+                                                         'error': 'AmneziaWG 尚未安装'})
+                        # 先刷新控制脚本自身，再更新二进制。不需要重启面板。
+                        ensure_awgctl(force=True)
+                        rc, out, err = awg_run(['update'], timeout=420)
+                        if rc != 0:
+                            return self.reply_json(500, {'ok': False,
+                                'error': 'AWG 更新失败：' + awg_err_tail(rc, out, err)})
+                        return self.reply_json(200, {'ok': True, 'target': target,
+                                                     'message': 'AmneziaWG 引擎已更新，客户端无需重新导入'})
+
+                    # core 仍交给 do_upgrade.sh：下载的是 Hysteria 官方发布，
+                    # 与 raw 的 CDN 缓存无关。
                     subprocess.Popen(['bash', '/etc/hysteria/do_upgrade.sh', target],
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     return self.reply_json(200, {'ok': True, 'target': target})
@@ -5118,8 +5319,6 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
                 core_curr = '未知'
                 core_latest = '未知'
                 core_has_update = False
-                portal_curr = '2026.09.21'
-                portal_has_update = False
 
                 try:
                     # 获取本地核心版本 (按行精确匹配 Version: 前缀，避免被字符艺术 LOGO 干扰)
@@ -5145,19 +5344,13 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
                 except Exception:
                     pass
 
-                try:
-                    # 检查面板是否有新提交
-                    req2 = urllib.request.Request('https://api.github.com/repos/yys9253462-gif/hysteria2-installer/commits/main',
-                                                  headers={'User-Agent': 'hysteria2-installer'})
-                    with urllib.request.urlopen(req2, timeout=3) as resp2:
-                        if resp2.status == 200:
-                            commit_info = json.loads(resp2.read().decode('utf-8'))
-                            remote_sha = commit_info.get('sha', '')[:7]
-                            local_sha = data.get('portal_sha', '')
-                            if local_sha and remote_sha and local_sha != remote_sha:
-                                portal_has_update = True
-                except Exception:
-                    pass
+                # 面板自身与 AWG 引擎：用 git blob sha 比对文件内容。
+                # 原实现依赖 data['portal_sha']，但那个字段从来没被写入过，
+                # 导致 portal_has_update 恒为 False、「更新面板」按钮永远不显示。
+                portal_curr, portal_latest, portal_has_update = _version_triple(
+                    str(PORTAL_SELF), 'portal.py')
+                awg_curr, awg_latest, awg_has_update = _version_triple(
+                    AWG_CTL, 'awgctl.sh')
 
                 return self.reply_json(200, {
                     'ok': True,
@@ -5165,7 +5358,12 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
                     'core_latest': core_latest,
                     'core_has_update': core_has_update,
                     'portal_current': portal_curr,
-                    'portal_has_update': portal_has_update
+                    'portal_latest': portal_latest,
+                    'portal_has_update': portal_has_update,
+                    'awg_installed': Path(AWG_CTL).exists(),
+                    'awg_current': awg_curr,
+                    'awg_latest': awg_latest,
+                    'awg_has_update': awg_has_update,
                 })
 
             if subpath == 'reality-status':
@@ -5345,6 +5543,12 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
                     return self.reply(404, b'AmneziaWG is not installed')
                 if not ensure_awgctl():
                     return self.reply(500, b'hy2-awgctl unavailable')
+
+                # 客户端不存在时给 404，而不是让底层命令失败后统一报 500 ——
+                # 前端需要能区分「查无此人」与「服务端出错」。
+                peers_now = awg_read_json(AWG_PEERS_PATH, {}).get('peers', []) or []
+                if not any(p.get('name') == name for p in peers_now):
+                    return self.reply(404, b'Client not found')
 
                 # 连接地址优先用查询参数，其次用安装时记录的 endpoint
                 endpoint = (query.get('endpoint', [''])[0] or '').strip() or awg_state()['endpoint']
