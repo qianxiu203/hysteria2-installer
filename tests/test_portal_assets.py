@@ -31,19 +31,30 @@ NODE = shutil.which('node')
 
 JS_CONSTANTS = ('SCRIPT', 'LOGIN_SCRIPT', 'USER_SCRIPT')
 
+# 前端资源常量已从 portal.py 拆到 portal_assets.py（portal.py 用 import 引入，
+# 所以 portal.SCRIPT 这些名字照常可用）。查源码字面量时两个文件都要找。
+SOURCE_FILES = ('portal.py', 'portal_assets.py')
+
+
+def _find_literal(name):
+    """在两个源文件里找常量定义，返回 (文件路径, 源码字面量原文)。"""
+    for fname in SOURCE_FILES:
+        path = REPO_ROOT / fname
+        if not path.exists():
+            continue
+        src = path.read_text(encoding='utf-8')
+        for node in ast.parse(src).body:
+            if (isinstance(node, ast.Assign)
+                    and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)
+                    and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id == name):
+                return path, ast.get_source_segment(src, node.value)
+    return None, None
+
 
 def _source_literal(name):
-    """返回常量在 portal.py 源码里的字面量原文（含三引号），找不到返回 None。"""
-    src = Path(portal.__file__).read_text(encoding='utf-8')
-    tree = ast.parse(src)
-    for node in tree.body:
-        if (isinstance(node, ast.Assign)
-                and isinstance(node.value, ast.Constant)
-                and isinstance(node.value.value, str)
-                and isinstance(node.targets[0], ast.Name)
-                and node.targets[0].id == name):
-            return ast.get_source_segment(src, node.value)
-    return None
+    return _find_literal(name)[1]
 
 
 def _literal_body(segment):
@@ -151,7 +162,7 @@ class SourceHygieneTest(unittest.TestCase):
     """portal.py 源码层面的卫生检查（下面每条都是真实踩过的坑）。"""
 
     def test_no_function_level_imports(self):
-        """禁止函数内 import。
+        """禁止**函数内** import。
 
         Python 的作用域规则：只要函数体里**任何位置**出现 `import X`，
         整个函数内的 `X` 都被当作局部名；若在 import 语句执行之前使用它，
@@ -161,18 +172,34 @@ class SourceHygieneTest(unittest.TestCase):
         `do_POST` 的另一个分支（do-upgrade）里 —— 于是"一键安装 gost"必然失败，
         而且报错被后续下载源的错误覆盖，只显示一个无关的 DNS 失败，极难定位。
         把 import 全部提到模块级可以从根上消除这类 bug。
+
+        ⚠️ 只针对**函数内**：模块级的 `try: import x except ImportError:` 是
+        合法且必要的写法（用于给出人话错误），不能一并算作违规 —— 这里靠
+        追踪每个 import 的最近函数祖先把两者区分开。
         """
-        src = Path(portal.__file__).read_text(encoding='utf-8')
-        tree = ast.parse(src)
         offenders = []
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Import, ast.ImportFrom)) and node.col_offset > 0:
-                offenders.append((node.lineno,
-                                  ast.get_source_segment(src, node)))
+        for fname in SOURCE_FILES:
+            path = REPO_ROOT / fname
+            if not path.exists():
+                continue
+            src = path.read_text(encoding='utf-8')
+            tree = ast.parse(src)
+
+            def walk(node, in_function):
+                for child in ast.iter_child_nodes(node):
+                    now = in_function or isinstance(
+                        child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    if isinstance(child, (ast.Import, ast.ImportFrom)) and now:
+                        offenders.append((fname, child.lineno,
+                                          ast.get_source_segment(src, child)))
+                    walk(child, now)
+
+            walk(tree, False)
+
         self.assertEqual(
             offenders, [],
             '发现函数内 import（必须提到模块级，否则会造成 UnboundLocalError）:\n' +
-            '\n'.join('  第 %d 行: %s' % (ln, seg) for ln, seg in offenders))
+            '\n'.join('  %s 第 %d 行: %s' % (f, ln, seg) for f, ln, seg in offenders))
 
     def test_core_modules_are_module_level(self):
         """os / shutil / platform / tempfile 等必须在模块级导入。

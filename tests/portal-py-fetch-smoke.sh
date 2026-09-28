@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
-# 验证 portal_ensure_py 的失败路径：三个源都拿不到时必须【明确报错并中止】，
-# 而不是静默写一个空文件 —— 门户同时是 Hysteria 的 auth 后端，
-# 缺了它所有客户端都连不上，静默失败会把问题推到很久以后才暴露。
+# 验证门户程序的获取逻辑（两个文件：portal.py + portal_assets.py）。
+#
+# 门户是 Hysteria 的鉴权后端，缺任何一个文件 = 所有客户端连不上，
+# 所以这条路径必须能证明：
+#   1. 三源全部不可达时明确报错、中止，且**不留下半成品文件**
+#   2. 语法不合法的内容被拒绝
+#   3. 只有一半文件时判定为不完整
+#   4. 正常路径能把两个文件都取回、通过校验，且能协同工作
 set -u
 
 # 从 install.sh 里摘出待测函数
-eval "$(sed -n '/^portal_fetch_py() {/,/^}/p' install.sh)"
-eval "$(sed -n '/^portal_ensure_py() {/,/^}/p' install.sh)"
+for fn in portal_files_ok portal_fetch_files portal_fetch_py portal_ensure_py; do
+    eval "$(sed -n "/^${fn}() {/,/^}/p" install.sh)"
+done
 
-# 打桩：日志与目标目录
 log_err()  { echo "  [ERR] $*"; }
 log_info() { echo "  [INF] $*"; }
 HY2_DIR="$(mktemp -d)"
@@ -17,44 +22,60 @@ PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); echo "  ✅ $*"; }
 bad() { FAIL=$((FAIL+1)); echo "  ❌ $*"; }
 
-echo "=== 1) 三源全部不可达时，必须报错且不留下坏文件 ==="
+echo "=== 1) 三源全部不可达时：报错 + 中止 + 不留半成品 ==="
 export AWG_REPO="this-repo-does-not-exist-nyaa/nope"
-rm -f "$HY2_DIR/portal.py"
+rm -f "$HY2_DIR"/portal.py "$HY2_DIR"/portal_assets.py
 out=$(portal_ensure_py 2>&1); rc=$?
-if [[ $rc -ne 0 ]]; then ok "返回非零（rc=$rc）"; else bad "竟然返回 0"; fi
-if echo "$out" | grep -q '无法获取 portal.py'; then ok "给出了明确原因"; else bad "错误信息不明确: $out"; fi
-if echo "$out" | grep -q '鉴权后端'; then ok "说明了后果（客户端会连不上）"; else bad "没说明后果"; fi
-if [[ -f "$HY2_DIR/portal.py" ]]; then bad "失败时仍留下了文件"; else ok "未留下半成品文件"; fi
+[[ $rc -ne 0 ]] && ok "返回非零（rc=$rc）" || bad "竟然返回 0"
+echo "$out" | grep -q '无法获取门户程序' && ok "给出了明确原因" || bad "错误信息不明确: $out"
+echo "$out" | grep -q '鉴权后端' && ok "说明了后果（客户端会连不上）" || bad "没说明后果"
+if [[ ! -f "$HY2_DIR/portal.py" && ! -f "$HY2_DIR/portal_assets.py" ]]; then
+    ok "未留下任何半成品文件"
+else
+    bad "失败时仍留下了文件"
+fi
 
 echo
-echo "=== 2) 内容不合法（不是 portal.py）时也要拒绝 ==="
-export AWG_REPO="yys9253462-gif/hysteria2-installer"
-# 造一个"看起来像但其实是垃圾"的源文件，通过本地快路径喂进去
-FakeDir="$(mktemp -d)"
-echo "print('not the real portal')" > "$FakeDir/portal.py"
-# 用 BASH_SOURCE 模拟：直接测语法校验分支
+echo "=== 2) 语法不合法的内容必须被拒绝 ==="
 bad_src=$(mktemp); printf 'def broken(:\n  pass\n' > "$bad_src"
 if python3 -c 'import ast,sys; ast.parse(open(sys.argv[1], encoding="utf-8").read())' "$bad_src" 2>/dev/null; then
     bad "语法校验放过了坏文件"
 else
     ok "语法校验能拦住坏文件"
 fi
-rm -f "$bad_src"; rm -rf "$FakeDir"
+rm -f "$bad_src"
 
 echo
-echo "=== 3) 正常路径：真实仓库应能取到并通过校验 ==="
+echo "=== 3) 只有一半文件时必须判定为不完整 ==="
+onlydir="$(mktemp -d)"
+echo "x" > "$onlydir/portal.py"
+if portal_files_ok "$onlydir"; then bad "只有 portal.py 也判成了完整"; else ok "只有一半时判定为不完整"; fi
+rm -rf "$onlydir"
+
+echo
+echo "=== 4) 正常路径：两个文件都取回、通过校验、能协同工作 ==="
 export AWG_REPO="yys9253462-gif/hysteria2-installer"
 if out=$(portal_ensure_py 2>&1); then
     ok "获取成功"
-    if [[ -s "$HY2_DIR/portal.py" ]] && grep -q 'def page_html' "$HY2_DIR/portal.py"; then
-        ok "内容看起来是完整的 portal.py（$(wc -c < "$HY2_DIR/portal.py") 字节）"
+    for f in portal.py portal_assets.py; do
+        if [[ -s "$HY2_DIR/$f" ]]; then
+            ok "$f 已就位（$(wc -c < "$HY2_DIR/$f") 字节）"
+        else
+            bad "$f 缺失"
+        fi
+    done
+    grep -q 'def page_html' "$HY2_DIR/portal.py" \
+        && ok "portal.py 关键标记在位" || bad "portal.py 内容不对"
+    grep -q 'SCRIPT = r' "$HY2_DIR/portal_assets.py" \
+        && ok "portal_assets.py 关键标记在位（JS 仍是原始字符串）" || bad "portal_assets.py 内容不对"
+    if python3 -c "
+import sys; sys.path.insert(0, '${HY2_DIR}')
+import portal
+assert portal.SCRIPT and portal.STYLE, '常量没引进来'
+" 2>/dev/null; then
+        ok "两者可以一起 import，常量正常可用"
     else
-        bad "内容不完整"
-    fi
-    if python3 -c 'import ast,sys; ast.parse(open(sys.argv[1], encoding="utf-8").read())' "$HY2_DIR/portal.py" 2>/dev/null; then
-        ok "通过 Python 语法校验"
-    else
-        bad "语法校验失败"
+        bad "两个文件不能协同工作"
     fi
 else
     bad "正常路径失败了（网络？）: $out"

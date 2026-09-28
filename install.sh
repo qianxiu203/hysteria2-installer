@@ -994,74 +994,110 @@ show_client_configs() {
 
 # 拉取 portal.py：三级回退，理由同 awg_fetch_ctl（GitHub API 权威但限速、
 # jsDelivr 无速率限制、raw 最后兜底且可能滞后）
+# 门户由【两个文件】组成，必须成对处理：
+#   portal.py          后端逻辑（HTTP 服务与各功能端点）
+#   portal_assets.py   前端资源（CSS / 内嵌 JS 常量）
+# portal.py 通过 `from portal_assets import ...` 引入后者。
+#
+# 🔴 为什么反复强调"成对"：门户同时是 Hysteria 的鉴权后端，缺任何一个文件都会让
+#    **所有客户端连不上**。所以两个文件一起拉、一起校验；任一步失败就整体中止，
+#    绝不出现"只更新了 portal.py、前端资源还是旧版"的中间状态。
+#
+# 三级回退理由同 awg_fetch_ctl：GitHub API 权威但限速 60/h、jsDelivr 无速率限制、
+# raw 最后兜底且可能滞后。
+PORTAL_FILES="portal.py portal_assets.py"
+
+# 校验一组门户文件是否完整可用（关键标记 + Python 语法编译）
+portal_files_ok() {
+    local dir="$1"
+    [[ -s "${dir}/portal.py" ]] && grep -q 'def page_html' "${dir}/portal.py" 2>/dev/null || return 1
+    [[ -s "${dir}/portal_assets.py" ]] && grep -q 'SCRIPT = r' "${dir}/portal_assets.py" 2>/dev/null || return 1
+    # ast.parse 而不是 py_compile —— 后者会在源文件旁边生成 __pycache__
+    python3 -c '
+import ast, sys
+for p in sys.argv[1:]:
+    ast.parse(open(p, encoding="utf-8").read())
+' "${dir}/portal.py" "${dir}/portal_assets.py" 2>/dev/null || return 1
+    return 0
+}
+
+# 把门户文件拉到指定目录；任一文件失败即整体失败
+portal_fetch_files() {
+    local dir="$1" base="$2" mode="$3" f
+    for f in $PORTAL_FILES; do
+        if [[ "$mode" == "api" ]]; then
+            curl -fsSL --max-time 30 -H "Accept: application/vnd.github.raw" \
+                 "${base}/${f}?ref=main" -o "${dir}/${f}" 2>/dev/null || return 1
+        else
+            curl -fsSL --max-time 30 "${base}/${f}" -o "${dir}/${f}" 2>/dev/null || return 1
+        fi
+    done
+    return 0
+}
+
 portal_fetch_py() {
-    local out="$1"
-    local api="https://api.github.com/repos/${AWG_REPO}/contents/portal.py?ref=main"
-    local jsd="https://cdn.jsdelivr.net/gh/${AWG_REPO}@main/portal.py"
-    local raw="https://raw.githubusercontent.com/${AWG_REPO}/main/portal.py"
-
-    # 校验逻辑抽出来：必须是完整的 portal.py（两个标记都在）
-    _portal_looks_valid() {
-        [[ -s "$1" ]] && grep -q 'def page_html' "$1" 2>/dev/null \
-                      && grep -q 'HTTPServer' "$1" 2>/dev/null
-    }
-
-    if curl -fsSL --max-time 30 -H "Accept: application/vnd.github.raw" "$api" -o "$out" 2>/dev/null \
-       && _portal_looks_valid "$out"; then
+    local dir="$1"
+    local repo="${AWG_REPO}"
+    if portal_fetch_files "$dir" "https://api.github.com/repos/${repo}/contents" api \
+       && portal_files_ok "$dir"; then
         return 0
     fi
-    if curl -fsSL --max-time 30 "$jsd" -o "$out" 2>/dev/null && _portal_looks_valid "$out"; then
+    if portal_fetch_files "$dir" "https://cdn.jsdelivr.net/gh/${repo}@main" plain \
+       && portal_files_ok "$dir"; then
         return 0
     fi
-    if curl -fsSL --max-time 30 "$raw" -o "$out" 2>/dev/null && _portal_looks_valid "$out"; then
+    if portal_fetch_files "$dir" "https://raw.githubusercontent.com/${repo}/main" plain \
+       && portal_files_ok "$dir"; then
         return 0
     fi
     return 1
 }
 
-# 确保 $HY2_DIR/portal.py 就位。
-# 优先用与 install.sh 同目录的 portal.py（本地克隆 / 开发调试场景），
-# 否则从仓库拉取。注意本脚本常以 `bash <(curl ...)` 运行，此时 BASH_SOURCE
-# 指向 /dev/fd/NN 而非真实文件，所以必须做存在性判断。
+# 确保 $HY2_DIR 下门户的两个文件都就位。
+# 优先用与 install.sh 同目录的本地文件（本地克隆 / 开发调试场景），否则从仓库拉取。
+# 注意本脚本常以 `bash <(curl ...)` 运行，此时 BASH_SOURCE 指向 /dev/fd/NN
+# 而非真实文件，所以必须做存在性判断。
 portal_ensure_py() {
-    local dest="$HY2_DIR/portal.py"
-    local src="" dir="" tmp=""
+    local dest_dir="$HY2_DIR"
+    local srcdir="" dir="" tmpdir=""
 
+    # 本地快路径：两个文件都在脚本同目录才用（只找到一个说明是残缺的本地树，
+    # 这种情况宁可走网络拉完整的，也不要写一半进去）
     if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
         dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || dir=""
-        if [[ -n "$dir" && -f "${dir}/portal.py" ]]; then
-            src="${dir}/portal.py"
+        if [[ -n "$dir" && -f "${dir}/portal.py" && -f "${dir}/portal_assets.py" ]]; then
+            srcdir="$dir"
         fi
     fi
 
-    if [[ -z "$src" ]]; then
-        tmp="$(mktemp)"
-        if portal_fetch_py "$tmp"; then
-            src="$tmp"
+    if [[ -z "$srcdir" ]]; then
+        tmpdir="$(mktemp -d)"
+        if portal_fetch_py "$tmpdir"; then
+            srcdir="$tmpdir"
         else
-            rm -f "$tmp"
-            log_err "无法获取 portal.py（三个源均失败：GitHub API / jsDelivr / raw）"
+            rm -rf "$tmpdir"
+            log_err "无法获取门户程序（portal.py + portal_assets.py，三个源均失败）"
             log_err "门户同时是 Hysteria 的鉴权后端，缺了它所有客户端都连不上，因此中止安装。"
-            log_err "请确认本机能访问 GitHub 或 jsDelivr；也可手动把 portal.py 放到脚本同目录后重试。"
+            log_err "请确认本机能访问 GitHub 或 jsDelivr；也可手动把这两个文件放到脚本同目录后重试。"
             return 1
         fi
     fi
 
-    # 语法编译校验：半截文件 / 拉错内容一律不许落地（用 ast.parse，
-    # 不用 py_compile —— 后者会在源文件旁边生成 __pycache__）
-    if ! python3 -c 'import ast,sys; ast.parse(open(sys.argv[1], encoding="utf-8").read())' "$src" 2>/dev/null; then
-        [[ -n "$tmp" ]] && rm -f "$tmp"
-        log_err "获取到的 portal.py 未通过 Python 语法校验，已中止（避免把门户写坏）。"
+    # 落地前统一校验（本地快路径没走过拉取时的校验）
+    if ! portal_files_ok "$srcdir"; then
+        [[ -n "$tmpdir" ]] && rm -rf "$tmpdir"
+        log_err "门户文件未通过校验（关键标记缺失或 Python 语法不通），已中止 —— 避免把门户写坏。"
         return 1
     fi
 
-    if ! install -m 0644 "$src" "$dest"; then
-        [[ -n "$tmp" ]] && rm -f "$tmp"
-        log_err "写入 ${dest} 失败"
+    if ! install -m 0644 "${srcdir}/portal.py" "${dest_dir}/portal.py" \
+       || ! install -m 0644 "${srcdir}/portal_assets.py" "${dest_dir}/portal_assets.py"; then
+        log_err "写入门户文件到 ${dest_dir} 失败"
+        [[ -n "$tmpdir" ]] && rm -rf "$tmpdir"
         return 1
     fi
-    [[ -n "$tmp" ]] && rm -f "$tmp"
-    log_info "门户程序已就位: ${dest}"
+    [[ -n "$tmpdir" ]] && rm -rf "$tmpdir"
+    log_info "门户程序已就位: ${dest_dir}/portal.py + portal_assets.py"
 }
 
 refresh_portal() {

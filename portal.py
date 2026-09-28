@@ -1,6 +1,7 @@
 """仅监听回环地址；公网 TLS 由 Hysteria 的 masquerade proxy 提供。
 采用现代轻奢 Tab 导航系统，解耦节点连接、多用户管理（支持 IP 限制与实时流量统计）与集群 API 凭据。
 """
+import ast
 import base64
 import hashlib
 import hmac
@@ -27,6 +28,20 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, quote, urlencode
+
+# 前端资源（CSS / 内嵌 JS）拆到了独立模块 portal_assets.py。
+# 部署时两个文件必须成对存在 —— 见 install.sh 的 portal_ensure_py。
+# 这里 import 进来后，portal.STYLE / portal.SCRIPT 等名字依然照常可用，
+# 所以 content_policy()、page_html() 与既有测试都不需要改。
+try:
+    from portal_assets import STYLE, SCRIPT, LOGIN_SCRIPT, USER_SCRIPT
+except ImportError as _e:      # pragma: no cover - 只在部署缺文件时触发
+    raise SystemExit(
+        '缺少 portal_assets.py —— 门户由 portal.py 与 portal_assets.py 两个文件组成，\n'
+        '它们必须放在同一目录下（通常都是 /etc/hysteria/）。\n'
+        '原始错误: %s\n'
+        '修复：重新执行一次安装 / 更新（bash install.sh install 或门户里的「更新」）。' % _e
+    )
 
 
 def strip_acl_block(text):
@@ -61,265 +76,6 @@ def strip_acl_block(text):
     return '\n'.join(out)
 
 
-STYLE = """
-:root{color-scheme:light;--ink:#122b31;--muted:#667c81;--line:#dce7e6;--accent:#087f74;--accent-hover:#066960;--danger:#cf3c3c;--danger-bg:#fdf2f2;--brand-bg:#eaf5ef;--card-bg:#ffffff}
-*{box-sizing:border-box}body{margin:0;background:#f3f7f6;color:var(--ink);font:15px/1.6 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
-main{max-width:1160px;margin:auto;padding:32px 28px 48px}.topbar{display:flex;justify-content:space-between;align-items:center;padding-bottom:24px}
-.brand{font-weight:800;letter-spacing:.04em;display:flex;gap:10px;align-items:center}.logo{background:var(--ink);color:white;border-radius:12px;padding:7px 12px;font-size:17px}.private{font-size:12px;color:var(--accent);border:1px solid #c3ddd5;border-radius:30px;padding:5px 12px;background:#eaf5ef}
-.eyebrow{font-size:11px;letter-spacing:.16em;font-weight:750;color:var(--accent)}h1{font-size:32px;letter-spacing:-.04em;margin:6px 0}h2{font-size:18px;margin:0 0 4px}p{margin:0;color:var(--muted)}.hero{margin-bottom:24px}.hero p{font-size:14px}
-
-/* Tab 导航容器 */
-.tab-bar{display:flex;gap:8px;border-bottom:2px solid var(--line);margin-bottom:26px;overflow-x:auto;padding-bottom:2px}
-.tab-btn{display:inline-flex;align-items:center;gap:8px;padding:11px 18px;border:none;background:none;color:var(--muted);font-size:14px;font-weight:700;cursor:pointer;border-radius:10px 10px 0 0;position:relative;transition:all .18s ease;white-space:nowrap}
-.tab-btn:hover{color:var(--ink);background:#ebf3f1}
-.tab-btn.active{color:var(--accent);background:#fff}
-.tab-btn.active:after{content:'';position:absolute;bottom:-2px;left:0;right:0;height:2px;background:var(--accent)}
-.tab-pane{display:none}
-.tab-pane.active{display:block;animation:fadeIn .2s ease-out}
-@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
-
-/* 卡片与网格 */
-.layout{display:grid;grid-template-columns:320px minmax(0,1fr);gap:22px;align-items:start}
-.card{background:#fff;border:1px solid var(--line);border-radius:20px;padding:24px;box-shadow:0 5px 22px #183f3505}
-.qr-card{text-align:center}.qr-frame{background:#fff;border:1px solid var(--line);border-radius:16px;padding:14px;margin:20px 0}.qr-frame img{display:block;width:100%;height:auto}
-.hint{font-size:12px}.tags{display:flex;gap:6px;justify-content:center;flex-wrap:wrap;margin-top:18px}.tag{background:#f0f5f4;color:#526a70;border-radius:6px;padding:3px 8px;font-size:11px}
-.stack{display:grid;gap:18px}.card-head{display:flex;gap:14px;align-items:center;margin-bottom:16px}.step{display:grid;place-items:center;flex:0 0 38px;height:38px;border-radius:11px;background:#e8f4f0;color:var(--accent);font-weight:750}.card-head p{font-size:12px}
-textarea{display:block;width:100%;min-width:0;border:1px solid var(--line);background:#f7faf9;border-radius:12px;padding:14px;color:#35545c;font:12px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;resize:vertical;overflow-wrap:anywhere}
-textarea.link{height:92px}textarea.config{height:290px;margin-top:18px}textarea:focus{outline:2px solid #65b3a5;outline-offset:2px}
-.actions{display:flex;gap:10px;align-items:center;margin-top:14px;flex-wrap:wrap}
-.button{display:inline-flex;align-items:center;justify-content:center;gap:6px;border:1px solid var(--line);background:white;border-radius:9px;padding:9px 15px;color:var(--ink);text-decoration:none;font:600 12px/1.5 inherit;cursor:pointer}
-.button.primary{background:var(--accent);color:white;border-color:var(--accent)}.button.danger{background:var(--danger);color:white;border-color:var(--danger)}.button:hover{filter:brightness(.94)}
-.note{font-size:12px;margin-top:12px}.advanced{margin-top:24px}.advanced-title{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}.advanced-title p{font-size:12px}.config-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}
-summary{cursor:pointer;font-weight:650;list-style-position:inside}summary span{font-size:11px;font-weight:400;color:var(--muted);margin-left:10px}
-.security{margin-top:24px;padding:15px 18px;border:1px solid #d8e6df;border-radius:12px;background:#eaf2ed;color:#4f6a60;font-size:12px}
-footer{display:flex;justify-content:space-between;margin-top:32px;color:#879996;font-size:11px}.status{font-size:12px;color:var(--accent)}
-
-/* 多用户与集群专属卡片样式 */
-.user-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;flex-wrap:wrap;gap:12px}
-.badge-count{background:var(--brand-bg);color:var(--accent);border:1px solid #c3ddd5;border-radius:20px;padding:4px 12px;font-size:12px;font-weight:700}
-.switch-box{display:flex;align-items:center;gap:12px;background:#f8fbfb;border:1px solid var(--line);border-radius:14px;padding:16px 20px;margin-bottom:20px;justify-content:space-between;flex-wrap:wrap}
-.switch-info{display:flex;flex-direction:column;gap:4px}
-.switch-title{font-size:14px;font-weight:700;color:var(--ink);display:flex;align-items:center;gap:8px}
-.switch-desc{font-size:12px;color:var(--muted)}
-.toggle-btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:8px 18px;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;border:1px solid transparent;transition:all .15s ease}
-.toggle-btn.on{background:var(--accent);color:#fff;border-color:var(--accent)}
-.toggle-btn.off{background:#fff;color:var(--muted);border-color:var(--line)}
-.toggle-btn:hover{filter:brightness(.92)}
-.user-table-wrap{width:100%;overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:#fff}
-.user-table{width:100%;border-collapse:collapse;text-align:left;font-size:13px}
-.user-table th{background:#f8fbfb;padding:12px 14px;color:var(--muted);font-weight:700;border-bottom:1px solid var(--line);white-space:nowrap}
-.user-table td{padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:middle;white-space:nowrap}
-.user-table tr:last-child td{border-bottom:none}
-.status-pill{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:700}
-.status-pill.active{background:#eafaf3;color:#0b8650}
-.status-pill.expired{background:#fff1f0;color:#cf3c3c}
-.traffic-bar{height:6px;width:90px;background:#e6edec;border-radius:4px;overflow:hidden;margin-top:5px}
-.traffic-fill{height:100%;background:var(--accent);border-radius:4px}
-.traffic-fill.danger{background:var(--danger)}
-.speed-badge{display:inline-flex;align-items:center;gap:4px;background:#eef6f5;color:var(--accent);border-radius:6px;padding:2px 6px;font-size:11px;font-weight:700;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
-.speed-badge.active{background:#e1f5ee;color:#085041}
-.speed-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px}
-.speed-card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between}
-.speed-card .val{font-size:20px;font-weight:800;letter-spacing:-.02em;color:var(--ink);font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
-.speed-card .lbl{font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase}
-.proxy-card{border-left:4px solid #534AB7}
-.proxy-table{width:100%;border-collapse:collapse;text-align:left;font-size:13px}
-.proxy-table th{background:#f8fbfb;padding:10px 12px;color:var(--muted);font-weight:700;border-bottom:1px solid var(--line);white-space:nowrap}
-.proxy-table td{padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:middle}
-.proxy-table tr:last-child td{border-bottom:none}
-.proxy-type{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:700;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
-.proxy-type.socks5{background:#EEEDFE;color:#3C3489}
-.proxy-type.http{background:#E6F1FB;color:#0C447C}
-.proxy-type.https{background:#E1F5EE;color:#085041}
-.api-box{background:#f7faf9;border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
-.api-key-code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:13px;color:#284d56;word-break:break-all;margin-top:4px}
-.modal-form{display:grid;grid-template-columns:1fr 1fr;gap:16px 20px;background:#f8fbfb;border:1px solid var(--line);border-radius:14px;padding:22px;margin-bottom:20px}
-.form-field{display:flex;flex-direction:column;gap:6px}
-.form-field-full{grid-column:1/-1}
-.form-field label{font-size:13px;font-weight:700;color:var(--ink);display:flex;justify-content:space-between;align-items:center}
-.form-field label span{font-weight:400;color:var(--muted);font-size:12px}
-.form-field input{height:42px;padding:0 12px;border:1px solid var(--line);border-radius:9px;font-size:13px;background:#fff;outline:none;transition:border-color .15s}
-.form-field input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(8,127,116,0.12)}
-.form-field small{font-size:11px;color:var(--muted);line-height:1.4;margin-top:2px}
-.input-with-action{display:flex;gap:8px}
-.input-with-action input{flex:1;min-width:0}
-.btn-mini{padding:0 12px;height:42px;background:#eaf5ef;border:1px solid #c3ddd5;color:var(--accent);border-radius:9px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;transition:background .15s}
-.btn-mini:hover{background:#dbeef7}
-
-@media(max-width:760px){
-  main{padding:20px 16px 32px}.topbar{padding-bottom:20px}.layout,.config-grid{grid-template-columns:1fr}.qr-frame{max-width:248px;margin:18px auto}.card{padding:20px}h1{font-size:26px}.advanced-title{display:block}footer{gap:15px;flex-direction:column}.private{font-size:10px}.brand{font-size:13px}
-  .login-card{padding:28px 20px;border-radius:20px}
-  .tab-btn{padding:9px 12px;font-size:13px}
-  .modal-form{grid-template-columns:1fr;gap:14px;padding:16px}
-}
-
-/* 登录样式 */
-.login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px 16px;background:radial-gradient(ellipse at top,#eef5f3 0%,#f3f7f6 100%)}
-.login-card{width:100%;max-width:420px;background:#fff;border:1px solid var(--line);border-radius:24px;padding:36px 30px;box-shadow:0 12px 36px rgba(18,43,49,0.06)}
-.login-brand{text-align:center;margin-bottom:28px}
-.login-logo{display:inline-flex;align-items:center;justify-content:center;width:60px;height:60px;background:var(--accent);color:#fff;border-radius:18px;font-size:26px;font-weight:800;box-shadow:0 6px 16px rgba(8,127,116,0.22);margin-bottom:14px}
-.login-badge{display:inline-block;font-size:11px;letter-spacing:.14em;font-weight:750;color:var(--accent);text-transform:uppercase;margin-bottom:6px}
-.login-title{font-size:24px;letter-spacing:-.03em;color:var(--ink);margin:0 0 6px;font-weight:700}
-.login-sub{font-size:13px;color:var(--muted);margin:0}
-.login-form{display:grid;gap:18px}
-.field-group{display:grid;gap:7px}
-.field-label{font-size:13px;font-weight:650;color:var(--ink);display:flex;justify-content:space-between;align-items:center}
-.field-input{width:100%;height:44px;padding:0 14px;border:1px solid var(--line);border-radius:11px;background:#f7faf9;color:var(--ink);font-size:14px;transition:all .15s ease}
-.field-input:focus{outline:none;border-color:var(--accent);background:#fff;box-shadow:0 0 0 3px rgba(8,127,116,0.12)}
-.field-pwd{position:relative}
-.field-pwd input{padding-right:68px}
-.toggle-pwd{position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--muted);font-size:12px;font-weight:600;padding:6px 8px;cursor:pointer;border-radius:6px}
-.toggle-pwd:hover{color:var(--accent);background:#eef5f3}
-.remember-row{display:flex;align-items:center;gap:8px;margin-top:2px}
-.remember-row input{accent-color:var(--accent);cursor:pointer;width:15px;height:15px}
-.remember-row label{font-size:13px;color:var(--muted);cursor:pointer;user-select:none}
-.btn-submit{width:100%;height:46px;background:var(--accent);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;transition:all .15s;margin-top:6px;display:flex;align-items:center;justify-content:center}
-.btn-submit:hover{background:var(--accent-hover);box-shadow:0 4px 12px rgba(8,127,116,0.2)}
-.btn-submit:active{transform:scale(0.99)}
-.error-tip{padding:10px 14px;border-radius:10px;background:var(--danger-bg);color:var(--danger);font-size:13px;font-weight:550;display:flex;align-items:center;gap:8px;border:1px solid #f6cfcf}
-.login-footer{margin-top:24px;padding-top:18px;border-top:1px solid #edf2f1;font-size:12px;color:var(--muted);line-height:1.6;text-align:center}
-.login-footer code{background:#eef4f2;color:#33565f;padding:2px 6px;border-radius:4px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
-
-@media(max-width:760px){
-  main{padding:20px 16px 32px}.topbar{padding-bottom:20px}.layout,.config-grid{grid-template-columns:1fr}.qr-frame{max-width:248px;margin:18px auto}.card{padding:20px}h1{font-size:26px}.advanced-title{display:block}footer{gap:15px;flex-direction:column}.private{font-size:10px}.brand{font-size:13px}
-  .login-card{padding:28px 20px;border-radius:20px}
-  .tab-btn{padding:9px 12px;font-size:13px}
-}
-
-/* 专属连接弹窗与独立页面样式 */
-.modal-backdrop{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(18,43,49,0.48);backdrop-filter:blur(5px);display:none;align-items:center;justify-content:center;z-index:9999;padding:16px}
-.modal-backdrop.show{display:flex;animation:fadeIn .15s ease-out}
-.modal-card{width:100%;max-width:700px;background:#fff;border:1px solid var(--line);border-radius:22px;padding:26px;box-shadow:0 20px 48px rgba(18,43,49,0.18);max-height:90vh;overflow-y:auto;display:flex;flex-direction:column;gap:16px}
-.modal-head{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line);padding-bottom:14px}
-.modal-close{background:none;border:none;font-size:24px;color:var(--muted);cursor:pointer;padding:4px 8px;border-radius:6px;line-height:1}
-.modal-close:hover{background:#f0f5f4;color:var(--ink)}
-.user-connect-grid{display:grid;grid-template-columns:250px minmax(0,1fr);gap:18px;align-items:start}
-@media(max-width:660px){.user-connect-grid{grid-template-columns:1fr}}
-.user-meta-bar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;background:#f7faf9;padding:10px 14px;border-radius:10px;border:1px solid var(--line);font-size:12px}
-
-/* 代理成功专属弹窗高颜值设计 */
-.pm-card{width:100%;max-width:650px;background:#fff;border:1px solid var(--line);border-radius:24px;padding:26px;box-shadow:0 24px 60px rgba(18,43,49,0.2);max-height:92vh;overflow-y:auto;display:flex;flex-direction:column;gap:16px}
-.pm-banner{background:linear-gradient(135deg,#f0f8f6 0%,#f6faf9 100%);border:1.5px solid #cce8e1;border-radius:16px;padding:14px 18px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}
-.pm-host-box{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.pm-host-val{font-size:17px;font-weight:800;color:var(--ink);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:-.02em}
-.pm-port-val{color:var(--accent);font-weight:850}
-.pm-status-tag{display:inline-flex;align-items:center;gap:4px;background:#e1f5ee;color:#085041;font-size:11px;font-weight:700;border-radius:20px;padding:3px 10px;border:1px solid #b7ebd8}
-.pm-cred-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.pm-cred-card{background:#f8fbfb;border:1px solid var(--line);border-radius:12px;padding:12px 14px;display:flex;justify-content:space-between;align-items:center}
-.pm-cred-lbl{font-size:11px;color:var(--muted);font-weight:700;margin-bottom:3px}
-.pm-cred-val{font-size:13px;font-weight:750;color:var(--ink);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;word-break:break-all}
-.pm-main-grid{display:grid;grid-template-columns:140px minmax(0,1fr);gap:16px;align-items:center;background:#fafcfb;border:1px solid var(--line);border-radius:14px;padding:14px}
-@media(max-width:560px){.pm-main-grid{grid-template-columns:1fr;justify-items:center}.pm-cred-grid{grid-template-columns:1fr}}
-.pm-qr-frame{background:#fff;border:1px solid var(--line);border-radius:10px;padding:6px;display:flex;justify-content:center;align-items:center;width:130px;height:130px;box-shadow:0 3px 10px rgba(0,0,0,0.03)}
-.pm-qr-frame svg{display:block;width:100%;height:100%}
-.pm-links-stack{display:flex;flex-direction:column;gap:10px;min-width:0;width:100%}
-.pm-code-box{display:flex;gap:6px;align-items:center;background:#fff;border:1px solid var(--line);border-radius:8px;padding:4px 6px 4px 10px;transition:border-color .15s}
-.pm-code-box:focus-within{border-color:var(--accent);box-shadow:0 0 0 2px rgba(8,127,116,0.1)}
-.pm-code-input{flex:1;min-width:0;border:none;background:transparent;font:11px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;color:#284d56;outline:none}
-
-/* WARP 与自定义分流模块高阶专业排版 */
-.warp-section { margin-top: 10px; }
-.warp-switch-card { background: #f6faf9; border: 1px solid #d3e7e2; border-radius: 14px; padding: 16px 20px; margin-bottom: 20px; }
-.warp-desc-title { font-size: 13.5px; font-weight: 750; color: #11342d; display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
-.warp-desc-text { font-size: 12.5px; color: #496861; line-height: 1.6; margin: 0; }
-
-.warp-rules-card { background: #ffffff; border: 1px solid var(--line); border-radius: 16px; padding: 22px; box-shadow: 0 4px 16px rgba(18, 43, 49, 0.03); }
-.warp-rules-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 10px; }
-.warp-rules-title-box { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.warp-rules-title { font-size: 14px; font-weight: 800; color: var(--ink); margin: 0; }
-.warp-count-badge { background: #eaf5ef; color: var(--accent); border: 1px solid #c0ded4; border-radius: 20px; padding: 3px 10px; font-size: 11.5px; font-weight: 700; }
-.warp-reset-btn { background: #fff; border: 1px solid var(--line); color: var(--muted); border-radius: 8px; padding: 5px 12px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all .15s ease; }
-.warp-reset-btn:hover { background: #f0f5f4; color: var(--ink); border-color: #b0d0c8; }
-
-.warp-add-form { display: flex; gap: 10px; margin-bottom: 14px; }
-@media(max-width: 600px) { .warp-add-form { flex-direction: column; } }
-.warp-domain-input { flex: 1; height: 42px; padding: 0 14px; border: 1.5px solid var(--line); border-radius: 10px; font-size: 13px; color: var(--ink); background: #fdfefe; outline: none; transition: all .15s ease; }
-.warp-domain-input:focus { border-color: var(--accent); background: #fff; box-shadow: 0 0 0 3px rgba(8, 127, 116, 0.12); }
-.warp-add-btn { height: 42px; padding: 0 20px; font-size: 13px; font-weight: 700; border-radius: 10px; background: var(--accent); color: #fff; border: none; cursor: pointer; white-space: nowrap; transition: all .15s ease; }
-.warp-add-btn:hover { filter: brightness(0.92); }
-
-.warp-presets-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 18px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
-.warp-preset-chip { display: inline-flex; align-items: center; gap: 4px; background: #f3f7f6; color: #2e554d; border: 1px solid #d4e5e1; border-radius: 14px; padding: 3px 10px; text-decoration: none; font-size: 11.5px; font-weight: 600; transition: all .15s ease; }
-.warp-preset-chip:hover { background: #e6f3ef; border-color: var(--accent); color: var(--accent); transform: translateY(-1px); }
-
-.warp-tags-wrap { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px; background: #fafcfb; border: 1px solid var(--line); border-radius: 12px; min-height: 48px; align-items: center; }
-.warp-tag-item { display: inline-flex; align-items: center; gap: 6px; background: #ffffff; border: 1.5px solid #cfe0dc; color: #184239; border-radius: 20px; padding: 5px 12px; font-size: 12.5px; font-weight: 650; box-shadow: 0 2px 6px rgba(18, 43, 49, 0.03); transition: all .15s ease; }
-.warp-tag-item:hover { border-color: #a8cfc6; box-shadow: 0 3px 8px rgba(18, 43, 49, 0.06); }
-.warp-tag-text { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: -0.01em; }
-.warp-tag-del { color: #d64545; text-decoration: none; font-size: 15px; line-height: 1; padding: 0 2px; font-weight: 800; cursor: pointer; border-radius: 50%; }
-.warp-tag-del:hover { color: #a82020; transform: scale(1.2); }
-
-/* BBR 拥塞控制模块全局专属高质感样式 */
-.bbr-section { margin-top: 24px; border-left: 4px solid var(--accent); }
-.bbr-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 14px; }
-@media(max-width: 860px) { .bbr-grid { grid-template-columns: 1fr; } }
-.bbr-card { background: #ffffff; border: 1.5px solid var(--line); border-radius: 16px; padding: 20px; display: flex; flex-direction: column; justify-content: space-between; gap: 14px; box-shadow: 0 4px 14px rgba(18, 43, 49, 0.03); transition: all .18s ease; }
-.bbr-card:hover { border-color: #a8cfc6; transform: translateY(-2px); box-shadow: 0 6px 20px rgba(18, 43, 49, 0.06); }
-.bbr-card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
-.bbr-card-title { font-size: 14.5px; font-weight: 800; color: var(--ink); }
-.bbr-card-desc { font-size: 12px; color: var(--muted); margin: 0; line-height: 1.6; }
-.bbr-btn { width: 100%; height: 42px; font-size: 13px; font-weight: 750; border-radius: 10px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; transition: all .15s ease; border: 1px solid transparent; }
-.bbr-btn.v1 { background: var(--accent); color: #fff; }
-.bbr-btn.v1:hover { filter: brightness(0.92); }
-.bbr-btn.v2 { background: #f6ffed; border-color: #b7eb8f; color: #237804; }
-.bbr-btn.v2:hover { background: #d9f7be; }
-.bbr-btn.v3 { background: #fff0f6; border-color: #ffd6e7; color: #c41d7f; }
-.bbr-btn.v3:hover { background: #ffadd2; }
-
-.bbr-info-bar { background: #f8fbfb; border: 1px solid var(--line); border-radius: 14px; padding: 16px 20px; margin-bottom: 18px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
-.bbr-stat-val { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--accent); font-weight: 800; font-size: 14px; }
-.bbr-sub-text { font-size: 12px; color: var(--muted); margin-top: 3px; }
-
-/* 全局自定义高颜值确认弹窗与 Toast 样式 */
-.confirm-card { width: 100%; max-width: 440px; background: #ffffff; border: 1.5px solid var(--line); border-radius: 20px; padding: 24px; box-shadow: 0 20px 50px rgba(18, 43, 49, 0.22); animation: scaleUp .18s cubic-bezier(0.16, 1, 0.3, 1); }
-@keyframes scaleUp { from { opacity: 0; transform: scale(0.94); } to { opacity: 1; transform: scale(1); } }
-.confirm-icon-box { width: 48px; height: 48px; border-radius: 14px; background: #eaf5ef; color: var(--accent); display: flex; align-items: center; justify-content: center; font-size: 24px; margin-bottom: 14px; }
-.confirm-icon-box.danger { background: #fdf2f2; color: var(--danger); }
-.confirm-icon-box.warn { background: #fff8e6; color: #d46b08; }
-.confirm-title { font-size: 17px; font-weight: 800; color: var(--ink); margin-bottom: 8px; }
-.confirm-text { font-size: 13px; color: var(--muted); line-height: 1.6; margin-bottom: 22px; }
-.confirm-actions { display: flex; gap: 10px; justify-content: flex-end; }
-.confirm-btn { height: 40px; padding: 0 18px; border-radius: 10px; font-size: 13px; font-weight: 700; cursor: pointer; transition: all .15s ease; border: 1px solid transparent; }
-.confirm-btn.cancel { background: #f3f7f6; color: var(--ink); border-color: #d8e5e2; }
-.confirm-btn.cancel:hover { background: #e5eeec; }
-.confirm-btn.primary { background: var(--accent); color: #fff; }
-.confirm-btn.primary:hover { filter: brightness(0.92); }
-.confirm-btn.danger { background: var(--danger); color: #fff; }
-.confirm-btn.danger:hover { filter: brightness(0.92); }
-
-/* 全局 Toast 通知栏 */
-.toast-container { position: fixed; top: 24px; right: 24px; z-index: 99999; display: flex; flex-direction: column; gap: 10px; pointer-events: none; }
-.toast-item { background: #122b31; color: #ffffff; border-radius: 12px; padding: 12px 20px; font-size: 13px; font-weight: 650; box-shadow: 0 10px 30px rgba(0,0,0,0.18); display: flex; align-items: center; gap: 10px; pointer-events: auto; animation: toastIn .2s cubic-bezier(0.16, 1, 0.3, 1); }
-.toast-item.success { background: #087f74; }
-.toast-item.error { background: #cf3c3c; }
-@keyframes toastIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
-
-/* ===== AmneziaWG 抗 DPI 协议卡片 ===== */
-.awg-card { background: #ffffff; border: 1px solid var(--line); border-radius: 16px; padding: 22px; box-shadow: 0 4px 16px rgba(18, 43, 49, 0.03); }
-.awg-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-wrap: wrap; gap: 10px; }
-.awg-title-box { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.awg-title { font-size: 15px; font-weight: 800; color: var(--ink); margin: 0; }
-.awg-desc { font-size: 12.5px; color: var(--muted); line-height: 1.7; margin: 0 0 14px; }
-.awg-meta { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-bottom: 16px; }
-.awg-meta span { background: #f3f7f6; border: 1px solid #d4e5e1; border-radius: 12px; padding: 4px 11px; font-weight: 650; }
-.awg-install-box { background: #f8fbfa; border: 1px solid #d9ebe6; border-radius: 14px; padding: 16px 18px; margin-bottom: 18px; }
-.awg-label { display: block; font-size: 12px; font-weight: 700; color: var(--muted); margin: 12px 0 5px; }
-.awg-label:first-child { margin-top: 0; }
-.awg-input, .awg-select { width: 100%; height: 40px; padding: 0 12px; border: 1.5px solid var(--line); border-radius: 10px; font-size: 13px; color: var(--ink); background: #fdfefe; outline: none; box-sizing: border-box; }
-.awg-input:focus, .awg-select:focus { border-color: var(--accent); background: #fff; box-shadow: 0 0 0 3px rgba(8, 127, 116, 0.12); }
-.awg-warn { font-size: 11.5px; color: #993c1d; background: #faece7; border: 1px solid #f5c4b3; border-radius: 10px; padding: 9px 12px; line-height: 1.6; margin: 12px 0 0; }
-.awg-add-form { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
-.awg-add-form .awg-input { flex: 1; min-width: 150px; width: auto; }
-.awg-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-.awg-table th { text-align: left; font-size: 11.5px; color: var(--muted); font-weight: 700; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
-.awg-table td { padding: 10px; border-bottom: 1px solid #f0f4f3; color: var(--ink); vertical-align: middle; }
-.awg-foot { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
-.awg-hint { font-size: 11.5px; color: var(--muted); margin: 10px 0 0; line-height: 1.6; }
-@media(max-width: 600px) { .awg-add-form { flex-direction: column; } .awg-add-form .awg-input { width: 100%; } }
-
-
-
-"""
 
 # 🔴 必须是原始字符串（r"""），不能改成普通三引号。
 # 这是内嵌的 JS 源码，里面写的 \n 需要【原样保留】成 JS 的转义序列。
@@ -328,1314 +84,8 @@ footer{display:flex;justify-content:space-between;margin-top:32px;color:#879996;
 # 表现不是某个按钮失灵，而是页面上所有按钮、标签页、轮询全部失效
 # （历史上真发生过：更新后 Web 面板的菜单整个点不动）。
 # 同理见下面的 LOGIN_SCRIPT / USER_SCRIPT。
-SCRIPT = r"""
 
-// 全局高颜值 Promise 确认框与 Toast 机制
-function showToast(msg, type = 'info') {
-  const container = document.getElementById('toast-container');
-  if (!container) { alert(msg); return; }
-  const toast = document.createElement('div');
-  toast.className = 'toast-item ' + type;
-  const icon = type === 'success' ? '✓ ' : (type === 'error' ? '✕ ' : 'ℹ ');
-  toast.textContent = icon + msg;
-  container.appendChild(toast);
-  setTimeout(() => {
-    toast.style.transition = 'all .25s ease';
-    toast.style.opacity = '0';
-    toast.style.transform = 'translateY(-8px)';
-    setTimeout(() => toast.remove(), 250);
-  }, 2800);
-}
 
-function showConfirm(options = {}) {
-  return new Promise((resolve) => {
-    const modal = document.getElementById('custom-confirm-modal');
-    const titleEl = document.getElementById('confirm-title');
-    const textEl = document.getElementById('confirm-text');
-    const iconEl = document.getElementById('confirm-icon');
-    const okBtn = document.getElementById('confirm-btn-ok');
-    const cancelBtn = document.getElementById('confirm-btn-cancel');
-
-    if (!modal || !titleEl || !textEl || !okBtn || !cancelBtn) {
-      resolve(confirm(options.text || '确定执行吗？'));
-      return;
-    }
-
-    titleEl.textContent = options.title || '操作确认';
-    textEl.textContent = options.text || '确定要继续执行吗？';
-    if (iconEl) {
-      iconEl.textContent = options.icon || '💡';
-      iconEl.className = 'confirm-icon-box ' + (options.isDanger ? 'danger' : (options.isWarn ? 'warn' : ''));
-    }
-
-    okBtn.textContent = options.confirmText || '确定执行';
-    okBtn.className = 'confirm-btn ' + (options.isDanger ? 'danger' : 'primary');
-
-    modal.classList.add('show');
-
-    function cleanup(result) {
-      modal.classList.remove('show');
-      okBtn.removeEventListener('click', onOk);
-      cancelBtn.removeEventListener('click', onCancel);
-      resolve(result);
-    }
-
-    function onOk() { cleanup(true); }
-    function onCancel() { cleanup(false); }
-
-    okBtn.addEventListener('click', onOk);
-    cancelBtn.addEventListener('click', onCancel);
-  });
-}
-
-function switchTab(tabId) {
-  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-  document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
-  const btn = document.querySelector('[data-tab="' + tabId + '"]');
-  const pane = document.getElementById('pane-' + tabId);
-  if (btn && pane) {
-    btn.classList.add('active');
-    pane.classList.add('active');
-    history.replaceState(null, null, '#' + tabId);
-  }
-}
-
-document.querySelectorAll('[data-tab]').forEach(btn => {
-  btn.addEventListener('click', () => switchTab(btn.dataset.tab));
-});
-
-if (location.hash) {
-  const hash = location.hash.substring(1);
-  if (document.getElementById('pane-' + hash)) {
-    switchTab(hash);
-  }
-}
-
-function genRandom(targetId, prefix='') {
-  const el = document.getElementById(targetId);
-  if (!el) return;
-  const rand = Array.from(crypto.getRandomValues(new Uint8Array(8))).map(b => b.toString(16).padStart(2, '0')).join('');
-  el.value = prefix ? (prefix + '_' + rand.substring(0, 8)) : rand;
-}
-
-document.querySelectorAll('[data-gen]').forEach(btn => {
-  btn.addEventListener('click', () => {
-    genRandom(btn.dataset.gen, btn.dataset.prefix || '');
-  });
-});
-
-document.querySelectorAll('[data-copy]').forEach(button => {
-  button.addEventListener('click', async () => {
-    const field = document.getElementById(button.dataset.copy);
-    const status = document.getElementById('copy-status');
-    try {
-      const val = field.value || field.textContent || '';
-      await navigator.clipboard.writeText(val);
-      if (status) status.textContent = '已复制到剪贴板 ✓';
-      button.textContent = '已复制 ✓';
-      setTimeout(() => { button.textContent = button.dataset.orig || '复制'; }, 1800);
-    } catch (_) {
-      if (field.select) { field.focus(); field.select(); }
-      if (status) status.textContent = '已选中，请按 Ctrl+C 复制';
-    }
-  });
-});
-
-// 专属连接弹窗逻辑
-const uModal = document.getElementById('user-modal');
-const uModalTitle = document.getElementById('um-title');
-const uModalSub = document.getElementById('um-sub');
-const uModalBody = document.getElementById('um-body');
-const uModalClose = document.getElementById('um-close');
-
-// WARP 状态与一键安装与自定义分流交互
-const warpBadge = document.getElementById('warp-badge');
-const btnToggleWarp = document.getElementById('btn-toggle-warp');
-const btnInstallWarp = document.getElementById('btn-install-warp');
-const warpTagsCloud = document.getElementById('warp-tags-cloud');
-const warpRulesCount = document.getElementById('warp-rules-count');
-const formAddWarpRule = document.getElementById('form-add-warp-rule');
-const inputWarpDomain = document.getElementById('input-warp-domain');
-const btnResetWarpRules = document.getElementById('btn-reset-warp-rules');
-
-function renderWarpRules(rules) {
-  if (!warpTagsCloud) return;
-  if (warpRulesCount) warpRulesCount.textContent = rules.length + ' 个生效中';
-  if (rules.length === 0) {
-    warpTagsCloud.innerHTML = '<span style="font-size:12px;color:var(--muted)">暂无分流域名，上方输入即可快速添加</span>';
-    return;
-  }
-  warpTagsCloud.innerHTML = rules.map(d => {
-    return `<span class="warp-tag-item">
-      <span class="warp-tag-text">${d}</span>
-      <a href="javascript:void(0)" class="warp-tag-del" onclick="delWarpRule('${d}')" title="移除此域名">×</a>
-    </span>`;
-  }).join('');
-}
-
-async function addWarpRule(domain) {
-  if (!domain) return;
-  try {
-    const res = await fetch(location.pathname + 'manage-warp', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'action=add_rule&domain=' + encodeURIComponent(domain)
-    });
-    const json = await res.json();
-    if (json.ok) {
-      if (inputWarpDomain) inputWarpDomain.value = '';
-      if (Array.isArray(json.rules)) renderWarpRules(json.rules);
-    } else {
-      alert(json.error || '添加失败');
-    }
-  } catch (e) {
-    alert('请求异常: ' + e.message);
-  }
-}
-
-async function delWarpRule(domain) {
-  if (!confirm('确定将 ' + domain + ' 从 WARP 分流列表中移除吗？')) return;
-  try {
-    const res = await fetch(location.pathname + 'manage-warp', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'action=del_rule&domain=' + encodeURIComponent(domain)
-    });
-    const json = await res.json();
-    if (json.ok && Array.isArray(json.rules)) {
-      renderWarpRules(json.rules);
-    }
-  } catch (e) {
-    alert('请求异常: ' + e.message);
-  }
-}
-window.delWarpRule = delWarpRule;
-
-async function checkWarpStatus() {
-  if (!warpBadge) return;
-  try {
-    const res = await fetch(location.pathname + 'warp-status', { credentials: 'same-origin' });
-    if (!res.ok) return;
-    const json = await res.json();
-    if (!json.ok) return;
-
-    if (btnInstallWarp) {
-      if (!json.installed) {
-        btnInstallWarp.style.display = 'inline-flex';
-      } else {
-        btnInstallWarp.style.display = 'none';
-      }
-    }
-
-    if (!json.installed) {
-      warpBadge.textContent = '● 未安装 WARP 客户端';
-      warpBadge.style.background = '#fff1f0';
-      warpBadge.style.color = '#cf3c3c';
-      if (btnToggleWarp) btnToggleWarp.style.display = 'none';
-      return;
-    } else {
-      if (btnToggleWarp) btnToggleWarp.style.display = 'inline-flex';
-    }
-
-    if (json.enabled) {
-      warpBadge.textContent = json.connected ? ('● 运行中 (' + (json.ip || '已连通') + ')') : '● 正在连接 / 异常';
-      warpBadge.style.background = json.connected ? '#eaf3de' : '#fff1f0';
-      warpBadge.style.color = json.connected ? '#27500a' : '#cf3c3c';
-      if (btnToggleWarp) {
-        btnToggleWarp.textContent = '已开启 (点击关闭)';
-        btnToggleWarp.className = 'toggle-btn on';
-      }
-    } else {
-      warpBadge.textContent = '○ 已停用 (直连模式)';
-      warpBadge.style.background = '#f1efe8';
-      warpBadge.style.color = '#5f5e5a';
-      if (btnToggleWarp) {
-        btnToggleWarp.textContent = '已关闭 (点击开启)';
-        btnToggleWarp.className = 'toggle-btn off';
-      }
-    }
-
-    if (Array.isArray(json.rules)) {
-      renderWarpRules(json.rules);
-    }
-  } catch (_) {}
-}
-
-if (btnToggleWarp) {
-  btnToggleWarp.addEventListener('click', async () => {
-    btnToggleWarp.disabled = true;
-    btnToggleWarp.textContent = '切换中...';
-    try {
-      const res = await fetch(location.pathname + 'manage-warp', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'action=toggle'
-      });
-      const json = await res.json();
-      if (!json.ok) alert(json.error || '切换失败');
-    } catch (e) {
-      alert('操作失败: ' + e.message);
-    } finally {
-      btnToggleWarp.disabled = false;
-      await checkWarpStatus();
-    }
-  });
-}
-
-if (btnInstallWarp) {
-  btnInstallWarp.addEventListener('click', async () => {
-    if (!confirm("确定要在服务器上一键部署 Cloudflare WARP 本地出口吗？将自动安装 wgcf + wireproxy，并启用 127.0.0.1:19898 的 socks5 出口。")) return;
-    btnInstallWarp.disabled = true;
-    const origText = btnInstallWarp.textContent;
-    btnInstallWarp.textContent = '⏳ 正在安装 WARP (耗时约 30 秒)...';
-    try {
-      const res = await fetch(location.pathname + 'install-warp', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-      });
-      if (!res.ok) {
-        const errText = await res.text();
-        showToast('安装失败 (HTTP ' + res.status + '): ' + errText, 'error');
-        return;
-      }
-      const json = await res.json();
-      if (json.ok) {
-        showToast(json.message || 'Cloudflare WARP 安装成功！服务已自动就绪。', 'success');
-        await checkWarpStatus();
-      } else {
-        showToast(json.error || '安装失败，请检查网络', 'error');
-      }
-    } catch (e) {
-      showToast('安装请求异常: ' + e.message, 'error');
-    } finally {
-      btnInstallWarp.disabled = false;
-      btnInstallWarp.textContent = origText;
-    }
-  });
-}
-
-if (formAddWarpRule) {
-  formAddWarpRule.addEventListener('submit', (e) => {
-    e.preventDefault();
-    if (inputWarpDomain) addWarpRule(inputWarpDomain.value.trim());
-  });
-}
-
-document.querySelectorAll('.preset-rule').forEach(el => {
-  el.addEventListener('click', () => {
-    const dom = el.getAttribute('data-domain');
-    if (dom) addWarpRule(dom);
-  });
-});
-
-if (btnResetWarpRules) {
-  btnResetWarpRules.addEventListener('click', async () => {
-    if (!confirm('确定重置为系统默认推荐的 AI 域名规则列表吗？')) return;
-    try {
-      const res = await fetch(location.pathname + 'manage-warp', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'action=reset_rules'
-      });
-      const json = await res.json();
-      if (json.ok && Array.isArray(json.rules)) {
-        renderWarpRules(json.rules);
-      }
-    } catch (e) {
-      alert('请求异常: ' + e.message);
-    }
-  });
-}
-
-checkWarpStatus();
-
-// VLESS-Reality 客户端与状态交互
-const realityBadge = document.getElementById('reality-badge');
-const btnInstallXray = document.getElementById('btn-install-xray');
-const btnToggleReality = document.getElementById('btn-toggle-reality');
-const realityContentBox = document.getElementById('reality-content-box');
-const realityUriVal = document.getElementById('reality-uri-val');
-const realityQrBox = document.getElementById('reality-qr-box');
-const realitySniVal = document.getElementById('reality-sni-val');
-const realityUuidVal = document.getElementById('reality-uuid-val');
-const realityPubkeyVal = document.getElementById('reality-pubkey-val');
-const realityFlowVal = document.getElementById('reality-flow-val');
-const btnCopyRealityUri = document.getElementById('btn-copy-reality-uri');
-const btnResetRealityKeys = document.getElementById('btn-reset-reality-keys');
-
-async function checkRealityStatus() {
-  if (!realityBadge) return;
-  try {
-    const res = await fetch(location.pathname + 'reality-status', { credentials: 'same-origin' });
-    if (!res.ok) return;
-    const json = await res.json();
-    if (!json.ok) return;
-
-    if (!json.installed) {
-      realityBadge.textContent = '● 未安装 Xray 核心';
-      realityBadge.style.background = '#fff1f0';
-      realityBadge.style.color = '#cf3c3c';
-      if (btnInstallXray) btnInstallXray.style.display = 'inline-flex';
-      if (btnToggleReality) btnToggleReality.style.display = 'none';
-      if (realityContentBox) realityContentBox.style.display = 'none';
-      return;
-    }
-
-    if (btnInstallXray) btnInstallXray.style.display = 'none';
-    if (btnToggleReality) btnToggleReality.style.display = 'inline-flex';
-
-    if (json.active) {
-      realityBadge.textContent = '● 运行中 (TCP 443 端口)';
-      realityBadge.style.background = '#eaf3de';
-      realityBadge.style.color = '#27500a';
-      btnToggleReality.textContent = '已开启 (点击关闭)';
-      btnToggleReality.className = 'toggle-btn on';
-      if (realityContentBox) realityContentBox.style.display = 'block';
-    } else {
-      realityBadge.textContent = '○ 已停止';
-      realityBadge.style.background = '#f1efe8';
-      realityBadge.style.color = '#5f5e5a';
-      btnToggleReality.textContent = '已关闭 (点击开启)';
-      btnToggleReality.className = 'toggle-btn off';
-      if (realityContentBox) realityContentBox.style.display = 'none';
-    }
-
-    if (json.config) {
-      const cfg = json.config;
-      if (realityUriVal) realityUriVal.value = cfg.uri || '';
-      if (realityQrBox && cfg.qr_svg) realityQrBox.innerHTML = cfg.qr_svg;
-      if (realitySniVal) realitySniVal.textContent = (cfg.sni || 'www.apple.com') + ':' + (cfg.port || 443);
-      if (realityUuidVal) realityUuidVal.textContent = cfg.uuid || '-';
-      if (realityPubkeyVal) realityPubkeyVal.textContent = cfg.pub_key || '-';
-      if (realityFlowVal) realityFlowVal.textContent = (cfg.short_id || '') + ' · ' + (cfg.flow || 'xtls-rprx-vision');
-    }
-  } catch (_) {}
-}
-
-if (btnInstallXray) {
-  btnInstallXray.addEventListener('click', async () => {
-    if (!confirm("确定要一键安装 Xray 官方核心并部署 VLESS-Reality 节点吗？")) return;
-    btnInstallXray.disabled = true;
-    const orig = btnInstallXray.textContent;
-    btnInstallXray.textContent = '⏳ 正在下载并配置 Xray (约 20-30 秒)...';
-    try {
-      const res = await fetch(location.pathname + 'install-xray', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-      });
-      const json = await res.json();
-      if (json.ok) {
-        alert(json.message || 'Xray-core 安装并启动成功！');
-        await checkRealityStatus();
-      } else {
-        alert(json.error || '安装失败');
-      }
-    } catch (e) {
-      alert('请求异常: ' + e.message);
-    } finally {
-      btnInstallXray.disabled = false;
-      btnInstallXray.textContent = orig;
-    }
-  });
-}
-
-if (btnToggleReality) {
-  btnToggleReality.addEventListener('click', async () => {
-    btnToggleReality.disabled = true;
-    btnToggleReality.textContent = '切换中...';
-    try {
-      const res = await fetch(location.pathname + 'manage-reality', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'action=toggle'
-      });
-      const json = await res.json();
-      if (!json.ok) alert(json.error || '切换失败');
-      await checkRealityStatus();
-    } catch (e) {
-      alert('请求异常: ' + e.message);
-    } finally {
-      btnToggleReality.disabled = false;
-    }
-  });
-}
-
-if (btnResetRealityKeys) {
-  btnResetRealityKeys.addEventListener('click', async () => {
-    if (!confirm("确定要重新生成 UUID 与 Reality 密钥对吗？旧客户端连接凭据将失效。")) return;
-    try {
-      const res = await fetch(location.pathname + 'manage-reality', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'action=reset'
-      });
-      const json = await res.json();
-      if (json.ok) {
-        alert('密钥与 UUID 已重新生成并生效！');
-        await checkRealityStatus();
-      } else {
-        alert(json.error || '重置失败');
-      }
-    } catch (e) {
-      alert('请求异常: ' + e.message);
-    }
-  });
-}
-
-if (btnCopyRealityUri) {
-  btnCopyRealityUri.addEventListener('click', () => {
-    if (realityUriVal && realityUriVal.value) {
-      navigator.clipboard.writeText(realityUriVal.value).then(() => {
-        const orig = btnCopyRealityUri.textContent;
-        btnCopyRealityUri.textContent = '✓ 已复制直链';
-        setTimeout(() => btnCopyRealityUri.textContent = orig, 1500);
-      });
-    }
-  });
-}
-
-checkRealityStatus();
-
-// BBR 状态获取与一键切换交互
-const bbrBadge = document.getElementById('bbr-badge');
-const bbrCurrentText = document.getElementById('bbr-current-text');
-const bbrQdiscText = document.getElementById('bbr-qdisc-text');
-const bbrKernelText = document.getElementById('bbr-kernel-text');
-const bbrRebootTip = document.getElementById('bbr-reboot-tip');
-const btnRebootServer = document.getElementById('btn-reboot-server');
-
-async function checkBbrStatus() {
-  if (!bbrBadge) return;
-  try {
-    const res = await fetch(location.pathname + 'bbr-status', { credentials: 'same-origin' });
-    if (!res.ok) return;
-    const json = await res.json();
-    if (!json.ok) return;
-
-    if (bbrCurrentText) bbrCurrentText.textContent = json.current || 'cubic';
-    if (bbrQdiscText) bbrQdiscText.textContent = json.qdisc || 'fq_codel';
-    if (bbrKernelText) bbrKernelText.textContent = json.kernel || '--';
-
-    const isBbrActive = (json.current && json.current.includes('bbr'));
-    if (bbrBadge) {
-      if (isBbrActive) {
-        bbrBadge.textContent = '● 已开启 ' + json.current.toUpperCase();
-        bbrBadge.style.background = '#eaf3de';
-        bbrBadge.style.color = '#27500a';
-      } else {
-        bbrBadge.textContent = '○ 未开启 BBR (' + json.current + ')';
-        bbrBadge.style.background = '#f1efe8';
-        bbrBadge.style.color = '#5f5e5a';
-      }
-    }
-
-    if (bbrRebootTip && btnRebootServer) {
-      if (json.need_reboot) {
-        bbrRebootTip.style.display = 'block';
-        bbrRebootTip.textContent = '⚠️ 已成功配置 ' + json.configured.toUpperCase() + '，需要重启服务器后生效！';
-        btnRebootServer.style.display = 'inline-flex';
-      } else {
-        bbrRebootTip.style.display = 'none';
-        btnRebootServer.style.display = 'none';
-      }
-    }
-  } catch (_) {}
-}
-
-document.querySelectorAll('.btn-apply-bbr').forEach(btn => {
-  btn.addEventListener('click', async () => {
-    const ver = btn.getAttribute('data-version') || 'v1';
-    const label = { v1: 'BBR V1 (经典官方)', v2: 'BBR V2 (低丢包)', v3: 'BBR V3 (极限吞吐)' }[ver];
-    const confirmed = await showConfirm({
-      title: '开启 ' + label + ' 加速引擎',
-      text: '系统将自动将拥塞控制与排队规则写入 Linux 内核持久化配置（/etc/sysctl.d/99-bbr.conf）。配置后可能需要安全重启服务器以完成生效。',
-      icon: '🚀',
-      confirmText: '立即开启 ' + ver.toUpperCase()
-    });
-    if (!confirmed) return;
-
-    btn.disabled = true;
-    const orig = btn.textContent;
-    btn.textContent = '正在配置...';
-    try {
-      const res = await fetch(location.pathname + 'set-bbr', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'version=' + encodeURIComponent(ver)
-      });
-      const json = await res.json();
-      if (json.ok) {
-        showToast(json.message || '配置成功！', 'success');
-        await checkBbrStatus();
-      } else {
-        showToast(json.error || '配置失败', 'error');
-      }
-    } catch (e) {
-      alert('请求异常: ' + e.message);
-    } finally {
-      btn.disabled = false;
-      btn.textContent = orig;
-    }
-  });
-});
-
-if (btnRebootServer) {
-  btnRebootServer.addEventListener('click', async () => {
-    const confirmed = await showConfirm({
-      title: '安全重启服务器',
-      text: '确定要立即重启服务器以完成新 BBR 内核网络参数生效吗？服务器将在 10 秒内安全完成重启，页面将自动发起 25 秒倒计时并在就绪后重连。',
-      icon: '🔄',
-      confirmText: '确定立即重启',
-      isWarn: true
-    });
-    if (!confirmed) return;
-    btnRebootServer.disabled = true;
-    btnRebootServer.textContent = '⏳ 重启指令已发送...';
-    try {
-      const res = await fetch(location.pathname + 'reboot-server', {
-        method: 'POST',
-        credentials: 'same-origin'
-      });
-      alert("服务器正在重启中，系统将在 25 秒后自动刷新页面！");
-      let countdown = 25;
-      const timer = setInterval(() => {
-        countdown--;
-        btnRebootServer.textContent = '正在重启中 (' + countdown + 's)...';
-        if (countdown <= 0) {
-          clearInterval(timer);
-          location.reload();
-        }
-      }, 1000);
-    } catch (e) {
-      alert("重启请求已发出: " + e.message);
-    }
-  });
-}
-
-checkBbrStatus();
-
-// 版本检测与一键更新交互
-const coreVerDisplay = document.getElementById('core-ver-display');
-const portalVerDisplay = document.getElementById('portal-ver-display');
-const awgVerDisplay = document.getElementById('awg-ver-display');
-const btnUpdateCore = document.getElementById('btn-update-core');
-const btnUpdatePortal = document.getElementById('btn-update-portal');
-const btnUpdateAwgEngine = document.getElementById('btn-update-awg-engine');
-const updateStatusMsg = document.getElementById('update-status-msg');
-const btnRecheckUpdate = document.getElementById('btn-recheck-update');
-
-// 版本展示：区分「未安装 / 拿不到远端 / 有新版本 / 最新」四种情况，
-// 避免拿不到远端时误报「最新」。
-function fmtVer(current, latest, hasUpdate, installed) {
-  if (installed === false) return '未安装';
-  if (!current || current === '未安装') return '未安装';
-  if (!latest) return current + '（远端未取到，无法比对）';
-  return hasUpdate ? (current + ' → ' + latest + ' 有新版本') : (current + '（最新）');
-}
-
-async function checkVersions() {
-  if (!coreVerDisplay || !portalVerDisplay) return;
-  try {
-    const res = await fetch(location.pathname + 'check-version', { credentials: 'same-origin' });
-    if (!res.ok) return;
-    const json = await res.json();
-    if (!json.ok) return;
-
-    // 核心展示
-    coreVerDisplay.textContent = json.core_current + (json.core_has_update ? (' → 可升级至 ' + json.core_latest) : ' (最新)');
-    if (btnUpdateCore) {
-      btnUpdateCore.style.display = json.core_has_update ? 'inline-flex' : 'none';
-      btnUpdateCore.onclick = () => doUpgrade('core');
-    }
-
-    // 面板展示
-    portalVerDisplay.textContent = fmtVer(json.portal_current, json.portal_latest, json.portal_has_update, true);
-    if (btnUpdatePortal) {
-      btnUpdatePortal.style.display = json.portal_has_update ? 'inline-flex' : 'none';
-      btnUpdatePortal.onclick = () => doUpgrade('portal');
-    }
-
-    // AmneziaWG 引擎展示
-    if (awgVerDisplay) {
-      awgVerDisplay.textContent = fmtVer(json.awg_current, json.awg_latest, json.awg_has_update, json.awg_installed);
-      if (btnUpdateAwgEngine) {
-        btnUpdateAwgEngine.style.display = json.awg_has_update ? 'inline-flex' : 'none';
-        btnUpdateAwgEngine.onclick = () => doUpgrade('awg');
-      }
-    }
-  } catch (_) {}
-}
-
-async function doUpgrade(target) {
-  const names = { core: 'Hysteria 2 官方核心', portal: '控制面板自身', awg: 'AmneziaWG 引擎' };
-  const btns = { core: btnUpdateCore, portal: btnUpdatePortal, awg: btnUpdateAwgEngine };
-  const btn = btns[target];
-  if (!confirm('确定要升级 ' + (names[target] || target) + ' 吗？')) return;
-  if (btn) { btn.disabled = true; btn.textContent = '升级中...'; }
-  if (updateStatusMsg) updateStatusMsg.textContent = '正在下载并应用更新，请稍候...';
-  try {
-    const res = await fetch(location.pathname + 'do-upgrade', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'target=' + encodeURIComponent(target)
-    });
-    const json = await res.json();
-    if (json.ok) {
-      const msg = json.message || '升级已触发';
-      if (updateStatusMsg) updateStatusMsg.textContent = msg + '，5 秒后自动刷新页面...';
-      setTimeout(() => location.reload(), 5000);
-    } else {
-      alert(json.error || '升级失败');
-      if (updateStatusMsg) updateStatusMsg.textContent = json.error || '升级失败';
-      if (btn) { btn.disabled = false; btn.textContent = '重试升级'; }
-    }
-  } catch (e) {
-    alert('升级请求异常: ' + e.message);
-    if (btn) { btn.disabled = false; btn.textContent = '重试升级'; }
-  }
-}
-
-if (btnRecheckUpdate) {
-  btnRecheckUpdate.addEventListener('click', async () => {
-    if (updateStatusMsg) updateStatusMsg.textContent = '正在检测...';
-    await checkVersions();
-    if (updateStatusMsg) updateStatusMsg.textContent = '检测完成（远端结果在服务端缓存 5 分钟）';
-  });
-}
-
-checkVersions();
-
-// 实时吞吐量与网速轮询 (每 2 秒更新一次)
-const speedRxEl = document.getElementById('node-speed-rx');
-const speedTxEl = document.getElementById('node-speed-tx');
-const rxTagEl = document.getElementById('rx-active-tag');
-const txTagEl = document.getElementById('tx-active-tag');
-
-function fmtSpeed(bytesPerSec) {
-  if (bytesPerSec < 1024) return bytesPerSec.toFixed(0) + ' B/s';
-  if (bytesPerSec < 1024 * 1024) return (bytesPerSec / 1024).toFixed(1) + ' KB/s';
-  return (bytesPerSec / (1024 * 1024)).toFixed(2) + ' MB/s';
-}
-
-async function pollTrafficSpeed() {
-  try {
-    const res = await fetch(location.pathname + 'traffic-speed', { credentials: 'same-origin' });
-    if (!res.ok) return;
-    const json = await res.json();
-    if (!json.ok) return;
-
-    if (speedRxEl) speedRxEl.textContent = fmtSpeed(json.node_rx || 0);
-    if (speedTxEl) speedTxEl.textContent = fmtSpeed(json.node_tx || 0);
-
-    if (rxTagEl) rxTagEl.className = (json.node_rx > 1024) ? 'speed-badge active' : 'speed-badge';
-    if (txTagEl) txTagEl.className = (json.node_tx > 1024) ? 'speed-badge active' : 'speed-badge';
-
-    // 更新各个用户的实时速率标签
-    if (json.users) {
-      document.querySelectorAll('[data-user-speed]').forEach(badge => {
-        const uid = badge.dataset.userSpeed;
-        const u = json.users[uid];
-        if (u && (u.rx > 0 || u.tx > 0)) {
-          badge.textContent = '↓ ' + fmtSpeed(u.rx) + ' · ↑ ' + fmtSpeed(u.tx);
-          badge.className = 'speed-badge active';
-        } else {
-          badge.textContent = '↓ 0 B/s · ↑ 0 B/s';
-          badge.className = 'speed-badge';
-        }
-      });
-    }
-  } catch (_) {}
-}
-
-setInterval(pollTrafficSpeed, 2000);
-pollTrafficSpeed();
-
-// 入站代理服务管理 (gost 驱动)
-const gostBadge = document.getElementById('gost-badge');
-const proxyTbody = document.getElementById('proxy-tbody');
-const btnInstallGost = document.getElementById('btn-install-gost');
-const proxyModal = document.getElementById('proxy-modal');
-const pmClose = document.getElementById('pm-close');
-const resPType = document.getElementById('res-ptype');
-const resPHost = document.getElementById('res-phost');
-const resPPort = document.getElementById('res-pport');
-const resPUser = document.getElementById('res-puser');
-const resPPass = document.getElementById('res-ppass');
-const resPUrl = document.getElementById('res-purl');
-const resPFmt = document.getElementById('res-pfmt');
-const btnCopyPUrl = document.getElementById('btn-copy-purl');
-const btnCopyPFmt = document.getElementById('btn-copy-pfmt');
-
-let curProxyServerHost = location.hostname;
-
-function closeProxyModal() {
-  if (proxyModal) proxyModal.classList.remove('show');
-}
-if (pmClose) pmClose.addEventListener('click', closeProxyModal);
-if (proxyModal) {
-  proxyModal.addEventListener('click', (e) => {
-    if (e.target === proxyModal) closeProxyModal();
-  });
-}
-
-const resPTypeBadge = document.getElementById('res-ptype-badge');
-const resPQr = document.getElementById('res-pqr');
-
-function showProxyResult(data) {
-  if (!proxyModal) return;
-  const host = data.host || curProxyServerHost;
-  const ptype = data.type || 'socks5';
-  const url = data.url || (ptype + '://' + data.username + ':' + data.password + '@' + host + ':' + data.port);
-  const fmt = data.format || (host + ':' + data.port + ':' + data.username + ':' + data.password);
-
-  if (resPTypeBadge) {
-    resPTypeBadge.textContent = ptype.toUpperCase();
-    resPTypeBadge.className = 'proxy-type ' + ptype;
-  }
-  if (resPHost) resPHost.textContent = host;
-  if (resPPort) resPPort.textContent = data.port;
-  if (resPUser) resPUser.textContent = data.username;
-  if (resPPass) resPPass.textContent = data.password;
-  if (resPUrl) resPUrl.value = url;
-  if (resPFmt) resPFmt.value = fmt;
-
-  if (resPQr && data.qr) {
-    resPQr.innerHTML = data.qr;
-  }
-
-  if (btnCopyPUrl) {
-    btnCopyPUrl.onclick = async () => {
-      try {
-        await navigator.clipboard.writeText(url);
-        btnCopyPUrl.textContent = '已复制 ✓';
-        setTimeout(() => { btnCopyPUrl.textContent = '复制 URL'; }, 1800);
-      } catch (_) { alert('复制失败，请手动选择复制'); }
-    };
-  }
-
-  if (btnCopyPFmt) {
-    btnCopyPFmt.onclick = async () => {
-      try {
-        await navigator.clipboard.writeText(fmt);
-        btnCopyPFmt.textContent = '已复制 ✓';
-        setTimeout(() => { btnCopyPFmt.textContent = '复制格式'; }, 1800);
-      } catch (_) { alert('复制失败，请手动选择复制'); }
-    };
-  }
-
-  document.querySelectorAll('[data-copy-field]').forEach(b => {
-    b.onclick = async () => {
-      const el = document.getElementById(b.dataset.copyField);
-      if (el) {
-        try {
-          await navigator.clipboard.writeText(el.textContent);
-          const orig = b.textContent;
-          b.textContent = '✓';
-          setTimeout(() => { b.textContent = orig; }, 1500);
-        } catch (_) {}
-      }
-    };
-  });
-
-  proxyModal.classList.add('show');
-}
-
-// 绑定秒级一键生成按钮
-document.querySelectorAll('.btn-quick-proxy').forEach(btn => {
-  btn.addEventListener('click', async () => {
-    const ptype = btn.dataset.ptype;
-    const cPortEl = document.getElementById('custom-proxy-port');
-    const customPort = cPortEl ? cPortEl.value.trim() : '';
-    btn.disabled = true;
-    const origText = btn.textContent;
-    btn.textContent = '⚡ 正在生成...';
-    try {
-      let body = 'action=create&type=' + encodeURIComponent(ptype);
-      if (customPort) body += '&port=' + encodeURIComponent(customPort);
-
-      const res = await fetch(location.pathname + 'manage-proxy', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: body
-      });
-      const json = await res.json();
-      if (json.ok) {
-        if (cPortEl) cPortEl.value = '';
-        showProxyResult(json);
-        loadProxyServices();
-      } else {
-        alert(json.error || '生成失败');
-      }
-    } catch (e) {
-      alert('生成异常: ' + e.message);
-    } finally {
-      btn.disabled = false;
-      btn.textContent = origText;
-    }
-  });
-});
-
-if (btnInstallGost) {
-  btnInstallGost.addEventListener('click', async () => {
-    if (!confirm("确定要一键安装或更新 GOST 代理服务吗？系统将自动匹配架构并配置自启。")) return;
-    btnInstallGost.disabled = true;
-    const origText = btnInstallGost.textContent;
-    btnInstallGost.textContent = '⏳ 正在安装 GOST...';
-    try {
-      const res = await fetch(location.pathname + 'install-gost', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-      });
-      const json = await res.json();
-      if (json.ok) {
-        alert(json.message || 'GOST 安装成功！服务已就绪。');
-        loadProxyServices();
-      } else {
-        alert(json.error || '安装失败，请检查服务器网络或日志');
-      }
-    } catch (e) {
-      alert('安装请求异常: ' + e.message);
-    } finally {
-      btnInstallGost.disabled = false;
-      btnInstallGost.textContent = origText;
-    }
-  });
-}
-
-async function loadProxyServices() {
-  if (!proxyTbody) return;
-  try {
-    const res = await fetch(location.pathname + 'proxy-services', { credentials: 'same-origin' });
-    if (!res.ok) return;
-    const json = await res.json();
-    if (!json.ok) return;
-
-    if (gostBadge) {
-      if (!json.gost_installed) {
-        gostBadge.textContent = '● 未安装 gost';
-        gostBadge.style.background = '#fff1f0';
-        gostBadge.style.color = '#cf3c3c';
-        if (btnInstallGost) {
-          btnInstallGost.style.display = 'inline-flex';
-          btnInstallGost.textContent = '⚡ 一键安装 GOST';
-        }
-      } else if (json.gost_active) {
-        gostBadge.textContent = '● gost 运行中';
-        gostBadge.style.background = '#eaf3de';
-        gostBadge.style.color = '#27500a';
-        if (btnInstallGost) {
-          btnInstallGost.style.display = 'none';
-        }
-      } else {
-        gostBadge.textContent = '● gost 未启动';
-        gostBadge.style.background = '#f1efe8';
-        gostBadge.style.color = '#5f5e5a';
-        if (btnInstallGost) {
-          btnInstallGost.style.display = 'inline-flex';
-          btnInstallGost.textContent = '🔄 重启/修复 GOST';
-        }
-      }
-    }
-
-    const services = json.services || [];
-    if (services.length === 0) {
-      proxyTbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--muted);padding:24px">暂无代理服务，点击上方「添加代理服务」创建</td></tr>';
-      return;
-    }
-    if (json.host) curProxyServerHost = json.host;
-    const typeLabel = { socks5: 'SOCKS5', http: 'HTTP', https: 'HTTPS' };
-    proxyTbody.innerHTML = services.map(s => {
-      const fullUrl = `${s.type}://${s.username}:${s.password}@${curProxyServerHost}:${s.port}`;
-      return `
-      <tr>
-        <td><span class="proxy-type ${s.type}">${typeLabel[s.type] || s.type}</span></td>
-        <td><code style="font-size:12px;font-weight:700;color:var(--accent)">:${s.port}</code></td>
-        <td><code style="font-size:12px">${s.username}</code></td>
-        <td><code style="font-size:12px">${s.password}</code></td>
-        <td>
-          <div style="display:flex;align-items:center;gap:6px">
-            <code style="font-size:11px;background:#f5f8f7;padding:2px 6px;border-radius:4px;word-break:break-all">${s.type}://${s.username}:****@${curProxyServerHost}:${s.port}</code>
-            <button class="button" style="padding:2px 8px;font-size:11px;white-space:nowrap" type="button" data-copy-link="${fullUrl}">复制链接</button>
-          </div>
-        </td>
-        <td><button class="button danger" style="padding:4px 10px;font-size:11px" type="button" data-proxy-del="${s.id}">删除</button></td>
-      </tr>`;
-    }).join('');
-
-    proxyTbody.querySelectorAll('[data-copy-link]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        try {
-          await navigator.clipboard.writeText(btn.dataset.copyLink);
-          const orig = btn.textContent;
-          btn.textContent = '已复制 ✓';
-          setTimeout(() => { btn.textContent = orig; }, 1800);
-        } catch (_) { alert('复制失败'); }
-      });
-    });
-    proxyTbody.querySelectorAll('[data-proxy-del]').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        if (!confirm('确定删除该代理服务？')) return;
-        const res = await fetch(location.pathname + 'manage-proxy', {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'action=delete&id=' + encodeURIComponent(btn.dataset.proxyDel)
-        });
-        const json = await res.json();
-        if (json.ok) loadProxyServices();
-        else alert(json.error || '删除失败');
-      });
-    });
-  } catch (_) {}
-}
-
-// proxyForm replaced with instant buttons
-
-loadProxyServices();
-
-function closeUserModal() {
-  if (uModal) uModal.classList.remove('show');
-}
-if (uModalClose) uModalClose.addEventListener('click', closeUserModal);
-if (uModal) {
-  uModal.addEventListener('click', (e) => {
-    if (e.target === uModal) closeUserModal();
-  });
-}
-
-document.querySelectorAll('.btn-user-connect').forEach(btn => {
-  btn.addEventListener('click', async () => {
-    const uid = btn.dataset.uid;
-    const token = btn.dataset.token;
-    const userKey = btn.dataset.key;
-    if (!uModal || !uModalBody) return;
-    
-    uModalTitle.textContent = '用户专属连接: ' + uid;
-    uModalSub.textContent = '正在获取专属配置与独立连接页...';
-    uModalBody.innerHTML = '<div style="text-align:center;padding:36px;color:var(--muted)">加载专属数据中...</div>';
-    uModal.classList.add('show');
-    
-    try {
-      const res = await fetch('/' + token + '/user-config?user_id=' + encodeURIComponent(uid), { credentials: 'same-origin' });
-      if (res.status === 401) {
-        throw new Error('登录状态已失效，请刷新页面重新登录');
-      }
-      if (!res.ok) {
-        throw new Error('网络请求异常 (HTTP ' + res.status + ')');
-      }
-      const json = await res.json();
-      if (!json.ok) throw new Error(json.error || '加载失败');
-      
-      uModalSub.textContent = json.note ? ('备注: ' + json.note) : '专属独立配置与下载链接';
-      
-      const shareUrl = location.origin + '/' + token + '/u/' + encodeURIComponent(uid) + '?k=' + userKey;
-      
-      let trafficText = (json.traffic_limit > 0) 
-        ? ((json.traffic_used / (1024**2)).toFixed(1) + ' MB / ' + (json.traffic_limit / (1024**3)).toFixed(1) + ' GB')
-        : ((json.traffic_used / (1024**2)).toFixed(1) + ' MB (不限)');
-      let expireText = (json.expires_at < 2000000000) ? new Date(json.expires_at * 1000).toLocaleString() : '永久有效';
-      let ipText = (json.ip_limit > 0) ? (json.ip_limit + ' IP') : '不限';
-      
-      uModalBody.innerHTML = `
-        <div class="user-meta-bar">
-          <span>📅 到期: <b>${expireText}</b></span>
-          <span>📊 流量: <b>${trafficText}</b></span>
-          <span>📱 IP限制: <b>${ipText}</b></span>
-        </div>
-        
-        <div style="background:#eaf5ef;border:1px solid #c3ddd5;border-radius:12px;padding:12px 14px">
-          <div style="font-size:12px;font-weight:700;color:var(--accent);margin-bottom:6px">🌐 专属独立连接页面 (可直接发给客户):</div>
-          <div class="input-with-action">
-            <input type="text" id="um-share-url" value="${shareUrl}" readonly style="font-size:12px;height:38px">
-            <button class="button primary" style="padding:0 12px;height:38px;font-size:12px" type="button" data-modal-copy="um-share-url">复制页面链接</button>
-            <a class="button" style="padding:0 12px;height:38px;font-size:12px" href="${shareUrl}" target="_blank">打开页面 ↗</a>
-          </div>
-        </div>
-
-        <div class="user-connect-grid">
-          <div style="text-align:center;background:#fff;border:1px solid var(--line);border-radius:14px;padding:14px">
-            <div style="font-size:12px;font-weight:700;color:var(--ink);margin-bottom:8px">专属二维码扫码导入</div>
-            <div class="qr-frame" style="margin:0 auto;max-width:210px;padding:8px">${json.qr_svg || '<p style="color:var(--muted)">二维码生成中...</p>'}</div>
-            <div style="font-size:11px;color:var(--muted);margin-top:8px">Shadowrocket / v2rayNG / Nekobox</div>
-          </div>
-          <div style="display:flex;flex-direction:column;gap:12px">
-            <div>
-              <div style="font-size:12px;font-weight:700;color:var(--ink);margin-bottom:4px">专属节点直链 (URI):</div>
-              <textarea id="um-uri" class="link" style="height:65px;font-size:11px" readonly>${json.uri}</textarea>
-              <div style="margin-top:6px;display:flex;gap:8px">
-                <button class="button primary" style="padding:6px 14px;font-size:11px" type="button" data-modal-copy="um-uri">复制直链</button>
-              </div>
-            </div>
-            <div>
-              <div style="font-size:12px;font-weight:700;color:var(--ink);margin-bottom:4px">Clash / Mihomo 专属订阅链接:</div>
-              <div class="input-with-action">
-                <input type="text" id="um-clash-sub" value="${location.origin}/${token}/u/${encodeURIComponent(uid)}/clash.yaml?k=${userKey}" readonly style="font-size:11px;height:36px">
-                <button class="button primary" style="padding:0 12px;height:36px;font-size:11px" type="button" data-modal-copy="um-clash-sub">复制订阅</button>
-                <a class="button" style="padding:0 10px;height:36px;font-size:11px" href="/${token}/u/${encodeURIComponent(uid)}/clash.yaml?k=${userKey}" download="clash-${uid}.yaml">下载 ↓</a>
-              </div>
-              <details style="margin-top:6px">
-                <summary style="font-size:11px;color:var(--muted)">查看/复制配置文本</summary>
-                <textarea id="um-clash" class="link" style="height:65px;font-size:10px;margin-top:4px" readonly>${json.clash}</textarea>
-                <div style="margin-top:4px"><button class="button" style="padding:2px 8px;font-size:10px" type="button" data-modal-copy="um-clash">复制文本</button></div>
-              </details>
-            </div>
-          </div>
-        </div>
-      `;
-      
-      uModalBody.querySelectorAll('[data-modal-copy]').forEach(b => {
-        b.addEventListener('click', async () => {
-          const target = document.getElementById(b.dataset.modalCopy);
-          if (!target) return;
-          const text = target.value || target.textContent || '';
-          await navigator.clipboard.writeText(text);
-          const orig = b.textContent;
-          b.textContent = '已复制 ✓';
-          setTimeout(() => { b.textContent = orig; }, 1800);
-        });
-      });
-      
-    } catch (err) {
-      uModalBody.innerHTML = `<div style="text-align:center;padding:24px;color:var(--danger)">加载失败: ${err.message}</div>`;
-    }
-  });
-});
-
-/* ==================== AmneziaWG 抗 DPI 协议管理 ==================== */
-const awgBadge = document.getElementById('awg-badge');
-const awgInstallBox = document.getElementById('awg-install-box');
-const btnInstallAwg = document.getElementById('btn-install-awg');
-const btnDoInstallAwg = document.getElementById('btn-do-install-awg');
-const awgLineSelect = document.getElementById('awg-line-select');
-const awgEndpointInput = document.getElementById('awg-endpoint-input');
-const awgMetaBox = document.getElementById('awg-meta');
-const awgMetaLine = document.getElementById('awg-meta-line');
-const awgMetaPort = document.getElementById('awg-meta-port');
-const awgMetaPeers = document.getElementById('awg-meta-peers');
-const awgMetaChip = document.getElementById('awg-meta-chip');
-const awgPanel = document.getElementById('awg-panel');
-const awgPeerTbody = document.getElementById('awg-peer-tbody');
-const awgPeerName = document.getElementById('awg-peer-name');
-const awgPeerEndpoint = document.getElementById('awg-peer-endpoint');
-const btnAddAwgPeer = document.getElementById('btn-add-awg-peer');
-const btnSwitchAwgLine = document.getElementById('btn-switch-awg-line');
-const btnUpdateAwg = document.getElementById('btn-update-awg');
-let awgCurrentEndpoint = '';
-let awgCurrentLine = '3';
-
-function awgPost(endpoint, params) {
-  return fetch(location.pathname + endpoint, {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams(params).toString()
-  }).then(r => r.json()).catch(e => ({ ok: false, error: '请求异常: ' + e.message }));
-}
-
-function setAwgBadge(text, bg, color) {
-  if (!awgBadge) return;
-  awgBadge.textContent = text;
-  awgBadge.style.background = bg;
-  awgBadge.style.color = color;
-}
-
-async function loadAwgState() {
-  if (!awgBadge) return;
-  try {
-    const res = await fetch(location.pathname + 'awg-state', { credentials: 'same-origin' });
-    if (!res.ok) return;
-    const json = await res.json();
-    if (!json.ok) return;
-
-    awgCurrentEndpoint = json.endpoint || '';
-    awgCurrentLine = json.line || '3';
-    if (awgEndpointInput && !awgEndpointInput.value) awgEndpointInput.value = awgCurrentEndpoint;
-    if (awgPeerEndpoint && !awgPeerEndpoint.value) awgPeerEndpoint.value = awgCurrentEndpoint;
-    if (awgMetaChip) awgMetaChip.textContent = json.installed ? ('AWG ' + awgCurrentLine + '.x') : '未安装';
-
-    if (!json.installed) {
-      setAwgBadge('● 未安装 AmneziaWG', '#fff1f0', '#cf3c3c');
-      if (awgMetaBox) awgMetaBox.style.display = 'none';
-      if (awgPanel) awgPanel.style.display = 'none';
-      if (awgInstallBox) awgInstallBox.style.display = 'none';
-      if (btnInstallAwg) { btnInstallAwg.style.display = 'inline-flex'; btnInstallAwg.textContent = '⚡ 一键安装 AmneziaWG'; }
-      return;
-    }
-
-    if (awgLineSelect && awgCurrentLine) awgLineSelect.value = awgCurrentLine;
-
-    if (json.active) {
-      setAwgBadge('● AmneziaWG 运行中', '#eaf3de', '#27500a');
-    } else {
-      setAwgBadge('● AmneziaWG 已安装未运行', '#f1efe8', '#5f5e5a');
-    }
-    if (btnInstallAwg) btnInstallAwg.style.display = 'none';
-    if (awgInstallBox) awgInstallBox.style.display = 'none';
-    if (awgMetaBox) awgMetaBox.style.display = 'flex';
-    if (awgMetaLine) awgMetaLine.textContent = '协议线 AWG ' + awgCurrentLine + '.x';
-    if (awgMetaPort) awgMetaPort.textContent = 'UDP ' + (json.port || '未知');
-    if (awgMetaPeers) awgMetaPeers.textContent = '客户端 ' + (json.peer_count || 0) + ' 个';
-    if (awgPanel) awgPanel.style.display = 'block';
-
-    renderAwgPeers(json.peers || []);
-  } catch (e) { /* 静默失败，不打扰主界面 */ }
-}
-
-function renderAwgPeers(peers) {
-  if (!awgPeerTbody) return;
-  if (!peers.length) {
-    awgPeerTbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--muted);padding:20px">暂无客户端，用上方表单新增</td></tr>';
-    return;
-  }
-  awgPeerTbody.innerHTML = peers.map(p => {
-    const enc = encodeURIComponent(p.name);
-    const bs = 'padding:3px 10px;font-size:11px';
-    return '<tr>'
-      + '<td><strong>' + p.name + '</strong></td>'
-      + '<td>' + p.address + '</td>'
-      + '<td style="color:var(--muted);font-size:11.5px">' + (p.created_at || '-') + '</td>'
-      + '<td style="white-space:nowrap">'
-      + '<button class="button" type="button" data-awg-conf="' + enc + '" style="' + bs + '">下载配置</button> '
-      + '<button class="button" type="button" data-awg-qr="' + enc + '" style="' + bs + '">二维码</button> '
-      + '<button class="button" type="button" data-awg-del="' + enc + '" style="' + bs + ';color:#cf3c3c">删除</button>'
-      + '</td></tr>';
-  }).join('');
-
-  awgPeerTbody.querySelectorAll('[data-awg-conf]').forEach(b => {
-    b.addEventListener('click', () => {
-      window.open(location.pathname + 'awg-conf?name=' + b.getAttribute('data-awg-conf'), '_blank');
-    });
-  });
-  awgPeerTbody.querySelectorAll('[data-awg-qr]').forEach(b => {
-    b.addEventListener('click', () => {
-      window.open(location.pathname + 'awg-qr.svg?name=' + b.getAttribute('data-awg-qr'), '_blank');
-    });
-  });
-  awgPeerTbody.querySelectorAll('[data-awg-del]').forEach(b => {
-    b.addEventListener('click', async () => {
-      const n = decodeURIComponent(b.getAttribute('data-awg-del'));
-      if (!confirm('确认删除客户端「' + n + '」？该客户端会立即断开连接。')) return;
-      const json = await awgPost('manage-amneziawg', { action: 'peer_del', name: n });
-      if (json.ok) { showToast('已删除客户端 ' + n, 'success'); loadAwgState(); }
-      else { alert(json.error || '删除失败'); }
-    });
-  });
-}
-
-if (btnInstallAwg) {
-  btnInstallAwg.addEventListener('click', () => {
-    if (!awgInstallBox) return;
-    awgInstallBox.style.display = (awgInstallBox.style.display === 'none') ? 'block' : 'none';
-  });
-}
-
-if (btnDoInstallAwg) {
-  btnDoInstallAwg.addEventListener('click', async () => {
-    const line = awgLineSelect ? awgLineSelect.value : '3';
-    const endpoint = awgEndpointInput ? awgEndpointInput.value.trim() : '';
-    if (!endpoint) { alert('请填写客户端连接地址（域名或公网 IP）'); return; }
-    if (!confirm('确认安装 AmneziaWG（协议线 AWG ' + line + '.x）？\n\n会下载自建静态二进制并启动独立服务，不影响现有的 Hysteria 2。')) return;
-    btnDoInstallAwg.disabled = true;
-    const orig = btnDoInstallAwg.textContent;
-    btnDoInstallAwg.textContent = '⏳ 安装中，请稍候...';
-    try {
-      const json = await awgPost('install-amneziawg', { line: line, endpoint: endpoint });
-      if (json.ok) { showToast(json.message || '安装完成', 'success'); loadAwgState(); }
-      else { alert(json.error || '安装失败'); }
-    } finally {
-      btnDoInstallAwg.disabled = false;
-      btnDoInstallAwg.textContent = orig;
-    }
-  });
-}
-
-if (btnAddAwgPeer) {
-  btnAddAwgPeer.addEventListener('click', async () => {
-    const name = awgPeerName ? awgPeerName.value.trim() : '';
-    const endpoint = (awgPeerEndpoint && awgPeerEndpoint.value.trim()) || awgCurrentEndpoint;
-    if (!name) { alert('请填写客户端名称'); return; }
-    if (!/^[A-Za-z0-9_.-]{1,32}$/.test(name)) { alert('名称只允许字母、数字、点、下划线、连字符，且不超过 32 字符'); return; }
-    if (!endpoint) { alert('请填写连接地址'); return; }
-    btnAddAwgPeer.disabled = true;
-    try {
-      const json = await awgPost('manage-amneziawg', { action: 'peer_add', name: name, endpoint: endpoint });
-      if (json.ok) {
-        if (awgPeerName) awgPeerName.value = '';
-        showToast('已新增客户端 ' + name + '，正在打开配置', 'success');
-        window.open(location.pathname + 'awg-conf?name=' + encodeURIComponent(name), '_blank');
-        loadAwgState();
-      } else { alert(json.error || '新增失败'); }
-    } finally {
-      btnAddAwgPeer.disabled = false;
-    }
-  });
-}
-
-if (btnSwitchAwgLine) {
-  btnSwitchAwgLine.addEventListener('click', async () => {
-    const target = prompt('切换 AmneziaWG 协议线\n\n2 = AWG 2.x（参数体系稳定）\n3 = AWG 3.x（含头部保护与抗行为分析）\n\n⚠️ 切换会重新生成全部混淆参数，已发放的客户端配置会立即失效，必须重新导出。\n\n请输入目标协议线：', awgCurrentLine === '3' ? '2' : '3');
-    if (target !== '2' && target !== '3') return;
-    if (target === awgCurrentLine) { alert('已经是 AWG ' + awgCurrentLine + '.x，无需切换。'); return; }
-    if (!confirm('确认切换到 AWG ' + target + '.x？所有已发放的客户端配置都会失效。')) return;
-    const json = await awgPost('manage-amneziawg', { action: 'set_line', line: target });
-    if (json.ok) { showToast(json.message || '已切换协议线', 'success'); loadAwgState(); }
-    else { alert(json.error || '切换失败'); }
-  });
-}
-
-if (btnUpdateAwg) {
-  btnUpdateAwg.addEventListener('click', async () => {
-    if (!confirm('确认更新 AmneziaWG 二进制？协议线与混淆参数保持不变，客户端无需重新导入。')) return;
-    const json = await awgPost('manage-amneziawg', { action: 'update' });
-    if (json.ok) { showToast(json.message || '更新完成', 'success'); loadAwgState(); }
-    else { alert(json.error || '更新失败'); }
-  });
-}
-
-loadAwgState();
-"""
-
-LOGIN_SCRIPT = r"""
-function toggleSecret(id, btn) {
-  const el = document.getElementById(id);
-  if (el.type === 'password') {
-    el.type = 'text';
-    btn.textContent = '隐藏';
-  } else {
-    el.type = 'password';
-    btn.textContent = '显示';
-  }
-}
-"""
-
-USER_SCRIPT = r"""
-document.querySelectorAll('[data-copy]').forEach(button => {
-  button.addEventListener('click', async () => {
-    const field = document.getElementById(button.dataset.copy);
-    try {
-      const val = field.value || field.textContent || '';
-      await navigator.clipboard.writeText(val);
-      const orig = button.textContent;
-      button.textContent = '已复制 ✓';
-      setTimeout(() => { button.textContent = orig; }, 1800);
-    } catch (_) {
-      if (field.select) { field.focus(); field.select(); }
-    }
-  });
-});
-"""
 
 
 def user_view_key(secret, user_id):
@@ -3485,262 +1935,353 @@ def serve(path):
             # 3. Web 网页版管理通道 (用户管理 / WARP 开关 / 触发升级)
             prefix = '/' + data['token'] + '/'
             if self.path == prefix + 'do-upgrade':
-                if not self.is_authenticated():
-                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                try:
-                    length = int(self.headers.get('Content-Length', 0))
-                    body = self.rfile.read(length).decode('utf-8')
-                    form = parse_qs(body)
-                    target = form.get('target', [''])[0]
-                    if target not in ('core', 'portal', 'awg'):
-                        return self.reply_json(400, {'ok': False, 'error': 'Invalid target'})
-
-                    if target == 'portal':
-                        # 面板自更新【不走 do_upgrade.sh】：那个脚本从
-                        # raw.githubusercontent.com 拉 portal.py，会踩 raw 的 CDN 缓存
-                        # （实测 push 后数分钟仍返回旧内容），"更新完还是旧版"。
-                        # 这里直接用多源回退取回新文件，原子替换并留备份。
-                        content = _fetch_repo_file('portal.py',
-                                                   marker=b'hysteria2-installer',
-                                                   min_size=20000)
-                        if content is None:
-                            return self.reply_json(500, {'ok': False, 'error':
-                                '三个源都取不到 portal.py（GitHub API / jsDelivr / raw 均失败）'})
-                        try:
-                            if PORTAL_SELF.read_bytes() == content:
-                                return self.reply_json(200, {'ok': True, 'target': target,
-                                                             'message': '面板已是最新，无需更新'})
-                        except Exception:
-                            pass
-                        try:
-                            shutil.copy2(str(PORTAL_SELF), str(PORTAL_SELF) + '.bak')
-                        except Exception:
-                            pass
-                        tmp_path = str(PORTAL_SELF) + '.new'
-                        with open(tmp_path, 'wb') as fh:
-                            fh.write(content)
-                        os.chmod(tmp_path, 0o644)
-                        os.replace(tmp_path, str(PORTAL_SELF))
-                        # 延迟重启，且必须脱离当前会话：本进程马上会被 systemctl 杀掉，
-                        # 不脱离的话重启命令会跟着一起死（start_new_session=True）。
-                        subprocess.Popen(
-                            ['bash', '-c', 'sleep 1; systemctl restart hysteria-portal'],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            start_new_session=True)
-                        return self.reply_json(200, {'ok': True, 'target': target,
-                                                     'message': '面板已更新，服务重启中'})
-
-                    if target == 'awg':
-                        if not awg_installed():
-                            return self.reply_json(400, {'ok': False,
-                                                         'error': 'AmneziaWG 尚未安装'})
-                        # 先刷新控制脚本自身，再更新二进制。不需要重启面板。
-                        ensure_awgctl(force=True)
-                        rc, out, err = awg_run(['update'], timeout=420)
-                        if rc != 0:
-                            return self.reply_json(500, {'ok': False,
-                                'error': 'AWG 更新失败：' + awg_err_tail(rc, out, err)})
-                        return self.reply_json(200, {'ok': True, 'target': target,
-                                                     'message': 'AmneziaWG 引擎已更新，客户端无需重新导入'})
-
-                    # core 仍交给 do_upgrade.sh：下载的是 Hysteria 官方发布，
-                    # 与 raw 的 CDN 缓存无关。
-                    subprocess.Popen(['bash', '/etc/hysteria/do_upgrade.sh', target],
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    return self.reply_json(200, {'ok': True, 'target': target})
-                except Exception as e:
-                    return self.reply_json(500, {'ok': False, 'error': str(e)})
+                return self._h_post_do_upgrade(prefix)
 
             if self.path == prefix + 'manage-proxy':
-                if not self.is_authenticated():
-                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                try:
-                    length = int(self.headers.get('Content-Length', 0))
-                    body = self.rfile.read(length).decode('utf-8')
-                    form = parse_qs(body)
-                    action = form.get('action', [''])[0]
-                    now_ts = int(time.time())
+                return self._h_post_manage_proxy(prefix)
 
-                    if action == 'create':
-                        ptype = form.get('type', ['socks5'])[0]
-                        if ptype not in ('socks5', 'http', 'https'):
-                            return self.reply_json(400, {'ok': False, 'error': 'Invalid proxy type'})
+            if self.path == prefix + 'install-gost':
+                return self._h_post_install_gost(prefix)
 
-                        raw_port = form.get('port', [''])[0].strip()
-                        port = 0
-                        if raw_port:
+            # ---------------- AmneziaWG (AWG) ----------------
+            if self.path == prefix + 'install-amneziawg':
+                return self._h_post_install_amneziawg(prefix)
+
+            if self.path == prefix + 'manage-amneziawg':
+                return self._h_post_manage_amneziawg(prefix)
+
+            if self.path == prefix + 'manage-warp':
+                return self._h_post_manage_warp(prefix)
+
+            if self.path == prefix + 'install-xray':
+                return self._h_post_install_xray(prefix)
+
+            if self.path == prefix + 'manage-reality':
+                return self._h_post_manage_reality(prefix)
+
+            if self.path == prefix + 'set-bbr':
+                return self._h_post_set_bbr(prefix)
+
+            if self.path == prefix + 'reboot-server':
+                return self._h_post_reboot_server(prefix)
+
+            if self.path == prefix + 'manage-user':
+                return self._h_post_manage_user(prefix)
+
+            # 4. Web 表单登录
+            if self.path == prefix + 'login':
+                return self._h_post_login(prefix)
+
+            if self.path == prefix + 'install-warp':
+                return self._h_post_install_warp(prefix)
+
+
+            return self.reply(404, b'Not found')
+
+        # ==========================================================================
+        # do_POST 各端点的处理逻辑
+        # --------------------------------------------------------------------------
+        # 原先 13 个端点全都内联在 do_POST 里（1245 行），靠 if 的先后顺序阅读，
+        # 分支之间还会互相干扰 —— 改一处要通读全篇才能确认没踩到别人。
+        # 现在每个端点一个方法，do_POST 只负责分发。
+        # ⚠️ 这里是纯代码搬移，逻辑一行未改。data / data_lock / save_data 等
+        # 是 serve() 的闭包变量，方法在 serve() 内的类里定义，照常可访问。
+        # ==========================================================================
+
+        def _h_post_do_upgrade(self, prefix):
+            """POST /do-upgrade 的处理逻辑（从 do_POST 机械搬移而来）。"""
+            if not self.is_authenticated():
+                return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+            try:
+                length = int(self.headers.get('Content-Length', 0))
+                body = self.rfile.read(length).decode('utf-8')
+                form = parse_qs(body)
+                target = form.get('target', [''])[0]
+                if target not in ('core', 'portal', 'awg'):
+                    return self.reply_json(400, {'ok': False, 'error': 'Invalid target'})
+
+                if target == 'portal':
+                    # 面板由【两个文件】组成：portal.py（后端）+ portal_assets.py（前端资源）。
+                    # 🔴 必须成对更新 —— 门户同时是 Hysteria 的鉴权后端，
+                    # 只换其中一个会让它起不来、所有客户端连不上。
+                    # 所以流程是：两个都取回 → 都做语法校验 → 再一起原子替换；
+                    # 任一环节失败就整体放弃，磁盘上不留下任何改动。
+                    #
+                    # 自更新不走 do_upgrade.sh：那个脚本从 raw.githubusercontent.com
+                    # 拉文件，会踩 raw 的 CDN 缓存（实测 push 后数分钟仍返回旧内容），
+                    # 表现为"更新完还是旧版"。这里用多源回退直接取。
+                    fetched = []
+                    for fname, minsize in (('portal.py', 20000),
+                                           ('portal_assets.py', 10000)):
+                        content = _fetch_repo_file(fname,
+                                                   marker=b'hysteria2-installer',
+                                                   min_size=minsize)
+                        if content is None:
+                            return self.reply_json(500, {'ok': False, 'error':
+                                '取不到 %s（三个源均失败）—— 已放弃更新，面板保持原样' % fname})
+                        try:
+                            ast.parse(content.decode('utf-8'))
+                        except Exception as e:
+                            return self.reply_json(500, {'ok': False, 'error':
+                                '%s 未通过 Python 语法校验（%s）—— 已放弃更新' % (fname, e)})
+                        fetched.append((fname, content))
+
+                    base_dir = PORTAL_SELF.parent
+                    backups = []
+                    changed = False
+                    try:
+                        for fname, content in fetched:
+                            dest = base_dir / fname
                             try:
-                                port = int(raw_port)
+                                if dest.read_bytes() == content:
+                                    continue          # 内容一致就不动它
                             except Exception:
-                                return self.reply_json(400, {'ok': False, 'error': 'Invalid port'})
+                                pass
+                            if dest.exists():
+                                bak = Path(str(dest) + '.bak')
+                                shutil.copy2(str(dest), str(bak))
+                                backups.append((dest, bak))
+                            tmp = str(dest) + '.new'
+                            with open(tmp, 'wb') as fh:
+                                fh.write(content)
+                            os.chmod(tmp, 0o644)
+                            os.replace(tmp, str(dest))
+                            changed = True
+                    except Exception as e:
+                        # 出错就把已替换的恢复回去，绝不留下半新半旧的状态
+                        for dest, bak in backups:
+                            try:
+                                shutil.copy2(str(bak), str(dest))
+                            except Exception:
+                                pass
+                        return self.reply_json(500, {'ok': False, 'error':
+                            '更新过程中出错，已回滚到原版本：%s' % e})
 
-                        with data_lock:
-                            existing_ports = set(s.get('port') for s in data.get('proxy_services', []))
+                    if not changed:
+                        return self.reply_json(200, {'ok': True, 'target': target,
+                                                     'message': '面板已是最新，无需更新'})
+                    # 延迟重启，且必须脱离当前会话：本进程马上会被 systemctl 杀掉，
+                    # 不脱离的话重启命令会跟着一起死（start_new_session=True）。
+                    subprocess.Popen(
+                        ['bash', '-c', 'sleep 1; systemctl restart hysteria-portal'],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        start_new_session=True)
+                    return self.reply_json(200, {'ok': True, 'target': target,
+                                                 'message': '面板已更新（后端 + 前端资源），服务重启中'})
 
-                        # 若未指定端口或端口无效，自动在 12000-58000 寻找空闲可用端口（避开 Hysteria 20000-40000 端口跳跃段及常见端口）
-                        if port <= 0 or port > 65535:
-                            allocated = None
-                            for _ in range(100):
-                                cand = random.randint(12000, 58000)
-                                if 20000 <= cand <= 40000 or cand in existing_ports or cand in (8443, 40000, 56195):
-                                    continue
-                                try:
-                                    probe = socket.socket()
-                                    probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                                    probe.bind(('0.0.0.0', cand))
-                                    probe.close()
-                                    allocated = cand
-                                    break
-                                except OSError:
-                                    continue
-                            if not allocated:
-                                return self.reply_json(500, {'ok': False, 'error': '系统未能找到空闲可用端口，请尝试手动指定端口'})
-                            port = allocated
-                        else:
-                            # 真实端口占用检测（避免与已有服务冲突）
-                            if port in existing_ports:
-                                return self.reply_json(400, {'ok': False, 'error': f'端口 {port} 已被其他代理服务占用'})
+                if target == 'awg':
+                    if not awg_installed():
+                        return self.reply_json(400, {'ok': False,
+                                                     'error': 'AmneziaWG 尚未安装'})
+                    # 先刷新控制脚本自身，再更新二进制。不需要重启面板。
+                    ensure_awgctl(force=True)
+                    rc, out, err = awg_run(['update'], timeout=420)
+                    if rc != 0:
+                        return self.reply_json(500, {'ok': False,
+                            'error': 'AWG 更新失败：' + awg_err_tail(rc, out, err)})
+                    return self.reply_json(200, {'ok': True, 'target': target,
+                                                 'message': 'AmneziaWG 引擎已更新，客户端无需重新导入'})
+
+                # core 仍交给 do_upgrade.sh：下载的是 Hysteria 官方发布，
+                # 与 raw 的 CDN 缓存无关。
+                subprocess.Popen(['bash', '/etc/hysteria/do_upgrade.sh', target],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return self.reply_json(200, {'ok': True, 'target': target})
+            except Exception as e:
+                return self.reply_json(500, {'ok': False, 'error': str(e)})
+
+        def _h_post_manage_proxy(self, prefix):
+            """POST /manage-proxy 的处理逻辑（从 do_POST 机械搬移而来）。"""
+            if not self.is_authenticated():
+                return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+            try:
+                length = int(self.headers.get('Content-Length', 0))
+                body = self.rfile.read(length).decode('utf-8')
+                form = parse_qs(body)
+                action = form.get('action', [''])[0]
+                now_ts = int(time.time())
+
+                if action == 'create':
+                    ptype = form.get('type', ['socks5'])[0]
+                    if ptype not in ('socks5', 'http', 'https'):
+                        return self.reply_json(400, {'ok': False, 'error': 'Invalid proxy type'})
+
+                    raw_port = form.get('port', [''])[0].strip()
+                    port = 0
+                    if raw_port:
+                        try:
+                            port = int(raw_port)
+                        except Exception:
+                            return self.reply_json(400, {'ok': False, 'error': 'Invalid port'})
+
+                    with data_lock:
+                        existing_ports = set(s.get('port') for s in data.get('proxy_services', []))
+
+                    # 若未指定端口或端口无效，自动在 12000-58000 寻找空闲可用端口（避开 Hysteria 20000-40000 端口跳跃段及常见端口）
+                    if port <= 0 or port > 65535:
+                        allocated = None
+                        for _ in range(100):
+                            cand = random.randint(12000, 58000)
+                            if 20000 <= cand <= 40000 or cand in existing_ports or cand in (8443, 40000, 56195):
+                                continue
                             try:
                                 probe = socket.socket()
                                 probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                                probe.bind(('0.0.0.0', port))
+                                probe.bind(('0.0.0.0', cand))
                                 probe.close()
+                                allocated = cand
+                                break
                             except OSError:
-                                return self.reply_json(400, {'ok': False, 'error': f'端口 {port} 已被系统其他进程占用'})
-
-                        username = form.get('username', [''])[0].strip()[:64] or ('user_' + secrets.token_hex(4))
-                        password = form.get('password', [''])[0].strip() or secrets.token_hex(12)
-                        note = form.get('note', [''])[0].strip()[:200]
-
-                        with data_lock:
-                            proxy_id = 'proxy_' + secrets.token_hex(6)
-                            data.setdefault('proxy_services', []).append({
-                                'id': proxy_id,
-                                'type': ptype,
-                                'port': port,
-                                'username': username,
-                                'password': password,
-                                'created_at': now_ts,
-                                'note': note,
-                            })
-                        save_data()
-                        reload_gost()
-
-                        # 获取主机域名或 IP 以输出完整连接格式
-                        m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
-                        host = m.get('public_ip', '127.0.0.1') if m.get('is_insecure') else m.get('server_name', 'localhost')
-
-                        uri_link = f"{ptype}://{username}:{password}@{host}:{port}"
-                        qr_svg = ''
+                                continue
+                        if not allocated:
+                            return self.reply_json(500, {'ok': False, 'error': '系统未能找到空闲可用端口，请尝试手动指定端口'})
+                        port = allocated
+                    else:
+                        # 真实端口占用检测（避免与已有服务冲突）
+                        if port in existing_ports:
+                            return self.reply_json(400, {'ok': False, 'error': f'端口 {port} 已被其他代理服务占用'})
                         try:
-                            qr_res = subprocess.run(['qrencode', '-t', 'SVG', '-o', '-'],
-                                                    input=uri_link.encode('utf-8'),
-                                                    capture_output=True, timeout=3)
-                            if qr_res.returncode == 0:
-                                qr_svg = qr_res.stdout.decode('utf-8')
-                        except Exception:
-                            qr_svg = ''
+                            probe = socket.socket()
+                            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                            probe.bind(('0.0.0.0', port))
+                            probe.close()
+                        except OSError:
+                            return self.reply_json(400, {'ok': False, 'error': f'端口 {port} 已被系统其他进程占用'})
 
-                        return self.reply_json(200, {
-                            'ok': True,
+                    username = form.get('username', [''])[0].strip()[:64] or ('user_' + secrets.token_hex(4))
+                    password = form.get('password', [''])[0].strip() or secrets.token_hex(12)
+                    note = form.get('note', [''])[0].strip()[:200]
+
+                    with data_lock:
+                        proxy_id = 'proxy_' + secrets.token_hex(6)
+                        data.setdefault('proxy_services', []).append({
                             'id': proxy_id,
                             'type': ptype,
-                            'host': host,
                             'port': port,
                             'username': username,
                             'password': password,
+                            'created_at': now_ts,
                             'note': note,
-                            'url': uri_link,
-                            'format': f"{host}:{port}:{username}:{password}",
-                            'qr': qr_svg
                         })
+                    save_data()
+                    reload_gost()
 
-                    elif action == 'delete':
-                        proxy_id = form.get('id', [''])[0].strip()
-                        with data_lock:
-                            services = data.get('proxy_services', [])
-                            new_services = [s for s in services if s.get('id') != proxy_id]
-                            if len(new_services) == len(services):
-                                return self.reply_json(404, {'ok': False, 'error': 'Proxy service not found'})
-                            data['proxy_services'] = new_services
-                        save_data()
-                        reload_gost()
-                        return self.reply_json(200, {'ok': True, 'message': 'Proxy service deleted'})
+                    # 获取主机域名或 IP 以输出完整连接格式
+                    m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+                    host = m.get('public_ip', '127.0.0.1') if m.get('is_insecure') else m.get('server_name', 'localhost')
 
-                    return self.reply_json(400, {'ok': False, 'error': 'Invalid action'})
-                except Exception as e:
-                    return self.reply_json(500, {'ok': False, 'error': str(e)})
-
-            if self.path == prefix + 'install-gost':
-                if not self.is_authenticated():
-                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                try:
-                    machine = platform.machine().lower()
-                    if 'x86_64' in machine or 'amd64' in machine:
-                        arch = 'linux_amd64'
-                    elif 'aarch64' in machine or 'arm64' in machine:
-                        arch = 'linux_arm64'
-                    elif 'armv7' in machine:
-                        arch = 'linux_armv7'
-                    else:
-                        arch = 'linux_amd64'
-
-                    # 动态探测最新版本
-                    tag = 'v3.3.0'
+                    uri_link = f"{ptype}://{username}:{password}@{host}:{port}"
+                    qr_svg = ''
                     try:
-                        req = urllib.request.Request('https://api.github.com/repos/go-gost/gost/releases/latest', headers={'User-Agent': 'Mozilla/5.0'})
-                        with urllib.request.urlopen(req, timeout=8) as r:
-                            rel_data = json.loads(r.read().decode())
-                            if rel_data.get('tag_name'):
-                                tag = rel_data['tag_name']
+                        qr_res = subprocess.run(['qrencode', '-t', 'SVG', '-o', '-'],
+                                                input=uri_link.encode('utf-8'),
+                                                capture_output=True, timeout=3)
+                        if qr_res.returncode == 0:
+                            qr_svg = qr_res.stdout.decode('utf-8')
                     except Exception:
-                        tag = 'v3.3.0'
+                        qr_svg = ''
 
-                    ver = tag.lstrip('v')
-                    pkg_name = f"gost_{ver}_{arch}.tar.gz"
+                    return self.reply_json(200, {
+                        'ok': True,
+                        'id': proxy_id,
+                        'type': ptype,
+                        'host': host,
+                        'port': port,
+                        'username': username,
+                        'password': password,
+                        'note': note,
+                        'url': uri_link,
+                        'format': f"{host}:{port}:{username}:{password}",
+                        'qr': qr_svg
+                    })
 
-                    download_urls = [
-                        f"https://github.com/go-gost/gost/releases/download/{tag}/{pkg_name}",
-                        f"https://ghfast.top/https://github.com/go-gost/gost/releases/download/{tag}/{pkg_name}",
-                        f"https://github.moeyy.xyz/https://github.com/go-gost/gost/releases/download/{tag}/{pkg_name}"
-                    ]
+                elif action == 'delete':
+                    proxy_id = form.get('id', [''])[0].strip()
+                    with data_lock:
+                        services = data.get('proxy_services', [])
+                        new_services = [s for s in services if s.get('id') != proxy_id]
+                        if len(new_services) == len(services):
+                            return self.reply_json(404, {'ok': False, 'error': 'Proxy service not found'})
+                        data['proxy_services'] = new_services
+                    save_data()
+                    reload_gost()
+                    return self.reply_json(200, {'ok': True, 'message': 'Proxy service deleted'})
 
-                    installed = False
-                    errors = []
-                    with tempfile.TemporaryDirectory() as tmpdir:
-                        archive_path = Path(tmpdir) / 'gost.tar.gz'
-                        for u in download_urls:
-                            host = u.split('/')[2] if '//' in u else u
-                            try:
-                                req = urllib.request.Request(u, headers={'User-Agent': 'Mozilla/5.0'})
-                                # 超时给足：包有 ~17MB，30 秒在慢线路上不够
-                                with urllib.request.urlopen(req, timeout=180) as resp, open(archive_path, 'wb') as out_f:
-                                    shutil.copyfileobj(resp, out_f)
-                                size = archive_path.stat().st_size
-                                if size > 1024 * 1024 and tarfile.is_tarfile(str(archive_path)):
-                                    with tarfile.open(str(archive_path), 'r:gz') as tar:
-                                        tar.extractall(path=tmpdir)
-                                    src_bin = Path(tmpdir) / 'gost'
-                                    if src_bin.exists():
-                                        shutil.move(str(src_bin), '/usr/local/bin/gost')
-                                        os.chmod('/usr/local/bin/gost', 0o755)
-                                        installed = True
-                                        break
-                                    errors.append('%s: 包内没有 gost 可执行文件' % host)
-                                else:
-                                    errors.append('%s: 内容异常（%d 字节，非有效 tar.gz）' % (host, size))
-                            except Exception as e:
-                                errors.append('%s: %s: %s' % (host, type(e).__name__, e))
+                return self.reply_json(400, {'ok': False, 'error': 'Invalid action'})
+            except Exception as e:
+                return self.reply_json(500, {'ok': False, 'error': str(e)})
 
-                    if not installed:
-                        # 把【每个源】的错误都报出来。
-                        # 只显示最后一个源的错误会掩盖真正原因 —— 例如首个源超时、
-                        # 末个源 DNS 失败时，用户只会看到 DNS 错误，完全被带偏。
-                        return self.reply_json(500, {'ok': False,
-                                                     'error': '下载或解压 GOST 失败 —— ' + ' ｜ '.join(errors)})
+        def _h_post_install_gost(self, prefix):
+            """POST /install-gost 的处理逻辑（从 do_POST 机械搬移而来）。"""
+            if not self.is_authenticated():
+                return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+            try:
+                machine = platform.machine().lower()
+                if 'x86_64' in machine or 'amd64' in machine:
+                    arch = 'linux_amd64'
+                elif 'aarch64' in machine or 'arm64' in machine:
+                    arch = 'linux_arm64'
+                elif 'armv7' in machine:
+                    arch = 'linux_armv7'
+                else:
+                    arch = 'linux_amd64'
 
-                    # 确保 systemd 服务存在
-                    service_content = '''[Unit]
+                # 动态探测最新版本
+                tag = 'v3.3.0'
+                try:
+                    req = urllib.request.Request('https://api.github.com/repos/go-gost/gost/releases/latest', headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req, timeout=8) as r:
+                        rel_data = json.loads(r.read().decode())
+                        if rel_data.get('tag_name'):
+                            tag = rel_data['tag_name']
+                except Exception:
+                    tag = 'v3.3.0'
+
+                ver = tag.lstrip('v')
+                pkg_name = f"gost_{ver}_{arch}.tar.gz"
+
+                download_urls = [
+                    f"https://github.com/go-gost/gost/releases/download/{tag}/{pkg_name}",
+                    f"https://ghfast.top/https://github.com/go-gost/gost/releases/download/{tag}/{pkg_name}",
+                    f"https://github.moeyy.xyz/https://github.com/go-gost/gost/releases/download/{tag}/{pkg_name}"
+                ]
+
+                installed = False
+                errors = []
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    archive_path = Path(tmpdir) / 'gost.tar.gz'
+                    for u in download_urls:
+                        host = u.split('/')[2] if '//' in u else u
+                        try:
+                            req = urllib.request.Request(u, headers={'User-Agent': 'Mozilla/5.0'})
+                            # 超时给足：包有 ~17MB，30 秒在慢线路上不够
+                            with urllib.request.urlopen(req, timeout=180) as resp, open(archive_path, 'wb') as out_f:
+                                shutil.copyfileobj(resp, out_f)
+                            size = archive_path.stat().st_size
+                            if size > 1024 * 1024 and tarfile.is_tarfile(str(archive_path)):
+                                with tarfile.open(str(archive_path), 'r:gz') as tar:
+                                    tar.extractall(path=tmpdir)
+                                src_bin = Path(tmpdir) / 'gost'
+                                if src_bin.exists():
+                                    shutil.move(str(src_bin), '/usr/local/bin/gost')
+                                    os.chmod('/usr/local/bin/gost', 0o755)
+                                    installed = True
+                                    break
+                                errors.append('%s: 包内没有 gost 可执行文件' % host)
+                            else:
+                                errors.append('%s: 内容异常（%d 字节，非有效 tar.gz）' % (host, size))
+                        except Exception as e:
+                            errors.append('%s: %s: %s' % (host, type(e).__name__, e))
+
+                if not installed:
+                    # 把【每个源】的错误都报出来。
+                    # 只显示最后一个源的错误会掩盖真正原因 —— 例如首个源超时、
+                    # 末个源 DNS 失败时，用户只会看到 DNS 错误，完全被带偏。
+                    return self.reply_json(500, {'ok': False,
+                                                 'error': '下载或解压 GOST 失败 —— ' + ' ｜ '.join(errors)})
+
+                # 确保 systemd 服务存在
+                service_content = '''[Unit]
 Description=GOST Proxy Service (SOCKS5/HTTP/HTTPS inbound)
 After=network.target
 
@@ -3753,289 +2294,292 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 '''
-                    Path('/etc/systemd/system/gost.service').write_text(service_content)
-                    subprocess.run(['systemctl', 'daemon-reload'], capture_output=True)
-                    subprocess.run(['systemctl', 'enable', 'gost'], capture_output=True)
+                Path('/etc/systemd/system/gost.service').write_text(service_content)
+                subprocess.run(['systemctl', 'daemon-reload'], capture_output=True)
+                subprocess.run(['systemctl', 'enable', 'gost'], capture_output=True)
 
-                    # 重新生成 gost.yml 并启动服务
-                    write_gost_config()
-                    subprocess.run(['systemctl', 'restart', 'gost'], capture_output=True, timeout=10)
+                # 重新生成 gost.yml 并启动服务
+                write_gost_config()
+                subprocess.run(['systemctl', 'restart', 'gost'], capture_output=True, timeout=10)
 
-                    return self.reply_json(200, {'ok': True, 'message': f'GOST {tag} 官方核心安装成功，服务已自动配置并启动！'})
-                except Exception as e:
-                    return self.reply_json(500, {'ok': False, 'error': f'执行异常: {str(e)}'})
+                return self.reply_json(200, {'ok': True, 'message': f'GOST {tag} 官方核心安装成功，服务已自动配置并启动！'})
+            except Exception as e:
+                return self.reply_json(500, {'ok': False, 'error': f'执行异常: {str(e)}'})
 
-            # ---------------- AmneziaWG (AWG) ----------------
-            if self.path == prefix + 'install-amneziawg':
-                if not self.is_authenticated():
-                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                try:
-                    length = int(self.headers.get('Content-Length', 0))
-                    body = self.rfile.read(length).decode('utf-8')
-                    form = parse_qs(body)
-                    # 先去空白再取默认值：写成 (value or '3').strip() 的话，
-                    # 纯空格能通过 or 判定、再被 strip 成空串，导致误判为非法协议线。
-                    line = (form.get('line', [''])[0] or '').strip() or '3'
+        def _h_post_install_amneziawg(self, prefix):
+            """POST /install-amneziawg 的处理逻辑（从 do_POST 机械搬移而来）。"""
+            if not self.is_authenticated():
+                return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+            try:
+                length = int(self.headers.get('Content-Length', 0))
+                body = self.rfile.read(length).decode('utf-8')
+                form = parse_qs(body)
+                # 先去空白再取默认值：写成 (value or '3').strip() 的话，
+                # 纯空格能通过 or 判定、再被 strip 成空串，导致误判为非法协议线。
+                line = (form.get('line', [''])[0] or '').strip() or '3'
+                endpoint = (form.get('endpoint', [''])[0] or '').strip()
+                port = (form.get('port', [''])[0] or '').strip()
+
+                if line not in ('2', '3'):
+                    return self.reply_json(400, {'ok': False, 'error': '协议线只能是 2 或 3'})
+                if not endpoint:
+                    return self.reply_json(400, {'ok': False, 'error': '必须提供客户端连接地址（域名或公网 IP）'})
+                # 端口若由用户指定，提前拦掉会与 Hysteria2 端口跳跃冲突的取值
+                if port:
+                    if not port.isdigit() or not (1 <= int(port) <= 65535):
+                        return self.reply_json(400, {'ok': False, 'error': '端口必须是 1-65535 的数字'})
+                    if 20000 <= int(port) <= 40000:
+                        return self.reply_json(400, {'ok': False, 'error': '该端口落在 Hysteria2 的端口跳跃区间 20000-40000 内，会导致 AWG 收不到握手包，请改用 50000-59000'})
+                if not ensure_awgctl():
+                    return self.reply_json(500, {'ok': False, 'error': '无法获取 hy2-awgctl（服务器可能无法访问 github.com），请手动执行 install.sh 的 AmneziaWG 菜单'})
+
+                args = ['install', '--line', line, '--endpoint', endpoint]
+                if port:
+                    args += ['--port', port]
+                rc, out, err = awg_run(args, timeout=420)
+                if rc != 0:
+                    return self.reply_json(500, {'ok': False, 'error': '安装失败：' + awg_err_tail(rc, out, err)})
+                return self.reply_json(200, {'ok': True, 'message': f'AmneziaWG（协议线 AWG {line}.x）安装成功，服务已启动。'})
+            except subprocess.TimeoutExpired:
+                return self.reply_json(500, {'ok': False, 'error': '安装超时（超过 420 秒），请查看服务器上的 journalctl -u amneziawg-server'})
+            except Exception as e:
+                return self.reply_json(500, {'ok': False, 'error': f'执行异常: {str(e)}'})
+
+        def _h_post_manage_amneziawg(self, prefix):
+            """POST /manage-amneziawg 的处理逻辑（从 do_POST 机械搬移而来）。"""
+            if not self.is_authenticated():
+                return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+            try:
+                length = int(self.headers.get('Content-Length', 0))
+                body = self.rfile.read(length).decode('utf-8')
+                form = parse_qs(body)
+                action = (form.get('action', [''])[0] or '').strip()
+
+                if action == 'state':
+                    return self.reply_json(200, awg_state())
+
+                # 先校验动作名再检查安装状态 —— 否则未知动作会拿到
+                # "尚未安装" 这种误导性的报错，排障时容易被带偏。
+                known_actions = ('peer_add', 'peer_del', 'set_line', 'update',
+                                 'start', 'stop', 'restart')
+                if action not in known_actions:
+                    return self.reply_json(400, {'ok': False, 'error': '未知操作: ' + (action or '(空)')})
+
+                if not awg_installed():
+                    return self.reply_json(400, {'ok': False, 'error': 'AmneziaWG 尚未安装'})
+                if not ensure_awgctl():
+                    return self.reply_json(500, {'ok': False, 'error': 'hy2-awgctl 不可用'})
+
+                if action == 'peer_add':
+                    name = (form.get('name', [''])[0] or '').strip()
                     endpoint = (form.get('endpoint', [''])[0] or '').strip()
-                    port = (form.get('port', [''])[0] or '').strip()
-
-                    if line not in ('2', '3'):
-                        return self.reply_json(400, {'ok': False, 'error': '协议线只能是 2 或 3'})
+                    if not VALID_AWG_NAME_RE.match(name):
+                        return self.reply_json(400, {'ok': False, 'error': '客户端名称只允许字母、数字、点、下划线、连字符，长度 1-32'})
                     if not endpoint:
-                        return self.reply_json(400, {'ok': False, 'error': '必须提供客户端连接地址（域名或公网 IP）'})
-                    # 端口若由用户指定，提前拦掉会与 Hysteria2 端口跳跃冲突的取值
-                    if port:
-                        if not port.isdigit() or not (1 <= int(port) <= 65535):
-                            return self.reply_json(400, {'ok': False, 'error': '端口必须是 1-65535 的数字'})
-                        if 20000 <= int(port) <= 40000:
-                            return self.reply_json(400, {'ok': False, 'error': '该端口落在 Hysteria2 的端口跳跃区间 20000-40000 内，会导致 AWG 收不到握手包，请改用 50000-59000'})
-                    if not ensure_awgctl():
-                        return self.reply_json(500, {'ok': False, 'error': '无法获取 hy2-awgctl（服务器可能无法访问 github.com），请手动执行 install.sh 的 AmneziaWG 菜单'})
-
-                    args = ['install', '--line', line, '--endpoint', endpoint]
-                    if port:
-                        args += ['--port', port]
-                    rc, out, err = awg_run(args, timeout=420)
+                        return self.reply_json(400, {'ok': False, 'error': '必须提供连接地址'})
+                    rc, out, err = awg_run(['peer-add', name, '--endpoint', endpoint], timeout=90)
                     if rc != 0:
-                        return self.reply_json(500, {'ok': False, 'error': '安装失败：' + awg_err_tail(rc, out, err)})
-                    return self.reply_json(200, {'ok': True, 'message': f'AmneziaWG（协议线 AWG {line}.x）安装成功，服务已启动。'})
-                except subprocess.TimeoutExpired:
-                    return self.reply_json(500, {'ok': False, 'error': '安装超时（超过 420 秒），请查看服务器上的 journalctl -u amneziawg-server'})
-                except Exception as e:
-                    return self.reply_json(500, {'ok': False, 'error': f'执行异常: {str(e)}'})
+                        return self.reply_json(500, {'ok': False, 'error': '创建失败：' + awg_err_tail(rc, out, err, 400)})
+                    return self.reply_json(200, {'ok': True, 'message': f'客户端 {name} 已创建'})
 
-            if self.path == prefix + 'manage-amneziawg':
-                if not self.is_authenticated():
-                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                try:
-                    length = int(self.headers.get('Content-Length', 0))
-                    body = self.rfile.read(length).decode('utf-8')
-                    form = parse_qs(body)
-                    action = (form.get('action', [''])[0] or '').strip()
+                if action == 'peer_del':
+                    name = (form.get('name', [''])[0] or '').strip()
+                    if not VALID_AWG_NAME_RE.match(name):
+                        return self.reply_json(400, {'ok': False, 'error': '客户端名称非法'})
+                    rc, out, err = awg_run(['peer-del', name], timeout=90)
+                    if rc != 0:
+                        return self.reply_json(500, {'ok': False, 'error': '删除失败：' + awg_err_tail(rc, out, err, 400)})
+                    return self.reply_json(200, {'ok': True, 'message': f'客户端 {name} 已删除'})
 
-                    if action == 'state':
-                        return self.reply_json(200, awg_state())
+                if action == 'set_line':
+                    target = (form.get('line', [''])[0] or '').strip()
+                    if target not in ('2', '3'):
+                        return self.reply_json(400, {'ok': False, 'error': '协议线只能是 2 或 3'})
+                    if target == awg_state()['line']:
+                        return self.reply_json(200, {'ok': True, 'message': f'已经是 AWG {target}.x，无需切换。'})
+                    rc, out, err = awg_run(['update', '--line', target], timeout=420)
+                    if rc != 0:
+                        return self.reply_json(500, {'ok': False, 'error': '切换失败：' + awg_err_tail(rc, out, err)})
+                    return self.reply_json(200, {'ok': True, 'message': f'已切换到 AWG {target}.x。⚠️ 所有客户端必须重新导入配置。'})
 
-                    # 先校验动作名再检查安装状态 —— 否则未知动作会拿到
-                    # "尚未安装" 这种误导性的报错，排障时容易被带偏。
-                    known_actions = ('peer_add', 'peer_del', 'set_line', 'update',
-                                     'start', 'stop', 'restart')
-                    if action not in known_actions:
-                        return self.reply_json(400, {'ok': False, 'error': '未知操作: ' + (action or '(空)')})
+                if action == 'update':
+                    # 先把控制工具自身刷新到最新，否则引擎会永久停在首装版本
+                    ensure_awgctl(force=True)
+                    rc, out, err = awg_run(['update'], timeout=420)
+                    if rc != 0:
+                        return self.reply_json(500, {'ok': False, 'error': '更新失败：' + awg_err_tail(rc, out, err)})
+                    return self.reply_json(200, {'ok': True, 'message': '二进制已更新，协议线与参数保持不变，客户端无需重新导入。'})
 
-                    if not awg_installed():
-                        return self.reply_json(400, {'ok': False, 'error': 'AmneziaWG 尚未安装'})
-                    if not ensure_awgctl():
-                        return self.reply_json(500, {'ok': False, 'error': 'hy2-awgctl 不可用'})
+                if action in ('start', 'stop', 'restart'):
+                    label = {'start': '启动', 'stop': '停止', 'restart': '重启'}.get(action, action)
+                    proc = subprocess.run(['systemctl', action, AWG_SVC_NAME],
+                                          capture_output=True, text=True, timeout=30)
+                    if proc.returncode != 0:
+                        return self.reply_json(500, {'ok': False, 'error': '服务' + label + '失败：' + (proc.stderr or '').strip()[-400:]})
+                    return self.reply_json(200, {'ok': True, 'message': '服务已' + label})
+            except subprocess.TimeoutExpired:
+                return self.reply_json(500, {'ok': False, 'error': '操作超时，请查看服务器日志'})
+            except Exception as e:
+                return self.reply_json(500, {'ok': False, 'error': f'执行异常: {str(e)}'})
 
-                    if action == 'peer_add':
-                        name = (form.get('name', [''])[0] or '').strip()
-                        endpoint = (form.get('endpoint', [''])[0] or '').strip()
-                        if not VALID_AWG_NAME_RE.match(name):
-                            return self.reply_json(400, {'ok': False, 'error': '客户端名称只允许字母、数字、点、下划线、连字符，长度 1-32'})
-                        if not endpoint:
-                            return self.reply_json(400, {'ok': False, 'error': '必须提供连接地址'})
-                        rc, out, err = awg_run(['peer-add', name, '--endpoint', endpoint], timeout=90)
-                        if rc != 0:
-                            return self.reply_json(500, {'ok': False, 'error': '创建失败：' + awg_err_tail(rc, out, err, 400)})
-                        return self.reply_json(200, {'ok': True, 'message': f'客户端 {name} 已创建'})
+        def _h_post_manage_warp(self, prefix):
+            """POST /manage-warp 的处理逻辑（从 do_POST 机械搬移而来）。"""
+            if not self.is_authenticated():
+                return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+            try:
+                length = int(self.headers.get('Content-Length', 0))
+                body = self.rfile.read(length).decode('utf-8') if length > 0 else ''
+                form = parse_qs(body)
+                action = form.get('action', ['toggle'])[0]
 
-                    if action == 'peer_del':
-                        name = (form.get('name', [''])[0] or '').strip()
-                        if not VALID_AWG_NAME_RE.match(name):
-                            return self.reply_json(400, {'ok': False, 'error': '客户端名称非法'})
-                        rc, out, err = awg_run(['peer-del', name], timeout=90)
-                        if rc != 0:
-                            return self.reply_json(500, {'ok': False, 'error': '删除失败：' + awg_err_tail(rc, out, err, 400)})
-                        return self.reply_json(200, {'ok': True, 'message': f'客户端 {name} 已删除'})
+                DEFAULT_WARP_DOMAINS = [
+                    'ipify.org', 'cloudflare.com',
+                    'openai.com', 'chatgpt.com', 'oaistatic.com', 'oaiusercontent.com', 'ai.com',
+                    'anthropic.com', 'claude.ai',
+                    'gemini.google.com', 'aistudio.google.com', 'generativelanguage.googleapis.com'
+                ]
 
-                    if action == 'set_line':
-                        target = (form.get('line', [''])[0] or '').strip()
-                        if target not in ('2', '3'):
-                            return self.reply_json(400, {'ok': False, 'error': '协议线只能是 2 或 3'})
-                        if target == awg_state()['line']:
-                            return self.reply_json(200, {'ok': True, 'message': f'已经是 AWG {target}.x，无需切换。'})
-                        rc, out, err = awg_run(['update', '--line', target], timeout=420)
-                        if rc != 0:
-                            return self.reply_json(500, {'ok': False, 'error': '切换失败：' + awg_err_tail(rc, out, err)})
-                        return self.reply_json(200, {'ok': True, 'message': f'已切换到 AWG {target}.x。⚠️ 所有客户端必须重新导入配置。'})
+                with data_lock:
+                    if 'warp_rules' not in data:
+                        data['warp_rules'] = list(DEFAULT_WARP_DOMAINS)
 
-                    if action == 'update':
-                        # 先把控制工具自身刷新到最新，否则引擎会永久停在首装版本
-                        ensure_awgctl(force=True)
-                        rc, out, err = awg_run(['update'], timeout=420)
-                        if rc != 0:
-                            return self.reply_json(500, {'ok': False, 'error': '更新失败：' + awg_err_tail(rc, out, err)})
-                        return self.reply_json(200, {'ok': True, 'message': '二进制已更新，协议线与参数保持不变，客户端无需重新导入。'})
+                    if action == 'toggle':
+                        curr = data.get('warp_enabled', False)
+                        data['warp_enabled'] = not curr
+                    elif action == 'add_rule':
+                        raw_domain = form.get('domain', [''])[0].strip().lower()
+                        cleaned = re.sub(r'^[a-zA-Z]+://', '', raw_domain).split('/')[0].split(':')[0].strip('.')
+                        if cleaned and cleaned not in data['warp_rules'] and re.match(r'^[a-zA-Z0-9.\-]+$', cleaned):
+                            data['warp_rules'].append(cleaned)
+                    elif action == 'del_rule':
+                        target_domain = form.get('domain', [''])[0].strip().lower()
+                        if target_domain in data['warp_rules']:
+                            data['warp_rules'].remove(target_domain)
+                    elif action == 'reset_rules':
+                        data['warp_rules'] = list(DEFAULT_WARP_DOMAINS)
 
-                    if action in ('start', 'stop', 'restart'):
-                        label = {'start': '启动', 'stop': '停止', 'restart': '重启'}.get(action, action)
-                        proc = subprocess.run(['systemctl', action, AWG_SVC_NAME],
-                                              capture_output=True, text=True, timeout=30)
-                        if proc.returncode != 0:
-                            return self.reply_json(500, {'ok': False, 'error': '服务' + label + '失败：' + (proc.stderr or '').strip()[-400:]})
-                        return self.reply_json(200, {'ok': True, 'message': '服务已' + label})
-                except subprocess.TimeoutExpired:
-                    return self.reply_json(500, {'ok': False, 'error': '操作超时，请查看服务器日志'})
-                except Exception as e:
-                    return self.reply_json(500, {'ok': False, 'error': f'执行异常: {str(e)}'})
+                    new_state = data.get('warp_enabled', False)
+                    current_rules = list(data.get('warp_rules', []))
 
-            if self.path == prefix + 'manage-warp':
-                if not self.is_authenticated():
-                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                try:
-                    length = int(self.headers.get('Content-Length', 0))
-                    body = self.rfile.read(length).decode('utf-8') if length > 0 else ''
-                    form = parse_qs(body)
-                    action = form.get('action', ['toggle'])[0]
+                save_data()
 
-                    DEFAULT_WARP_DOMAINS = [
-                        'ipify.org', 'cloudflare.com',
-                        'openai.com', 'chatgpt.com', 'oaistatic.com', 'oaiusercontent.com', 'ai.com',
-                        'anthropic.com', 'claude.ai',
-                        'gemini.google.com', 'aistudio.google.com', 'generativelanguage.googleapis.com'
-                    ]
+                def apply_hy2_acl():
+                    cfg_path = Path('/etc/hysteria/config.yaml')
+                    if not cfg_path.exists():
+                        return
+                    raw_text = cfg_path.read_text(encoding='utf-8')
 
-                    with data_lock:
-                        if 'warp_rules' not in data:
-                            data['warp_rules'] = list(DEFAULT_WARP_DOMAINS)
+                    # 只删掉 acl: 块，保留其余全部内容 —— 详见模块级
+                    # strip_acl_block() 的注释（那里记录了踩过的坑：
+                    # 原来的"删到文件尾"会把末尾的 obfs 段一起删掉，
+                    # 导致"能连上但没网"）。
+                    cfg_text = strip_acl_block(raw_text)
 
-                        if action == 'toggle':
-                            curr = data.get('warp_enabled', False)
-                            data['warp_enabled'] = not curr
-                        elif action == 'add_rule':
-                            raw_domain = form.get('domain', [''])[0].strip().lower()
-                            cleaned = re.sub(r'^[a-zA-Z]+://', '', raw_domain).split('/')[0].split(':')[0].strip('.')
-                            if cleaned and cleaned not in data['warp_rules'] and re.match(r'^[a-zA-Z0-9.\-]+$', cleaned):
-                                data['warp_rules'].append(cleaned)
-                        elif action == 'del_rule':
-                            target_domain = form.get('domain', [''])[0].strip().lower()
-                            if target_domain in data['warp_rules']:
-                                data['warp_rules'].remove(target_domain)
-                        elif action == 'reset_rules':
-                            data['warp_rules'] = list(DEFAULT_WARP_DOMAINS)
+                    def has_outbound(name):
+                        return re.search(r'^\s*-\s*name:\s*' + name + r'\s*$',
+                                         cfg_text, re.M) is not None
 
-                        new_state = data.get('warp_enabled', False)
-                        current_rules = list(data.get('warp_rules', []))
-
-                    save_data()
-
-                    def apply_hy2_acl():
-                        cfg_path = Path('/etc/hysteria/config.yaml')
-                        if not cfg_path.exists():
-                            return
-                        raw_text = cfg_path.read_text(encoding='utf-8')
-
-                        # 只删掉 acl: 块，保留其余全部内容 —— 详见模块级
-                        # strip_acl_block() 的注释（那里记录了踩过的坑：
-                        # 原来的"删到文件尾"会把末尾的 obfs 段一起删掉，
-                        # 导致"能连上但没网"）。
-                        cfg_text = strip_acl_block(raw_text)
-
-                        def has_outbound(name):
-                            return re.search(r'^\s*-\s*name:\s*' + name + r'\s*$',
-                                             cfg_text, re.M) is not None
-
-                        if new_state:
-                            # 出站名要探测实际存在的那个：config 模板用 warp_socks，
-                            # 而某些版本的 toggle_warp.sh 会把它改写成 warp。
-                            warp_name = 'warp_socks' if has_outbound('warp_socks') else 'warp'
-                            if not has_outbound(warp_name):
-                                warp_outbound = ("\n  - name: warp_socks\n    type: socks5\n"
+                    if new_state:
+                        # 出站名要探测实际存在的那个：config 模板用 warp_socks，
+                        # 而某些版本的 toggle_warp.sh 会把它改写成 warp。
+                        warp_name = 'warp_socks' if has_outbound('warp_socks') else 'warp'
+                        if not has_outbound(warp_name):
+                            warp_outbound = ("\n  - name: warp_socks\n    type: socks5\n"
                                                  "    socks5:\n      addr: 127.0.0.1:19898")
-                                if 'outbounds:' in cfg_text:
-                                    cfg_text = cfg_text.replace('outbounds:', 'outbounds:' + warp_outbound, 1)
-                                else:
-                                    cfg_text += '\noutbounds:' + warp_outbound
-                                warp_name = 'warp_socks'
+                            if 'outbounds:' in cfg_text:
+                                cfg_text = cfg_text.replace('outbounds:', 'outbounds:' + warp_outbound, 1)
+                            else:
+                                cfg_text += '\noutbounds:' + warp_outbound
+                            warp_name = 'warp_socks'
 
-                            # 🔴 ACL 末尾引用的出站必须【真实存在】，否则 hysteria 直接
-                            # 起不来，报错形如：
-                            #   invalid config: acl.inline: error at line N:
-                            #   outbound direct_ipv4 not found
-                            # 历史教训：这里曾无条件写 direct_ipv4(all)。该出站由 config
-                            # 模板定义，而 toggle_warp.sh 重写配置时可能把它连 outbounds
-                            # 段一起删掉 —— 于是 Web 端点一下 WARP 开关就把 Hysteria
-                            # 打成 failed，整台机器的 Hysteria 全挂。
-                            # 现在先探测：存在才用 direct_ipv4（保留强制 IPv4 的意图），
-                            # 否则退回 hysteria 内置的 direct。
-                            tail_name = 'direct_ipv4' if has_outbound('direct_ipv4') else 'direct'
+                        # 🔴 ACL 末尾引用的出站必须【真实存在】，否则 hysteria 直接
+                        # 起不来，报错形如：
+                        #   invalid config: acl.inline: error at line N:
+                        #   outbound direct_ipv4 not found
+                        # 历史教训：这里曾无条件写 direct_ipv4(all)。该出站由 config
+                        # 模板定义，而 toggle_warp.sh 重写配置时可能把它连 outbounds
+                        # 段一起删掉 —— 于是 Web 端点一下 WARP 开关就把 Hysteria
+                        # 打成 failed，整台机器的 Hysteria 全挂。
+                        # 现在先探测：存在才用 direct_ipv4（保留强制 IPv4 的意图），
+                        # 否则退回 hysteria 内置的 direct。
+                        tail_name = 'direct_ipv4' if has_outbound('direct_ipv4') else 'direct'
 
-                            acl_block = '\nacl:\n  inline:\n'
-                            for d in current_rules:
-                                acl_block += '    - %s(suffix:%s)\n' % (warp_name, d)
-                            acl_block += '    - %s(all)\n' % tail_name
-                            cfg_text += acl_block
+                        acl_block = '\nacl:\n  inline:\n'
+                        for d in current_rules:
+                            acl_block += '    - %s(suffix:%s)\n' % (warp_name, d)
+                        acl_block += '    - %s(all)\n' % tail_name
+                        cfg_text += acl_block
 
-                        new_text = cfg_text.strip() + '\n'
+                    new_text = cfg_text.strip() + '\n'
 
-                        # 改配置前留备份，重启后校验；起不来就自动回滚。
-                        # 光靠"写对了"不够 —— 一个引用错出站的 ACL 就足以让服务起不来，
-                        # 所以必须有一层兜底，不能让 Web 上的一个开关把服务打挂。
-                        backup = cfg_path.read_text(encoding='utf-8')
-                        cfg_path.write_text(new_text, encoding='utf-8')
+                    # 改配置前留备份，重启后校验；起不来就自动回滚。
+                    # 光靠"写对了"不够 —— 一个引用错出站的 ACL 就足以让服务起不来，
+                    # 所以必须有一层兜底，不能让 Web 上的一个开关把服务打挂。
+                    backup = cfg_path.read_text(encoding='utf-8')
+                    cfg_path.write_text(new_text, encoding='utf-8')
+                    subprocess.run(['systemctl', 'restart', 'hysteria-server'],
+                                   capture_output=True, timeout=15)
+                    time.sleep(2)
+                    state = subprocess.run(['systemctl', 'is-active', 'hysteria-server'],
+                                           capture_output=True, text=True, timeout=5).stdout.strip()
+                    if state != 'active':
+                        cfg_path.write_text(backup, encoding='utf-8')
                         subprocess.run(['systemctl', 'restart', 'hysteria-server'],
                                        capture_output=True, timeout=15)
-                        time.sleep(2)
-                        state = subprocess.run(['systemctl', 'is-active', 'hysteria-server'],
-                                               capture_output=True, text=True, timeout=5).stdout.strip()
-                        if state != 'active':
-                            cfg_path.write_text(backup, encoding='utf-8')
-                            subprocess.run(['systemctl', 'restart', 'hysteria-server'],
-                                           capture_output=True, timeout=15)
-                            with data_lock:
-                                data['warp_apply_error'] = 'ACL 写入后 Hysteria 启动失败，已自动回滚配置'
-                        else:
-                            with data_lock:
-                                data.pop('warp_apply_error', None)
-                        # data_lock 是可重入锁，save_data 内部会再取一次，安全
-                        save_data()
+                        with data_lock:
+                            data['warp_apply_error'] = 'ACL 写入后 Hysteria 启动失败，已自动回滚配置'
+                    else:
+                        with data_lock:
+                            data.pop('warp_apply_error', None)
+                    # data_lock 是可重入锁，save_data 内部会再取一次，安全
+                    save_data()
 
-                    threading.Thread(target=apply_hy2_acl, daemon=True).start()
+                threading.Thread(target=apply_hy2_acl, daemon=True).start()
 
-                    return self.reply_json(200, {
-                        'ok': True,
-                        'enabled': new_state,
-                        'rules': current_rules
-                    })
-                except Exception as e:
-                    return self.reply_json(500, {'ok': False, 'error': str(e)})
+                return self.reply_json(200, {
+                    'ok': True,
+                    'enabled': new_state,
+                    'rules': current_rules
+                })
+            except Exception as e:
+                return self.reply_json(500, {'ok': False, 'error': str(e)})
 
-            if self.path == prefix + 'install-xray':
-                if not self.is_authenticated():
-                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                try:
-                    machine = platform.machine().lower()
-                    xarch = 'arm64-v8a' if ('aarch64' in machine or 'arm64' in machine) else '64'
-                    dl_urls = [
-                        f"https://ghfast.top/https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-{xarch}.zip",
-                        f"https://github.moeyy.xyz/https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-{xarch}.zip",
-                        f"https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-{xarch}.zip"
-                    ]
-                    installed = False
-                    with tempfile.TemporaryDirectory() as tmpdir:
-                        zpath = Path(tmpdir) / 'xray.zip'
-                        for u in dl_urls:
-                            try:
-                                req = urllib.request.Request(u, headers={'User-Agent': 'Mozilla/5.0'})
-                                with urllib.request.urlopen(req, timeout=45) as resp, open(zpath, 'wb') as out_f:
-                                    shutil.copyfileobj(resp, out_f)
-                                if zpath.stat().st_size > 5 * 1024 * 1024 and zipfile.is_zipfile(str(zpath)):
-                                    with zipfile.ZipFile(zpath, 'r') as zf:
-                                        zf.extract('xray', path=tmpdir)
-                                    bin_path = Path(tmpdir) / 'xray'
-                                    if bin_path.exists():
-                                        shutil.move(str(bin_path), '/usr/local/bin/xray')
-                                        os.chmod('/usr/local/bin/xray', 0o755)
-                                        installed = True
-                                        break
-                            except Exception:
-                                pass
+        def _h_post_install_xray(self, prefix):
+            """POST /install-xray 的处理逻辑（从 do_POST 机械搬移而来）。"""
+            if not self.is_authenticated():
+                return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+            try:
+                machine = platform.machine().lower()
+                xarch = 'arm64-v8a' if ('aarch64' in machine or 'arm64' in machine) else '64'
+                dl_urls = [
+                    f"https://ghfast.top/https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-{xarch}.zip",
+                    f"https://github.moeyy.xyz/https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-{xarch}.zip",
+                    f"https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-{xarch}.zip"
+                ]
+                installed = False
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    zpath = Path(tmpdir) / 'xray.zip'
+                    for u in dl_urls:
+                        try:
+                            req = urllib.request.Request(u, headers={'User-Agent': 'Mozilla/5.0'})
+                            with urllib.request.urlopen(req, timeout=45) as resp, open(zpath, 'wb') as out_f:
+                                shutil.copyfileobj(resp, out_f)
+                            if zpath.stat().st_size > 5 * 1024 * 1024 and zipfile.is_zipfile(str(zpath)):
+                                with zipfile.ZipFile(zpath, 'r') as zf:
+                                    zf.extract('xray', path=tmpdir)
+                                bin_path = Path(tmpdir) / 'xray'
+                                if bin_path.exists():
+                                    shutil.move(str(bin_path), '/usr/local/bin/xray')
+                                    os.chmod('/usr/local/bin/xray', 0o755)
+                                    installed = True
+                                    break
+                        except Exception:
+                            pass
 
-                    if not installed:
-                        return self.reply_json(500, {'ok': False, 'error': '下载或解压 Xray 核心失败'})
+                if not installed:
+                    return self.reply_json(500, {'ok': False, 'error': '下载或解压 Xray 核心失败'})
 
-                    service_content = '''[Unit]
+                service_content = '''[Unit]
 Description=Xray Service (VLESS-Reality)
 After=network.target
 
@@ -4049,198 +2593,203 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 '''
-                    Path('/etc/systemd/system/xray.service').write_text(service_content)
-                    subprocess.run(['systemctl', 'daemon-reload'], capture_output=True)
-                    subprocess.run(['systemctl', 'enable', 'xray'], capture_output=True)
-                    self._generate_and_apply_reality(True)
+                Path('/etc/systemd/system/xray.service').write_text(service_content)
+                subprocess.run(['systemctl', 'daemon-reload'], capture_output=True)
+                subprocess.run(['systemctl', 'enable', 'xray'], capture_output=True)
+                self._generate_and_apply_reality(True)
 
-                    # 不要谎报成功：xray 默认监听 TCP 443，若该端口已被别的服务
-                    # （Caddy / Nginx 等）占用就根本起不来。必须核实服务状态 ——
-                    # 否则用户只会看到"安装成功"却怎么都用不了，且不知道该查什么。
-                    time.sleep(2)
-                    xr_state = subprocess.run(['systemctl', 'is-active', 'xray'],
-                                              capture_output=True, text=True, timeout=5).stdout.strip()
-                    if xr_state != 'active':
-                        xr_log = subprocess.run(['journalctl', '-u', 'xray', '-n', '8', '--no-pager'],
-                                                capture_output=True, text=True, timeout=5).stdout
-                        return self.reply_json(500, {'ok': False, 'error':
-                            'Xray 已安装但服务未能启动（当前状态 %s）。'
+                # 不要谎报成功：xray 默认监听 TCP 443，若该端口已被别的服务
+                # （Caddy / Nginx 等）占用就根本起不来。必须核实服务状态 ——
+                # 否则用户只会看到"安装成功"却怎么都用不了，且不知道该查什么。
+                time.sleep(2)
+                xr_state = subprocess.run(['systemctl', 'is-active', 'xray'],
+                                          capture_output=True, text=True, timeout=5).stdout.strip()
+                if xr_state != 'active':
+                    xr_log = subprocess.run(['journalctl', '-u', 'xray', '-n', '8', '--no-pager'],
+                                            capture_output=True, text=True, timeout=5).stdout
+                    return self.reply_json(500, {'ok': False, 'error':
+                        'Xray 已安装但服务未能启动（当前状态 %s）。'
                             '最常见原因是 TCP 443 已被其他服务（如 Caddy / Nginx）占用。'
                             '日志尾部：%s' % (xr_state, xr_log.strip()[-400:])})
 
-                    return self.reply_json(200, {'ok': True, 'message': 'Xray-core 安装成功，VLESS-Reality 节点已在 TCP 443 端口就绪！'})
-                except Exception as e:
-                    return self.reply_json(500, {'ok': False, 'error': f'安装执行异常: {str(e)}'})
+                return self.reply_json(200, {'ok': True, 'message': 'Xray-core 安装成功，VLESS-Reality 节点已在 TCP 443 端口就绪！'})
+            except Exception as e:
+                return self.reply_json(500, {'ok': False, 'error': f'安装执行异常: {str(e)}'})
 
-            if self.path == prefix + 'manage-reality':
-                if not self.is_authenticated():
-                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                try:
-                    length = int(self.headers.get('Content-Length', 0))
-                    body = self.rfile.read(length).decode('utf-8') if length > 0 else ''
-                    form = parse_qs(body)
-                    action = form.get('action', ['toggle'])[0]
+        def _h_post_manage_reality(self, prefix):
+            """POST /manage-reality 的处理逻辑（从 do_POST 机械搬移而来）。"""
+            if not self.is_authenticated():
+                return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+            try:
+                length = int(self.headers.get('Content-Length', 0))
+                body = self.rfile.read(length).decode('utf-8') if length > 0 else ''
+                form = parse_qs(body)
+                action = form.get('action', ['toggle'])[0]
 
-                    if action == 'toggle':
-                        out = subprocess.run(['systemctl', 'is-active', 'xray'], capture_output=True, text=True, timeout=3).stdout.strip()
-                        if out == 'active':
-                            subprocess.run(['systemctl', 'stop', 'xray'], capture_output=True, timeout=5)
-                            new_active = False
+                if action == 'toggle':
+                    out = subprocess.run(['systemctl', 'is-active', 'xray'], capture_output=True, text=True, timeout=3).stdout.strip()
+                    if out == 'active':
+                        subprocess.run(['systemctl', 'stop', 'xray'], capture_output=True, timeout=5)
+                        new_active = False
+                    else:
+                        if not Path('/etc/hysteria/xray.json').exists():
+                            self._generate_and_apply_reality(True)
                         else:
-                            if not Path('/etc/hysteria/xray.json').exists():
-                                self._generate_and_apply_reality(True)
-                            else:
-                                subprocess.run(['systemctl', 'restart', 'xray'], capture_output=True, timeout=5)
-                            new_active = True
-                        return self.reply_json(200, {'ok': True, 'active': new_active})
+                            subprocess.run(['systemctl', 'restart', 'xray'], capture_output=True, timeout=5)
+                        new_active = True
+                    return self.reply_json(200, {'ok': True, 'active': new_active})
 
-                    elif action == 'reset':
-                        self._generate_and_apply_reality(True)
-                        return self.reply_json(200, {'ok': True, 'message': '已重置密钥并重启生效'})
+                elif action == 'reset':
+                    self._generate_and_apply_reality(True)
+                    return self.reply_json(200, {'ok': True, 'message': '已重置密钥并重启生效'})
 
-                    return self.reply_json(400, {'ok': False, 'error': 'Invalid action'})
-                except Exception as e:
-                    return self.reply_json(500, {'ok': False, 'error': str(e)})
+                return self.reply_json(400, {'ok': False, 'error': 'Invalid action'})
+            except Exception as e:
+                return self.reply_json(500, {'ok': False, 'error': str(e)})
 
-            if self.path == prefix + 'set-bbr':
-                if not self.is_authenticated():
-                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                try:
-                    length = int(self.headers.get('Content-Length', 0))
-                    body = self.rfile.read(length).decode('utf-8') if length > 0 else ''
-                    form = parse_qs(body)
-                    ver = form.get('version', ['v1'])[0].lower()
+        def _h_post_set_bbr(self, prefix):
+            """POST /set-bbr 的处理逻辑（从 do_POST 机械搬移而来）。"""
+            if not self.is_authenticated():
+                return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+            try:
+                length = int(self.headers.get('Content-Length', 0))
+                body = self.rfile.read(length).decode('utf-8') if length > 0 else ''
+                form = parse_qs(body)
+                ver = form.get('version', ['v1'])[0].lower()
 
-                    Path('/etc/modules-load.d/bbr.conf').write_text('tcp_bbr\n', encoding='utf-8')
-                    subprocess.run(['modprobe', 'tcp_bbr'], capture_output=True)
+                Path('/etc/modules-load.d/bbr.conf').write_text('tcp_bbr\n', encoding='utf-8')
+                subprocess.run(['modprobe', 'tcp_bbr'], capture_output=True)
 
-                    target_algo = 'bbr'
-                    qdisc = 'fq'
-                    if ver == 'v2':
-                        avail = subprocess.run(['sysctl', '-n', 'net.ipv4.tcp_available_congestion_control'],
-                                               capture_output=True, text=True).stdout
-                        target_algo = 'bbr2' if 'bbr2' in avail else 'bbr'
-                    elif ver == 'v3':
-                        avail = subprocess.run(['sysctl', '-n', 'net.ipv4.tcp_available_congestion_control'],
-                                               capture_output=True, text=True).stdout
-                        target_algo = 'bbr3' if 'bbr3' in avail else 'bbr'
+                target_algo = 'bbr'
+                qdisc = 'fq'
+                if ver == 'v2':
+                    avail = subprocess.run(['sysctl', '-n', 'net.ipv4.tcp_available_congestion_control'],
+                                           capture_output=True, text=True).stdout
+                    target_algo = 'bbr2' if 'bbr2' in avail else 'bbr'
+                elif ver == 'v3':
+                    avail = subprocess.run(['sysctl', '-n', 'net.ipv4.tcp_available_congestion_control'],
+                                           capture_output=True, text=True).stdout
+                    target_algo = 'bbr3' if 'bbr3' in avail else 'bbr'
 
-                    bbr_sysctl = f'''# TCP 拥塞控制 BBR {ver.upper()} 深度优化
+                bbr_sysctl = f'''# TCP 拥塞控制 BBR {ver.upper()} 深度优化
 net.core.default_qdisc = {qdisc}
 net.ipv4.tcp_congestion_control = {target_algo}
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_slow_start_after_idle = 0
 '''
-                    Path('/etc/sysctl.d/99-bbr.conf').write_text(bbr_sysctl, encoding='utf-8')
-                    subprocess.run(['sysctl', '-p', '/etc/sysctl.d/99-bbr.conf'], capture_output=True, text=True)
-                    
+                Path('/etc/sysctl.d/99-bbr.conf').write_text(bbr_sysctl, encoding='utf-8')
+                subprocess.run(['sysctl', '-p', '/etc/sysctl.d/99-bbr.conf'], capture_output=True, text=True)
+
+                with data_lock:
+                    data['bbr_target_version'] = ver
+                save_data()
+
+                curr = subprocess.run(['sysctl', '-n', 'net.ipv4.tcp_congestion_control'],
+                                      capture_output=True, text=True).stdout.strip()
+
+                if curr == target_algo:
+                    return self.reply_json(200, {'ok': True, 'message': f'恭喜！BBR {ver.upper()} 算法已立即热生效（当前算法: {curr}）！'})
+                else:
+                    return self.reply_json(200, {'ok': True, 'message': f'BBR {ver.upper()} 配置已成功保存！需要重启服务器后完成内核级生效。'})
+            except Exception as e:
+                return self.reply_json(500, {'ok': False, 'error': str(e)})
+
+        def _h_post_reboot_server(self, prefix):
+            """POST /reboot-server 的处理逻辑（从 do_POST 机械搬移而来）。"""
+            if not self.is_authenticated():
+                return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+            try:
+                subprocess.Popen(['bash', '-c', 'sleep 1 && reboot'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return self.reply_json(200, {'ok': True, 'message': '服务器正在重启中'})
+            except Exception as e:
+                return self.reply_json(500, {'ok': False, 'error': str(e)})
+
+        def _h_post_manage_user(self, prefix):
+            """POST /manage-user 的处理逻辑（从 do_POST 机械搬移而来）。"""
+            if not self.is_authenticated():
+                return self.reply(401, b'Unauthorized')
+            try:
+                length = int(self.headers.get('Content-Length', 0))
+                body = self.rfile.read(length).decode('utf-8')
+                form = parse_qs(body)
+                action = form.get('action', [''])[0]
+                user_id = form.get('user_id', [''])[0].strip()
+                now_ts = int(time.time())
+
+                if not VALID_USER_ID_RE.match(user_id):
+                    return self.reply(400, b'Invalid user_id format')
+
+                if action == 'create' and user_id:
+                    pwd = form.get('password', [''])[0].strip() or secrets.token_hex(16)
+                    days = int(form.get('duration_days', ['30'])[0] or 30)
+                    ip_limit = int(form.get('ip_limit', ['0'])[0] or 0)
+                    traffic_gb = float(form.get('traffic_gb', ['0'])[0] or 0)
+                    limit_bytes = int(traffic_gb * (1024**3)) if traffic_gb > 0 else 0
+                    note = form.get('note', [''])[0].strip()[:200]
                     with data_lock:
-                        data['bbr_target_version'] = ver
-                    save_data()
+                        data.setdefault('users', {})[user_id] = {
+                            'password': pwd,
+                            'expires_at': now_ts + days * 86400,
+                            'ip_limit': ip_limit,
+                            'limit_bytes': limit_bytes,
+                            'used_bytes': 0,
+                            'status': 'active',
+                            'created_at': now_ts,
+                            'note': note
+                        }
+                elif action == 'delete' and user_id:
+                    with data_lock:
+                        if user_id in data.get('users', {}):
+                            del data['users'][user_id]
+                            if user_id in ip_tracker:
+                                del ip_tracker[user_id]
 
-                    curr = subprocess.run(['sysctl', '-n', 'net.ipv4.tcp_congestion_control'],
-                                          capture_output=True, text=True).stdout.strip()
-                    
-                    if curr == target_algo:
-                        return self.reply_json(200, {'ok': True, 'message': f'恭喜！BBR {ver.upper()} 算法已立即热生效（当前算法: {curr}）！'})
-                    else:
-                        return self.reply_json(200, {'ok': True, 'message': f'BBR {ver.upper()} 配置已成功保存！需要重启服务器后完成内核级生效。'})
-                except Exception as e:
-                    return self.reply_json(500, {'ok': False, 'error': str(e)})
-
-            if self.path == prefix + 'reboot-server':
-                if not self.is_authenticated():
-                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                try:
-                    subprocess.Popen(['bash', '-c', 'sleep 1 && reboot'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    return self.reply_json(200, {'ok': True, 'message': '服务器正在重启中'})
-                except Exception as e:
-                    return self.reply_json(500, {'ok': False, 'error': str(e)})
-
-            if self.path == prefix + 'manage-user':
-                if not self.is_authenticated():
-                    return self.reply(401, b'Unauthorized')
-                try:
-                    length = int(self.headers.get('Content-Length', 0))
-                    body = self.rfile.read(length).decode('utf-8')
-                    form = parse_qs(body)
-                    action = form.get('action', [''])[0]
-                    user_id = form.get('user_id', [''])[0].strip()
-                    now_ts = int(time.time())
-
-                    if not VALID_USER_ID_RE.match(user_id):
-                        return self.reply(400, b'Invalid user_id format')
-
-                    if action == 'create' and user_id:
-                        pwd = form.get('password', [''])[0].strip() or secrets.token_hex(16)
-                        days = int(form.get('duration_days', ['30'])[0] or 30)
-                        ip_limit = int(form.get('ip_limit', ['0'])[0] or 0)
-                        traffic_gb = float(form.get('traffic_gb', ['0'])[0] or 0)
-                        limit_bytes = int(traffic_gb * (1024**3)) if traffic_gb > 0 else 0
-                        note = form.get('note', [''])[0].strip()[:200]
-                        with data_lock:
-                            data.setdefault('users', {})[user_id] = {
-                                'password': pwd,
-                                'expires_at': now_ts + days * 86400,
-                                'ip_limit': ip_limit,
-                                'limit_bytes': limit_bytes,
-                                'used_bytes': 0,
-                                'status': 'active',
-                                'created_at': now_ts,
-                                'note': note
-                            }
-                    elif action == 'delete' and user_id:
-                        with data_lock:
-                            if user_id in data.get('users', {}):
-                                del data['users'][user_id]
-                                if user_id in ip_tracker:
-                                    del ip_tracker[user_id]
-
-                    regenerate_page()
-                    self.send_response(302)
-                    self.send_header('Location', prefix + '#users')
-                    self.end_headers()
-                    return
-                except Exception:
-                    return self.reply(400, b'Bad request')
-
-            # 4. Web 表单登录
-            if self.path == prefix + 'login':
-                try:
-                    length = int(self.headers.get('Content-Length', 0))
-                    if length > 4096:
-                        return self.reply(400, b'Bad request')
-                    body = self.rfile.read(length).decode('utf-8', errors='ignore')
-                    params = parse_qs(body)
-                    user = params.get('username', [''])[0]
-                    pwd = params.get('password', [''])[0]
-                    remember = params.get('remember', ['0'])[0] == '1'
-                except Exception:
-                    return self.reply(400, b'Bad request')
-
-                submitted_auth = base64.b64encode(f'{user}:{pwd}'.encode())
-                submitted_digest = hashlib.sha256(submitted_auth).hexdigest()
-
-                if not hmac.compare_digest(submitted_digest, data['auth_hash']):
-                    self.record_failure()
-                    page = login_html(data['token'], error_msg='用户名或密码不正确，请重新输入')
-                    return self.reply(200, page.encode('utf-8'), 'text/html; charset=utf-8')
-
-                sess_val = sign_session(data['token'])
-                max_age = '; Max-Age=2592000' if remember else ''
-                cookie = f'hy2_session={sess_val}; Path=/{data["token"]}/; HttpOnly; SameSite=Strict; Secure{max_age}'
+                regenerate_page()
                 self.send_response(302)
-                self.send_header('Location', prefix)
-                self.send_header('Set-Cookie', cookie)
-                self.send_header('Cache-Control', 'no-store')
+                self.send_header('Location', prefix + '#users')
                 self.end_headers()
                 return
+            except Exception:
+                return self.reply(400, b'Bad request')
 
-            if self.path == prefix + 'install-warp':
-                if not self.is_authenticated():
-                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                try:
-                    install_warp_sh = '''
+        def _h_post_login(self, prefix):
+            """POST /login 的处理逻辑（从 do_POST 机械搬移而来）。"""
+            try:
+                length = int(self.headers.get('Content-Length', 0))
+                if length > 4096:
+                    return self.reply(400, b'Bad request')
+                body = self.rfile.read(length).decode('utf-8', errors='ignore')
+                params = parse_qs(body)
+                user = params.get('username', [''])[0]
+                pwd = params.get('password', [''])[0]
+                remember = params.get('remember', ['0'])[0] == '1'
+            except Exception:
+                return self.reply(400, b'Bad request')
+
+            submitted_auth = base64.b64encode(f'{user}:{pwd}'.encode())
+            submitted_digest = hashlib.sha256(submitted_auth).hexdigest()
+
+            if not hmac.compare_digest(submitted_digest, data['auth_hash']):
+                self.record_failure()
+                page = login_html(data['token'], error_msg='用户名或密码不正确，请重新输入')
+                return self.reply(200, page.encode('utf-8'), 'text/html; charset=utf-8')
+
+            sess_val = sign_session(data['token'])
+            max_age = '; Max-Age=2592000' if remember else ''
+            cookie = f'hy2_session={sess_val}; Path=/{data["token"]}/; HttpOnly; SameSite=Strict; Secure{max_age}'
+            self.send_response(302)
+            self.send_header('Location', prefix)
+            self.send_header('Set-Cookie', cookie)
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            return
+
+        def _h_post_install_warp(self, prefix):
+            """POST /install-warp 的处理逻辑（从 do_POST 机械搬移而来）。"""
+            if not self.is_authenticated():
+                return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+            try:
+                install_warp_sh = '''
 set -eo pipefail
 export DEBIAN_FRONTEND=noninteractive
 WARP_SOCKS_ADDR="127.0.0.1:19898"
@@ -4438,26 +2987,23 @@ systemctl daemon-reload
 systemctl enable --now hy2-warp-watchdog.timer >/dev/null 2>&1 || true
 log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
 '''
-                    res = subprocess.run(['bash', '-c', install_warp_sh], capture_output=True, text=True, timeout=180)
-                    if res.returncode != 0:
-                        err_detail = (res.stderr or res.stdout or '安装失败').strip()
-                        return self.reply_json(500, {'ok': False, 'error': f'安装失败: {err_detail}'})
+                res = subprocess.run(['bash', '-c', install_warp_sh], capture_output=True, text=True, timeout=180)
+                if res.returncode != 0:
+                    err_detail = (res.stderr or res.stdout or '安装失败').strip()
+                    return self.reply_json(500, {'ok': False, 'error': f'安装失败: {err_detail}'})
 
-                    # 自动开启 WARP 并热重载
-                    with data_lock:
-                        data['warp_enabled'] = True
-                    save_data()
-                    try:
-                        subprocess.run(['/etc/hysteria/toggle_warp.sh', 'enable'], capture_output=True, timeout=10)
-                    except Exception:
-                        pass
+                # 自动开启 WARP 并热重载
+                with data_lock:
+                    data['warp_enabled'] = True
+                save_data()
+                try:
+                    subprocess.run(['/etc/hysteria/toggle_warp.sh', 'enable'], capture_output=True, timeout=10)
+                except Exception:
+                    pass
 
-                    return self.reply_json(200, {'ok': True, 'message': 'Cloudflare WARP 客户端安装成功并已就绪！'})
-                except Exception as e:
-                    return self.reply_json(500, {'ok': False, 'error': f'执行异常: {str(e)}'})
-
-
-            return self.reply(404, b'Not found')
+                return self.reply_json(200, {'ok': True, 'message': 'Cloudflare WARP 客户端安装成功并已就绪！'})
+            except Exception as e:
+                return self.reply_json(500, {'ok': False, 'error': f'执行异常: {str(e)}'})
 
         def do_GET(self):
             if self.path.startswith('/api/v1/'):
@@ -4558,224 +3104,22 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
 
             # 2. 版本检查与更新 API
             if subpath == 'traffic-speed':
-                if not self.is_authenticated():
-                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                cur_mono = time.monotonic()
-                total_rx_speed = 0.0
-                total_tx_speed = 0.0
-                user_speeds = {}
-
-                with data_lock:
-                    for uid, samples in list(speed_tracker.items()):
-                        # 过滤 6 秒内的样本
-                        recent = [(t, tx, rx) for (t, tx, rx) in samples if cur_mono - t <= 6]
-                        speed_tracker[uid] = recent
-                        if not recent:
-                            user_speeds[uid] = {'tx': 0, 'rx': 0}
-                            continue
-
-                        sum_tx = sum(tx for _, tx, _ in recent)
-                        sum_rx = sum(rx for _, _, rx in recent)
-                        dt = max(recent[-1][0] - recent[0][0], 1.0) if len(recent) > 1 else 3.0
-                        u_tx_speed = sum_tx / dt
-                        u_rx_speed = sum_rx / dt
-
-                        total_tx_speed += u_tx_speed
-                        total_rx_speed += u_rx_speed
-                        user_speeds[uid] = {'tx': u_tx_speed, 'rx': u_rx_speed}
-
-                return self.reply_json(200, {
-                    'ok': True,
-                    'node_tx': total_tx_speed,
-                    'node_rx': total_rx_speed,
-                    'users': user_speeds
-                })
+                return self._h_get_traffic_speed(subpath)
 
             if subpath == 'proxy-services':
-                if not self.is_authenticated():
-                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                with data_lock:
-                    services = list(data.get('proxy_services', []))
-                m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
-                host = m.get('public_ip', '127.0.0.1') if m.get('is_insecure') else m.get('server_name', 'localhost')
-                return self.reply_json(200, {
-                    'ok': True,
-                    'gost_installed': Path('/usr/local/bin/gost').exists(),
-                    'gost_active': gost_status(),
-                    'host': host,
-                    'services': services
-                })
+                return self._h_get_proxy_services(subpath)
 
             if subpath == 'check-version':
-                if not self.is_authenticated():
-                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                core_curr = '未知'
-                core_latest = '未知'
-                core_has_update = False
-
-                try:
-                    # 获取本地核心版本 (按行精确匹配 Version: 前缀，避免被字符艺术 LOGO 干扰)
-                    out = subprocess.run(['/usr/local/bin/hysteria', 'version'], capture_output=True, text=True, timeout=2).stdout
-                    if out:
-                        for line in out.splitlines():
-                            if line.strip().startswith('Version:'):
-                                core_curr = line.split(':', 1)[1].strip().lstrip('v')
-                                break
-                except Exception:
-                    pass
-
-                try:
-                    # 从 GitHub 获取官方最新版本
-                    req = urllib.request.Request('https://api.github.com/repos/apernet/hysteria/releases/latest',
-                                                 headers={'User-Agent': 'hysteria2-installer'})
-                    with urllib.request.urlopen(req, timeout=3) as resp:
-                        if resp.status == 200:
-                            rel = json.loads(resp.read().decode('utf-8'))
-                            core_latest = rel.get('tag_name', '').lstrip('app/v').lstrip('v')
-                            if core_curr != '未知' and core_latest and core_curr != core_latest:
-                                core_has_update = True
-                except Exception:
-                    pass
-
-                # 面板自身与 AWG 引擎：用 git blob sha 比对文件内容。
-                # 原实现依赖 data['portal_sha']，但那个字段从来没被写入过，
-                # 导致 portal_has_update 恒为 False、「更新面板」按钮永远不显示。
-                portal_curr, portal_latest, portal_has_update = _version_triple(
-                    str(PORTAL_SELF), 'portal.py')
-                awg_curr, awg_latest, awg_has_update = _version_triple(
-                    AWG_CTL, 'awgctl.sh')
-
-                return self.reply_json(200, {
-                    'ok': True,
-                    'core_current': core_curr,
-                    'core_latest': core_latest,
-                    'core_has_update': core_has_update,
-                    'portal_current': portal_curr,
-                    'portal_latest': portal_latest,
-                    'portal_has_update': portal_has_update,
-                    'awg_installed': Path(AWG_CTL).exists(),
-                    'awg_current': awg_curr,
-                    'awg_latest': awg_latest,
-                    'awg_has_update': awg_has_update,
-                })
+                return self._h_get_check_version(subpath)
 
             if subpath == 'reality-status':
-                if not self.is_authenticated():
-                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                is_installed = Path('/usr/local/bin/xray').exists()
-                is_active = False
-                if is_installed:
-                    try:
-                        out = subprocess.run(['systemctl', 'is-active', 'xray'], capture_output=True, text=True, timeout=3).stdout.strip()
-                        is_active = (out == 'active')
-                    except Exception:
-                        is_active = False
-
-                with data_lock:
-                    rcfg = dict(data.get('reality_config', {}))
-                
-                qr_svg = ''
-                if rcfg.get('uri'):
-                    try:
-                        qr_res = subprocess.run(['qrencode', '-t', 'SVG', '-o', '-'],
-                                                input=rcfg['uri'].encode('utf-8'), capture_output=True, timeout=3)
-                        if qr_res.returncode == 0:
-                            qr_svg = qr_res.stdout.decode('utf-8')
-                    except Exception:
-                        qr_svg = ''
-
-                return self.reply_json(200, {
-                    'ok': True,
-                    'installed': is_installed,
-                    'active': is_active,
-                    'config': {
-                        'uri': rcfg.get('uri', ''),
-                        'uuid': rcfg.get('uuid', ''),
-                        'pub_key': rcfg.get('public_key', ''),
-                        'short_id': rcfg.get('short_id', ''),
-                        'flow': 'xtls-rprx-vision',
-                        'sni': rcfg.get('dest_sni', 'www.apple.com'),
-                        'port': rcfg.get('port', 443),
-                        'qr_svg': qr_svg
-                    }
-                })
+                return self._h_get_reality_status(subpath)
 
             if subpath == 'bbr-status':
-                if not self.is_authenticated():
-                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                try:
-                    kernel_ver = platform.release()
-                    cc_out = subprocess.run(['sysctl', '-n', 'net.ipv4.tcp_congestion_control'],
-                                            capture_output=True, text=True, timeout=2).stdout.strip()
-                    qdisc_out = subprocess.run(['sysctl', '-n', 'net.core.default_qdisc'],
-                                              capture_output=True, text=True, timeout=2).stdout.strip()
-                    
-                    conf_path = Path('/etc/sysctl.d/99-bbr.conf')
-                    configured_bbr = ''
-                    if conf_path.exists():
-                        c_text = conf_path.read_text(encoding='utf-8')
-                        for line in c_text.splitlines():
-                            if 'tcp_congestion_control' in line and '=' in line:
-                                configured_bbr = line.split('=')[1].strip()
-
-                    need_reboot = False
-                    if configured_bbr and configured_bbr != cc_out:
-                        need_reboot = True
-
-                    with data_lock:
-                        target_ver = data.get('bbr_target_version', '')
-
-                    return self.reply_json(200, {
-                        'ok': True,
-                        'current': cc_out or 'cubic',
-                        'qdisc': qdisc_out or 'fq_codel',
-                        'kernel': kernel_ver,
-                        'configured': configured_bbr or target_ver or cc_out,
-                        'need_reboot': need_reboot
-                    })
-                except Exception as e:
-                    return self.reply_json(500, {'ok': False, 'error': str(e)})
+                return self._h_get_bbr_status(subpath)
 
             if subpath == 'warp-status':
-                if not self.is_authenticated():
-                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                with data_lock:
-                    enabled = data.get('warp_enabled', False)
-                    rules = list(data.get('warp_rules', [
-                        'ipify.org', 'cloudflare.com',
-                        'openai.com', 'chatgpt.com', 'oaistatic.com', 'oaiusercontent.com', 'ai.com',
-                        'anthropic.com', 'claude.ai',
-                        'gemini.google.com', 'aistudio.google.com', 'generativelanguage.googleapis.com'
-                    ]))
-                # 统一到 wgcf + wireproxy(127.0.0.1:19898)；同时兼容尚未升级、
-                # 仍跑官方 cloudflare-warp(127.0.0.1:40000) 的旧节点，避免误报「未安装」
-                is_installed = (shutil.which('wireproxy') is not None
-                                or shutil.which('warp-cli') is not None
-                                or Path('/etc/systemd/system/wireproxy.service').exists())
-                connected = False
-                outbound_ip = ''
-                if is_installed and enabled:
-                    for warp_addr in ('127.0.0.1:19898', '127.0.0.1:40000'):
-                        try:
-                            proxy_handler = urllib.request.ProxyHandler({'http': 'socks5h://' + warp_addr,
-                                                                         'https': 'socks5h://' + warp_addr})
-                            opener = urllib.request.build_opener(proxy_handler)
-                            req = urllib.request.Request('https://api4.ipify.org', headers={'User-Agent': 'curl/7.88.1'})
-                            with opener.open(req, timeout=3) as resp:
-                                if resp.status == 200:
-                                    outbound_ip = resp.read().decode('utf-8').strip()
-                                    connected = True
-                                    break
-                        except Exception:
-                            connected = False
-                return self.reply_json(200, {
-                    'ok': True,
-                    'installed': is_installed,
-                    'enabled': enabled,
-                    'connected': connected,
-                    'ip': outbound_ip,
-                    'rules': rules
-                })
+                return self._h_get_warp_status(subpath)
 
             if subpath == 'user-config' or subpath.startswith('user-config?'):
                 if not self.is_authenticated():
@@ -4815,9 +3159,7 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
 
             # ---------------- AmneziaWG (AWG) ----------------
             if subpath == 'awg-state':
-                if not self.is_authenticated():
-                    return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
-                return self.reply_json(200, awg_state())
+                return self._h_get_awg_state(subpath)
 
             # 注意：这里的 subpath 是含查询串的（门户上游就是这么切分的），
             # 所以必须先剥掉 ?query 再比对，否则带 ?name= 的路由永远匹配不上。
@@ -4902,6 +3244,243 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
             with data_lock:
                 content = data[key].encode()
             self.reply(200, content, mime)
+
+        # ==========================================================================
+        # do_GET 各端点的处理逻辑（同样是纯代码搬移，逻辑未改）
+        # 参数按每个分支实际用到的上下文变量自动生成 —— 用到才传，不用不传。
+        # ==========================================================================
+
+        def _h_get_traffic_speed(self, subpath):
+            """GET /traffic-speed 的处理逻辑（从 do_GET 机械搬移而来）。"""
+            if not self.is_authenticated():
+                return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+            cur_mono = time.monotonic()
+            total_rx_speed = 0.0
+            total_tx_speed = 0.0
+            user_speeds = {}
+
+            with data_lock:
+                for uid, samples in list(speed_tracker.items()):
+                    # 过滤 6 秒内的样本
+                    recent = [(t, tx, rx) for (t, tx, rx) in samples if cur_mono - t <= 6]
+                    speed_tracker[uid] = recent
+                    if not recent:
+                        user_speeds[uid] = {'tx': 0, 'rx': 0}
+                        continue
+
+                    sum_tx = sum(tx for _, tx, _ in recent)
+                    sum_rx = sum(rx for _, _, rx in recent)
+                    dt = max(recent[-1][0] - recent[0][0], 1.0) if len(recent) > 1 else 3.0
+                    u_tx_speed = sum_tx / dt
+                    u_rx_speed = sum_rx / dt
+
+                    total_tx_speed += u_tx_speed
+                    total_rx_speed += u_rx_speed
+                    user_speeds[uid] = {'tx': u_tx_speed, 'rx': u_rx_speed}
+
+            return self.reply_json(200, {
+                'ok': True,
+                'node_tx': total_tx_speed,
+                'node_rx': total_rx_speed,
+                'users': user_speeds
+            })
+
+        def _h_get_proxy_services(self, subpath):
+            """GET /proxy-services 的处理逻辑（从 do_GET 机械搬移而来）。"""
+            if not self.is_authenticated():
+                return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+            with data_lock:
+                services = list(data.get('proxy_services', []))
+            m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+            host = m.get('public_ip', '127.0.0.1') if m.get('is_insecure') else m.get('server_name', 'localhost')
+            return self.reply_json(200, {
+                'ok': True,
+                'gost_installed': Path('/usr/local/bin/gost').exists(),
+                'gost_active': gost_status(),
+                'host': host,
+                'services': services
+            })
+
+        def _h_get_check_version(self, subpath):
+            """GET /check-version 的处理逻辑（从 do_GET 机械搬移而来）。"""
+            if not self.is_authenticated():
+                return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+            core_curr = '未知'
+            core_latest = '未知'
+            core_has_update = False
+
+            try:
+                # 获取本地核心版本 (按行精确匹配 Version: 前缀，避免被字符艺术 LOGO 干扰)
+                out = subprocess.run(['/usr/local/bin/hysteria', 'version'], capture_output=True, text=True, timeout=2).stdout
+                if out:
+                    for line in out.splitlines():
+                        if line.strip().startswith('Version:'):
+                            core_curr = line.split(':', 1)[1].strip().lstrip('v')
+                            break
+            except Exception:
+                pass
+
+            try:
+                # 从 GitHub 获取官方最新版本
+                req = urllib.request.Request('https://api.github.com/repos/apernet/hysteria/releases/latest',
+                                             headers={'User-Agent': 'hysteria2-installer'})
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    if resp.status == 200:
+                        rel = json.loads(resp.read().decode('utf-8'))
+                        core_latest = rel.get('tag_name', '').lstrip('app/v').lstrip('v')
+                        if core_curr != '未知' and core_latest and core_curr != core_latest:
+                            core_has_update = True
+            except Exception:
+                pass
+
+            # 面板自身与 AWG 引擎：用 git blob sha 比对文件内容。
+            # 原实现依赖 data['portal_sha']，但那个字段从来没被写入过，
+            # 导致 portal_has_update 恒为 False、「更新面板」按钮永远不显示。
+            portal_curr, portal_latest, portal_has_update = _version_triple(
+                str(PORTAL_SELF), 'portal.py')
+            awg_curr, awg_latest, awg_has_update = _version_triple(
+                AWG_CTL, 'awgctl.sh')
+
+            return self.reply_json(200, {
+                'ok': True,
+                'core_current': core_curr,
+                'core_latest': core_latest,
+                'core_has_update': core_has_update,
+                'portal_current': portal_curr,
+                'portal_latest': portal_latest,
+                'portal_has_update': portal_has_update,
+                'awg_installed': Path(AWG_CTL).exists(),
+                'awg_current': awg_curr,
+                'awg_latest': awg_latest,
+                'awg_has_update': awg_has_update,
+            })
+
+        def _h_get_reality_status(self, subpath):
+            """GET /reality-status 的处理逻辑（从 do_GET 机械搬移而来）。"""
+            if not self.is_authenticated():
+                return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+            is_installed = Path('/usr/local/bin/xray').exists()
+            is_active = False
+            if is_installed:
+                try:
+                    out = subprocess.run(['systemctl', 'is-active', 'xray'], capture_output=True, text=True, timeout=3).stdout.strip()
+                    is_active = (out == 'active')
+                except Exception:
+                    is_active = False
+
+            with data_lock:
+                rcfg = dict(data.get('reality_config', {}))
+
+            qr_svg = ''
+            if rcfg.get('uri'):
+                try:
+                    qr_res = subprocess.run(['qrencode', '-t', 'SVG', '-o', '-'],
+                                            input=rcfg['uri'].encode('utf-8'), capture_output=True, timeout=3)
+                    if qr_res.returncode == 0:
+                        qr_svg = qr_res.stdout.decode('utf-8')
+                except Exception:
+                    qr_svg = ''
+
+            return self.reply_json(200, {
+                'ok': True,
+                'installed': is_installed,
+                'active': is_active,
+                'config': {
+                    'uri': rcfg.get('uri', ''),
+                    'uuid': rcfg.get('uuid', ''),
+                    'pub_key': rcfg.get('public_key', ''),
+                    'short_id': rcfg.get('short_id', ''),
+                    'flow': 'xtls-rprx-vision',
+                    'sni': rcfg.get('dest_sni', 'www.apple.com'),
+                    'port': rcfg.get('port', 443),
+                    'qr_svg': qr_svg
+                }
+            })
+
+        def _h_get_bbr_status(self, subpath):
+            """GET /bbr-status 的处理逻辑（从 do_GET 机械搬移而来）。"""
+            if not self.is_authenticated():
+                return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+            try:
+                kernel_ver = platform.release()
+                cc_out = subprocess.run(['sysctl', '-n', 'net.ipv4.tcp_congestion_control'],
+                                        capture_output=True, text=True, timeout=2).stdout.strip()
+                qdisc_out = subprocess.run(['sysctl', '-n', 'net.core.default_qdisc'],
+                                          capture_output=True, text=True, timeout=2).stdout.strip()
+
+                conf_path = Path('/etc/sysctl.d/99-bbr.conf')
+                configured_bbr = ''
+                if conf_path.exists():
+                    c_text = conf_path.read_text(encoding='utf-8')
+                    for line in c_text.splitlines():
+                        if 'tcp_congestion_control' in line and '=' in line:
+                            configured_bbr = line.split('=')[1].strip()
+
+                need_reboot = False
+                if configured_bbr and configured_bbr != cc_out:
+                    need_reboot = True
+
+                with data_lock:
+                    target_ver = data.get('bbr_target_version', '')
+
+                return self.reply_json(200, {
+                    'ok': True,
+                    'current': cc_out or 'cubic',
+                    'qdisc': qdisc_out or 'fq_codel',
+                    'kernel': kernel_ver,
+                    'configured': configured_bbr or target_ver or cc_out,
+                    'need_reboot': need_reboot
+                })
+            except Exception as e:
+                return self.reply_json(500, {'ok': False, 'error': str(e)})
+
+        def _h_get_warp_status(self, subpath):
+            """GET /warp-status 的处理逻辑（从 do_GET 机械搬移而来）。"""
+            if not self.is_authenticated():
+                return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+            with data_lock:
+                enabled = data.get('warp_enabled', False)
+                rules = list(data.get('warp_rules', [
+                    'ipify.org', 'cloudflare.com',
+                    'openai.com', 'chatgpt.com', 'oaistatic.com', 'oaiusercontent.com', 'ai.com',
+                    'anthropic.com', 'claude.ai',
+                    'gemini.google.com', 'aistudio.google.com', 'generativelanguage.googleapis.com'
+                ]))
+            # 统一到 wgcf + wireproxy(127.0.0.1:19898)；同时兼容尚未升级、
+            # 仍跑官方 cloudflare-warp(127.0.0.1:40000) 的旧节点，避免误报「未安装」
+            is_installed = (shutil.which('wireproxy') is not None
+                            or shutil.which('warp-cli') is not None
+                            or Path('/etc/systemd/system/wireproxy.service').exists())
+            connected = False
+            outbound_ip = ''
+            if is_installed and enabled:
+                for warp_addr in ('127.0.0.1:19898', '127.0.0.1:40000'):
+                    try:
+                        proxy_handler = urllib.request.ProxyHandler({'http': 'socks5h://' + warp_addr,
+                                                                     'https': 'socks5h://' + warp_addr})
+                        opener = urllib.request.build_opener(proxy_handler)
+                        req = urllib.request.Request('https://api4.ipify.org', headers={'User-Agent': 'curl/7.88.1'})
+                        with opener.open(req, timeout=3) as resp:
+                            if resp.status == 200:
+                                outbound_ip = resp.read().decode('utf-8').strip()
+                                connected = True
+                                break
+                    except Exception:
+                        connected = False
+            return self.reply_json(200, {
+                'ok': True,
+                'installed': is_installed,
+                'enabled': enabled,
+                'connected': connected,
+                'ip': outbound_ip,
+                'rules': rules
+            })
+
+        def _h_get_awg_state(self, subpath):
+            """GET /awg-state 的处理逻辑（从 do_GET 机械搬移而来）。"""
+            if not self.is_authenticated():
+                return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+            return self.reply_json(200, awg_state())
 
         def reply(self, code, body, mime='text/plain', www_auth=False):
             self.send_response(code)
