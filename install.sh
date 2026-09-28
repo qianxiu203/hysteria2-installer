@@ -3549,22 +3549,36 @@ def serve(path):
         except Exception:
             return False
 
-    def ensure_awgctl():
-        """确保 hy2-awgctl 可用；缺失时从主仓库拉取（与 install.sh 的策略一致）。"""
-        if Path(AWG_CTL).exists():
+    def ensure_awgctl(force=False):
+        """确保 hy2-awgctl 可用；缺失时从主仓库拉取（与 install.sh 的策略一致）。
+
+        force=True 时即使已存在也重新获取，且仅在内容变化时才替换 —— 否则已经装过
+        AWG 的机器会把引擎永久冻结在首次安装的版本上。
+        URL 带 cache-busting 参数：raw.githubusercontent.com 有 CDN 缓存，
+        push 之后数分钟仍可能返回旧内容。
+        """
+        if not force and Path(AWG_CTL).exists():
             return True
         try:
             import os
             import shutil
             import tempfile
             import urllib.request
-            url = 'https://raw.githubusercontent.com/' + AWG_REPO + '/main/awgctl.sh'
+            url = ('https://raw.githubusercontent.com/' + AWG_REPO
+                   + '/main/awgctl.sh?cb=' + str(int(time.time())))
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=30) as resp:
                 content = resp.read()
             # 太小说明拿到的是错误页而不是脚本
             if len(content) < 2048 or b'hy2-awgctl' not in content:
                 return False
+            # 内容一致就直接返回，避免无谓改写
+            if force and Path(AWG_CTL).exists():
+                try:
+                    if Path(AWG_CTL).read_bytes() == content:
+                        return True
+                except Exception:
+                    pass
             fd, tmp_name = tempfile.mkstemp(prefix='hy2-awgctl-', suffix='.sh')
             os.close(fd)
             with open(tmp_name, 'wb') as fh:
@@ -4382,6 +4396,8 @@ WantedBy=multi-user.target
                         return self.reply_json(200, {'ok': True, 'message': f'已切换到 AWG {target}.x。⚠️ 所有客户端必须重新导入配置。'})
 
                     if action == 'update':
+                        # 先把控制工具自身刷新到最新，否则引擎会永久停在首装版本
+                        ensure_awgctl(force=True)
                         rc, out, err = awg_run(['update'], timeout=420)
                         if rc != 0:
                             return self.reply_json(500, {'ok': False, 'error': '更新失败：' + awg_err_tail(rc, out, err)})
@@ -5786,12 +5802,24 @@ EOF
 # 确保 hy2-awgctl 就位。优先用与 install.sh 同目录的 awgctl.sh（本地克隆场景），
 # 否则从仓库拉取。注意本脚本常以 `bash <(curl ...)` 方式运行，此时 BASH_SOURCE
 # 指向 /dev/fd/NN，不是真实文件，所以必须做存在性判断。
+#
+# 传 --refresh 时即使已存在也重新获取，且仅在内容确实变化时才替换。
+# 存在的意义：hy2-awgctl 本身也需要能更新，否则已经装过 AWG 的机器会把引擎
+# 永久冻结在首次安装的版本上（awg_ensure_ctl 原本一看到文件存在就直接返回）。
+#
+# 拉取 URL 带 cache-busting 参数是有意的：raw.githubusercontent.com 有 CDN 缓存，
+# 实测 push 之后数分钟仍会返回旧内容，导致刚修好的问题在测试里复现不出来。
 awg_ensure_ctl() {
-    if [[ -x "$AWG_CTL_BIN" ]]; then
+    local force="no"
+    if [[ "${1:-}" == "--refresh" ]]; then
+        force="yes"
+    fi
+
+    if [[ "$force" != "yes" && -x "$AWG_CTL_BIN" ]]; then
         return 0
     fi
 
-    local src="" dir=""
+    local src="" dir="" tmp=""
     if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
         dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || dir=""
         if [[ -n "$dir" && -f "${dir}/awgctl.sh" ]]; then
@@ -5799,16 +5827,34 @@ awg_ensure_ctl() {
         fi
     fi
 
-    local tmp=""
     if [[ -z "$src" ]]; then
         tmp="$(mktemp)"
         if curl -fsSL --max-time 30 \
-             "https://raw.githubusercontent.com/${AWG_REPO}/main/awgctl.sh" -o "$tmp" 2>/dev/null; then
+             "https://raw.githubusercontent.com/${AWG_REPO}/main/awgctl.sh?cb=$(date +%s)" \
+             -o "$tmp" 2>/dev/null; then
             src="$tmp"
         else
             rm -f "$tmp"
+            if [[ "$force" == "yes" && -x "$AWG_CTL_BIN" ]]; then
+                log_warn "刷新 awgctl.sh 失败（网络问题？），继续沿用现有版本。"
+                return 0
+            fi
             log_err "无法获取 awgctl.sh（本地不存在，且从仓库下载失败）"
             return 1
+        fi
+    fi
+
+    # 内容一致就不动它，避免无意义地改写文件与刷新时间戳
+    if [[ "$force" == "yes" && -x "$AWG_CTL_BIN" ]]; then
+        local new_sum old_sum
+        new_sum="$(sha256sum < "$src" 2>/dev/null | awk '{print $1}')"
+        old_sum="$(sha256sum < "$AWG_CTL_BIN" 2>/dev/null | awk '{print $1}')"
+        if [[ -n "$new_sum" && "$new_sum" == "$old_sum" ]]; then
+            log_info "AmneziaWG 控制工具已是最新，无需更新。"
+            if [[ -n "$tmp" ]]; then
+                rm -f "$tmp"
+            fi
+            return 0
         fi
     fi
 
@@ -5822,7 +5868,12 @@ awg_ensure_ctl() {
     if [[ -n "$tmp" ]]; then
         rm -f "$tmp"
     fi
-    log_info "已安装 AmneziaWG 控制工具: ${AWG_CTL_BIN}"
+
+    if [[ "$force" == "yes" ]]; then
+        log_info "已更新 AmneziaWG 控制工具: ${AWG_CTL_BIN}"
+    else
+        log_info "已安装 AmneziaWG 控制工具: ${AWG_CTL_BIN}"
+    fi
     return 0
 }
 
@@ -6130,7 +6181,9 @@ status_amneziawg() {
 update_amneziawg() {
     check_root
     check_arch
-    if ! awg_ensure_ctl; then return 1; fi
+    # 先把控制工具自身刷新到最新，否则引擎会被永久冻结在首次安装的版本上
+    # （awg_ensure_ctl 默认看到文件已存在就直接返回）
+    awg_ensure_ctl --refresh || return 1
     "$AWG_CTL_BIN" update
 }
 

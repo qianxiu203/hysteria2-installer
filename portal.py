@@ -2753,22 +2753,36 @@ def serve(path):
         except Exception:
             return False
 
-    def ensure_awgctl():
-        """确保 hy2-awgctl 可用；缺失时从主仓库拉取（与 install.sh 的策略一致）。"""
-        if Path(AWG_CTL).exists():
+    def ensure_awgctl(force=False):
+        """确保 hy2-awgctl 可用；缺失时从主仓库拉取（与 install.sh 的策略一致）。
+
+        force=True 时即使已存在也重新获取，且仅在内容变化时才替换 —— 否则已经装过
+        AWG 的机器会把引擎永久冻结在首次安装的版本上。
+        URL 带 cache-busting 参数：raw.githubusercontent.com 有 CDN 缓存，
+        push 之后数分钟仍可能返回旧内容。
+        """
+        if not force and Path(AWG_CTL).exists():
             return True
         try:
             import os
             import shutil
             import tempfile
             import urllib.request
-            url = 'https://raw.githubusercontent.com/' + AWG_REPO + '/main/awgctl.sh'
+            url = ('https://raw.githubusercontent.com/' + AWG_REPO
+                   + '/main/awgctl.sh?cb=' + str(int(time.time())))
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=30) as resp:
                 content = resp.read()
             # 太小说明拿到的是错误页而不是脚本
             if len(content) < 2048 or b'hy2-awgctl' not in content:
                 return False
+            # 内容一致就直接返回，避免无谓改写
+            if force and Path(AWG_CTL).exists():
+                try:
+                    if Path(AWG_CTL).read_bytes() == content:
+                        return True
+                except Exception:
+                    pass
             fd, tmp_name = tempfile.mkstemp(prefix='hy2-awgctl-', suffix='.sh')
             os.close(fd)
             with open(tmp_name, 'wb') as fh:
@@ -3586,6 +3600,8 @@ WantedBy=multi-user.target
                         return self.reply_json(200, {'ok': True, 'message': f'已切换到 AWG {target}.x。⚠️ 所有客户端必须重新导入配置。'})
 
                     if action == 'update':
+                        # 先把控制工具自身刷新到最新，否则引擎会永久停在首装版本
+                        ensure_awgctl(force=True)
                         rc, out, err = awg_run(['update'], timeout=420)
                         if rc != 0:
                             return self.reply_json(500, {'ok': False, 'error': '更新失败：' + awg_err_tail(rc, out, err)})
