@@ -516,7 +516,7 @@ setup_system_firewall() {
     local s_port="$2"
     local e_port="$3"
     
-    log_step "自动放行系统内部防火墙 (ufw / firewalld / iptables)..."
+    log_step "自动放行系统内部防火墙 (ufw / firewalld / nftables / iptables)..."
     if command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
         ufw allow "${HY2_SUB_PORT}/tcp" >/dev/null 2>&1 || true
         ufw allow "${port}/udp" >/dev/null 2>&1 || true
@@ -541,6 +541,80 @@ setup_system_firewall() {
         fi
         firewall-cmd --reload >/dev/null 2>&1 || true
         log_info "已放行 firewalld 端口。"
+    fi
+    # BUGFIX: nftables。只跑 nft 的机器（没有 ufw / firewalld 的
+    # iptables-nft 兜底也会漏掉 INPUT 放行）此前完全不被覆盖——
+    # 表现为「服务 active、本机连得上、公网连不上」。
+    # 关键点：UDP 主监听端口必须放行！客户端订阅里的 `port: <listen>` 是
+    # 直连主端口的，不走端口跳跃；只放行跳跃段 20000-40000 的话，
+    # 直连会超时（面板测试 -1 / 客户端连不上）。
+    # 只在确有一条 hook input + policy drop 的 base chain 时才动它，
+    # 避免误伤默认放行的机器。
+    if command -v nft >/dev/null 2>&1 && ! { command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; } \
+       && ! { command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; }; then
+        # 用 list ruleset 的层级结构解析（格式在所有 nft 版本间稳定）：
+        # 先记下当前所在的 table（"table <family> <name>"）/ chain，
+        # 遇到 "hook input ... policy drop" 就输出 "<family> <table> <chain>"。
+        local nft_input
+        nft_input=$(nft list ruleset 2>/dev/null | awk '
+            /^table /            { tbl=$2" "$3; chain="" }
+            /^[[:space:]]*chain /{ chain=$2; sub(/\{.*/,"",chain); sub(/:$/,"",chain) }
+            /hook input/ && /policy drop/ && chain != "" { print tbl " " chain; exit }
+        ')
+        if [[ -n "$nft_input" ]]; then
+            # nft_input = "<family> <table> <chain>"，正好是 nft 命令需要的三个参数。
+            # 用 read 拆分而不是 set --，避免覆盖函数自身的位置参数（$1/$2/$3）。
+            local nft_fam nft_tbl nft_chain
+            read -r nft_fam nft_tbl nft_chain <<<"$nft_input"
+            # 幂等：已放行则跳过。判据 = 该链里已有一条 udp 规则包含此端口。
+            # 用「数字边界」正则避免 14617 命中 146170 之类。
+            if nft list chain "$nft_fam" "$nft_tbl" "$nft_chain" 2>/dev/null \
+               | grep -E "udp dport" | grep -qE "(^|[^0-9])${port}([^0-9]|$)"; then
+                log_info "nftables 已放行 UDP ${port}，跳过。"
+            else
+                # 直接追加独立 accept 规则。刻意不做「并入已有 dport 集合」的优化：
+                # 那需要解析 `nft -a` 的 handle 再跑 `nft replace rule`，
+                # handle 的输出格式在不同 nft 版本间有差异，猜测成本高于收益。
+                # 独立规则语义等价，且天然幂等（上面已判重）。
+                nft add rule "$nft_fam" "$nft_tbl" "$nft_chain" udp dport ${port} accept >/dev/null 2>&1 || true
+                if [[ -n "$s_port" && -n "$e_port" ]]; then
+                    nft add rule "$nft_fam" "$nft_tbl" "$nft_chain" udp dport ${s_port}-${e_port} accept >/dev/null 2>&1 || true
+                fi
+                nft add rule "$nft_fam" "$nft_tbl" "$nft_chain" tcp dport ${HY2_SUB_PORT} accept >/dev/null 2>&1 || true
+                if [[ "$CERT_TYPE" == "acme" ]]; then
+                    nft add rule "$nft_fam" "$nft_tbl" "$nft_chain" tcp dport 80 accept >/dev/null 2>&1 || true
+                fi
+                log_info "nftables ($nft_fam $nft_tbl/$nft_chain) 已放行 tcp ${HY2_SUB_PORT} + udp ${port}$([[ -n "$s_port" ]] && echo " + udp ${s_port}-${e_port}")。"
+                log_warn "注意：nft 规则默认不持久化。若本机有 /etc/nftables.conf 或自建加载服务，请同步写入以防重启丢失。"
+            fi
+        fi
+    fi
+    # 裸 iptables 兜底（既无 ufw/firewalld，也无 nft 的情况）。
+    # 注意：这里处理的是 filter/INPUT 的放行，与端口跳跃的 nat/REDIRECT 无关。
+    if command -v iptables >/dev/null 2>&1 \
+       && ! { command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; } \
+       && ! { command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; } \
+       && ! command -v nft >/dev/null 2>&1; then
+        local chain_policy
+        chain_policy=$(iptables -L INPUT -n 2>/dev/null | head -n1 | grep -o 'policy [A-Z]*' | awk '{print $2}')
+        if [[ "$chain_policy" == "DROP" ]]; then
+            iptables -C INPUT -p udp --dport "${port}" -j ACCEPT >/dev/null 2>&1 \
+                || iptables -I INPUT -p udp --dport "${port}" -j ACCEPT >/dev/null 2>&1 || true
+            iptables -C INPUT -p tcp --dport "${HY2_SUB_PORT}" -j ACCEPT >/dev/null 2>&1 \
+                || iptables -I INPUT -p tcp --dport "${HY2_SUB_PORT}" -j ACCEPT >/dev/null 2>&1 || true
+            if [[ -n "$s_port" && -n "$e_port" ]]; then
+                iptables -C INPUT -p udp --dport "${s_port}:${e_port}" -j ACCEPT >/dev/null 2>&1 \
+                    || iptables -I INPUT -p udp --dport "${s_port}:${e_port}" -j ACCEPT >/dev/null 2>&1 || true
+            fi
+            if [[ "$CERT_TYPE" == "acme" ]]; then
+                iptables -C INPUT -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1 \
+                    || iptables -I INPUT -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1 || true
+            fi
+            log_info "已放行 iptables INPUT (udp ${port} + tcp ${HY2_SUB_PORT})。"
+            if command -v netfilter-persistent >/dev/null 2>&1; then
+                netfilter-persistent save >/dev/null 2>&1 || true
+            fi
+        fi
     fi
 }
 

@@ -27,6 +27,17 @@
 - 新增 `tests/test_portal_sub_port.py`（**11 项**），锁死「缺键时绝不返回伪造的 8443」这条不变量；
   做过反向验证（把兜底改回 8443，测试立即失败）。
 
+### 修复：防火墙自动放行漏掉了 nftables，且从未放行过「UDP 主监听端口」
+- **背景（真实故障复现）**：在一台只跑 nftables 的机器上装完后，`hysteria-server` 显示 `active`、配置与证书全对，但客户端**连不上**，面板节点测试恒为 **-1（超时）**。诡异之处在于 `hysteria client` 连 `127.0.0.1:<listen>` **成功**、连 `<公网IP>:<listen>` **超时**。
+- **根因一（覆盖面缺口）**：`setup_system_firewall()` 只处理 `ufw` 与 `firewalld`。函数名与日志里写着 `iptables`，但函数体里**没有任何 iptables/nftables 的 INPUT 放行逻辑**。纯 nft 的机器因此完全不被覆盖（`iptables-nft` 兜底也不会去碰自定义的 nft 表）。
+- **根因二（更隐蔽）**：所有分支都遗漏了**UDP 主监听端口**。客户端订阅里的 `port: <listen>` 是**直连主端口**的（`ports: "<listen>,20000-40000"` 里的跳跃段是可选项），而此前只放行了跳跃段 `20000-40000`。于是「跳跃段通、主端口不通」—— `hysteria client` 连跳跃端口测试会成功，让人误判为服务正常。
+- **修复**：
+  - 新增 **nftables 分支**：用 `nft list ruleset` 的层级结构解析出那条 `hook input` + `policy drop` 的 base chain（**只在确有条目会 DROP 时才动它**，默认放行的机器不受影响），幂等追加放行 `udp <listen>`、`udp <hop 起-止>`、`tcp <订阅端口>`，并在 ACME 模式下放行 `tcp 80`。
+  - 新增**裸 iptables 兜底分支**：仅在既无 ufw/firewalld 也无 nft 时生效，且只在 `INPUT` 链 policy 为 `DROP` 时才插入规则。
+  - **刻意不做「把端口并入已有 dport 集合」的优化**：那需要解析 `nft -a` 的 handle 再跑 `nft replace rule`，handle 的输出格式在不同 nft 版本间有差异，猜测成本高于收益；追加独立规则语义等价且天然幂等。
+  - nft 规则默认不持久化，因此会打印明确警告，提示用户若有 `/etc/nftables.conf` 或自建加载服务需同步写入。
+- **验证**：解析/拆分/幂等/数字边界（`14617` 不会误命中 `146170`）/不误伤 `policy accept` 机器 —— 共 9 项单元测试全通过。
+
 ### 新增：AmneziaWG (AWG) 抗 DPI 协议支持
 - **一键部署 WireGuard 的抗审查分支**。密钥与加密内核完全沿用 WireGuard（Curve25519 / ChaCha20-Poly1305 / BLAKE2s / Noise_IK），只把数据包的头部、长度与时序特征随机化，使 DPI 无法按固定签名识别。
 - **走用户态部署，不碰内核、不引入 Docker、不在服务器上编译**：
