@@ -884,7 +884,7 @@ def login_html(token, error_msg=None):
 <script>{LOGIN_SCRIPT}</script></body></html>'''
 
 
-def user_page_html(server_name, host, listen_port, obfs_badge, uid, uinfo, uri, clash, sing, qr_svg, token, user_key):
+def user_page_html(server_name, host, listen_port, obfs_badge, uid, uinfo, uri, clash, sing, qr_svg, token, user_key, sub_port=None):
     used_bytes = int(uinfo.get("used_bytes", 0))
     limit_bytes = int(uinfo.get("limit_bytes", 0))
     now_ts = int(time.time())
@@ -914,7 +914,8 @@ def user_page_html(server_name, host, listen_port, obfs_badge, uid, uinfo, uri, 
         traffic_display = f"""<div>{format_bytes(used_bytes)} <span style="font-size:12px;color:var(--muted)">(不限制总流量)</span></div>"""
 
     note = uinfo.get("note") or "-"
-    sub_port = uinfo.get("subscription_port") or 8443
+    # 端口优先级：调用方从 meta 传入的真实 masquerade 端口 > 用户记录 > 兜底
+    sub_port = sub_port or uinfo.get("subscription_port") or 8443
     clash_sub_url = f"https://{host}:{sub_port}/{token}/u/{quote(uid)}/clash.yaml?k={user_key}"
 
     return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>个人专属连接 · {html.escape(uid)}</title><style>{STYLE}</style></head><body><main style="max-width:860px">
@@ -3100,7 +3101,7 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
                     host = m.get('public_ip', server_name) if m.get('is_insecure') else server_name
                     listen_port = m.get('listen_port', 19984)
                     obfs_badge = "Salamander" if m.get('obfs_password') else "QUIC"
-                    page = user_page_html(server_name, host, listen_port, obfs_badge, target_uid, u_copy, uri, clash_yaml, sing_json, qr_svg, data['token'], expected_k)
+                    page = user_page_html(server_name, host, listen_port, obfs_badge, target_uid, u_copy, uri, clash_yaml, sing_json, qr_svg, data['token'], expected_k, m.get('subscription_port'))
                     return self.reply(200, page.encode('utf-8'), 'text/html; charset=utf-8')
                 else:
                     return self.reply(404, b'Not found')
