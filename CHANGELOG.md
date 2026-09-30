@@ -2,6 +2,31 @@
 
 ## 未发布
 
+### 修复：订阅链接端口兜底成伪造的 8443，导致客户端导入失败
+- **现象**：面板生成的 Clash 订阅链接指向 `:8443`，而机器上**根本没有 8443 在监听**，
+  客户端只报一句笼统的「订阅导入失败」，用户完全无从下手。
+- **根因**：多处用 `m.get("subscription_port", 8443)` 取订阅端口 —— 一旦
+  `client_meta.json` 缺这个键（历史遗留 / 手工改过），就兜底成 **8443**。
+  但 8443 在本项目的端口分配里是**被主动避开**的黑名单成员，
+  这个兜底值在真实部署里**几乎总是错的**。
+  其中**用户专属页**更严重：它从 `uinfo`（用户对象）取 `subscription_port`，
+  而该键只存在于节点 meta 里 —— 所以**必然**落到 8443。
+- **修法**：
+  - 新增 `resolve_subscription_port(m)`，按优先级取值：
+    `client_meta.subscription_port` → **config.yaml 的 `masquerade.listenHTTPS`**（权威来源）→ 兜底。
+    并返回来源标记，便于排障时说明端口来自哪里。
+  - 新增 `read_masquerade_port()` 解析 config.yaml 的 `listenHTTPS`
+    （兼容 `:11690` / `0.0.0.0:11690` 两种写法）。
+  - `prepare()` 初始化时**把解析结果写回 `client_meta.json`（自愈）**，幂等、不重复写，
+    并打印一行来源日志。
+  - 修掉用户专属页从 `uinfo` 取端口的错误（改为由调用方传入节点 meta 的解析结果）。
+  - 顺带修掉 3 处 `m['subscription_port']` 的**硬取值**（缺键会 KeyError 崩溃）。
+- **install.sh 同步**：`select_subscription_port()` 不再优先尝试 8443，
+  直接从高位随机端口挑，并显式避开黑名单与 20000-40000 跳跃区间；
+  `HY2_SUB_PORT` 初始值由 `"8443"` 改为空（表"尚未确定"）。
+- 新增 `tests/test_portal_sub_port.py`（**11 项**），锁死「缺键时绝不返回伪造的 8443」这条不变量；
+  做过反向验证（把兜底改回 8443，测试立即失败）。
+
 ### 新增：AmneziaWG (AWG) 抗 DPI 协议支持
 - **一键部署 WireGuard 的抗审查分支**。密钥与加密内核完全沿用 WireGuard（Curve25519 / ChaCha20-Poly1305 / BLAKE2s / Noise_IK），只把数据包的头部、长度与时序特征随机化，使 DPI 无法按固定签名识别。
 - **走用户态部署，不碰内核、不引入 Docker、不在服务器上编译**：

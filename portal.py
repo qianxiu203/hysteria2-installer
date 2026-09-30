@@ -103,6 +103,62 @@ def format_bytes(b):
         return f"{b/1024**3:.2f} GB"
 
 
+def read_masquerade_port(config_path='/etc/hysteria/config.yaml'):
+    """从 Hysteria 的 config.yaml 里读出 masquerade 的真实监听端口。
+
+    这是订阅端口的**权威来源** —— 门户的公网入口就是这个 masquerade 端口
+    （`listenHTTPS`），订阅链接必须用它。
+    """
+    try:
+        text = Path(config_path).read_text(encoding='utf-8')
+    except OSError:
+        return None
+    for line in text.split('\n'):
+        stripped = line.strip()
+        if stripped.startswith('listenHTTPS:'):
+            raw = stripped.split(':', 1)[1].strip()
+            # 形如 ":11690" / "0.0.0.0:11690" / "11690"
+            raw = raw.rsplit(':', 1)[-1].strip()
+            if raw.isdigit():
+                return int(raw)
+    return None
+
+
+def resolve_subscription_port(m, config_path='/etc/hysteria/config.yaml'):
+    """解析订阅链接该用的端口。按优先级取值，**绝不返回伪造的 8443**。
+
+    🔴 为什么需要这个函数（真实 bug）：
+    原代码写 `m.get("subscription_port", 8443)` —— 一旦 `client_meta.json`
+    里缺这个键（历史遗留 / 手工改过），就兜底成 **8443**。
+    但 8443 在生成本机服务时是被**主动避开**的端口（见端口黑名单），
+    机器上通常**根本没有 8443 在监听**。结果：面板生成的 Clash 订阅链接
+    指向一个不存在的地址，客户端只报一句笼统的「订阅导入失败」，
+    用户完全无从下手（2026-09-30 真实报障）。
+
+    取值优先级：
+      1. `m['subscription_port']`  —— 显式配置，最权威
+      2. config.yaml 的 `masquerade.listenHTTPS` —— 公网入口的真实端口
+      3. 传入的 fallback（仅用于两处都读不到时的极端兜底）
+
+    返回 (port, source)，source 用于日志/排障时说明端口来自哪里。
+    """
+    explicit = m.get('subscription_port') if isinstance(m, dict) else None
+    if explicit:
+        try:
+            value = int(explicit)
+            if 1 <= value <= 65535:
+                return value, 'client_meta'
+        except (TypeError, ValueError):
+            pass
+
+    detected = read_masquerade_port(config_path)
+    if detected:
+        return detected, 'config.yaml'
+
+    # 两处都读不到：退回 Hysteria 的默认监听端口，而不是伪造的 8443。
+    return 443, 'fallback'
+
+
 def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token="", session_secret=""):
     def field(identifier, value, kind="link"):
         return f'<textarea id="{identifier}" class="{kind}" aria-label="{identifier}" readonly spellcheck="false">{html.escape(value)}</textarea>'
@@ -113,7 +169,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
     server_name = m.get("server_name") or m.get("public_ip", "localhost")
     public_ip = m.get("public_ip", server_name)
     host = public_ip if is_insecure else server_name
-    sub_port = m.get("subscription_port", 8443)
+    sub_port = resolve_subscription_port(m)[0]
     _raw_pin = (m.get("pin_sha256") or "").strip().lower()
     pin_sha256 = _raw_pin if (is_insecure and len(_raw_pin) == 64
                               and all(c in "0123456789abcdef" for c in _raw_pin)) else ""
@@ -914,8 +970,11 @@ def user_page_html(server_name, host, listen_port, obfs_badge, uid, uinfo, uri, 
         traffic_display = f"""<div>{format_bytes(used_bytes)} <span style="font-size:12px;color:var(--muted)">(不限制总流量)</span></div>"""
 
     note = uinfo.get("note") or "-"
-    # 端口优先级：调用方从 meta 传入的真实 masquerade 端口 > 用户记录 > 兜底
-    sub_port = sub_port or uinfo.get("subscription_port") or 8443
+    # 🔴 订阅端口来自**节点 meta**，不是用户对象 —— 用户对象里从来没有这个键。
+    # 调用方应从 meta 传入真实端口；若未传，则按权威来源解析，
+    # **绝不兜底成伪造的 8443**（8443 在本项目里是被主动避开的黑名单端口）。
+    if sub_port is None:
+        sub_port = resolve_subscription_port({})[0]
     clash_sub_url = f"https://{host}:{sub_port}/{token}/u/{quote(uid)}/clash.yaml?k={user_key}"
 
     return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>个人专属连接 · {html.escape(uid)}</title><style>{STYLE}</style></head><body><main style="max-width:860px">
@@ -1097,8 +1156,16 @@ def prepare(meta_path, port, node_api_key=None):
     qr = subprocess.run(['qrencode', '-t', 'SVG', '-o', '-'], input=uri.encode(), capture_output=True, check=True).stdout
     user, password, token = secrets.token_hex(8), secrets.token_urlsafe(32), secrets.token_hex(32)
     host = m['public_ip'] if m['is_insecure'] else m['server_name']
-    base = f"https://{host}:{m['subscription_port']}/{token}/"
-    subscription = f"https://{user}:{password}@{host}:{m['subscription_port']}/{token}/clash.yaml"
+    # 初始化时把订阅端口**解析并写回** client_meta.json（自愈）：
+    # 历史机器上这个键可能缺失或是错的，写回真实值后，
+    # 后续所有读取路径（含用户专属页）都不会再落到伪造的 8443 上。
+    sub_port, sub_port_src = resolve_subscription_port(m)
+    if m.get('subscription_port') != sub_port:
+        m['subscription_port'] = sub_port
+        Path(meta_path).write_text(json.dumps(m, ensure_ascii=False, indent=2))
+        print(f'[portal] 订阅端口已自愈为 {sub_port}（来源: {sub_port_src}）', file=sys.stderr)
+    base = f"https://{host}:{sub_port}/{token}/"
+    subscription = f"https://{user}:{password}@{host}:{sub_port}/{token}/clash.yaml"
     session_secret = secrets.token_hex(32)
     api_key = node_api_key or secrets.token_hex(24)
 
@@ -1136,7 +1203,7 @@ def refresh(meta_path):
     data = json.loads(path.read_text())
     uri, clash, sing = artifacts(m)
     host = m['public_ip'] if m['is_insecure'] else m['server_name']
-    subscription = f"https://{access['username']}:{access['password']}@{host}:{m['subscription_port']}/{data['token']}/clash.yaml"
+    subscription = f"https://{access['username']}:{access['password']}@{host}:{resolve_subscription_port(m)[0]}/{data['token']}/clash.yaml"
     
     if 'session_secret' not in data:
         data['session_secret'] = secrets.token_hex(32)
@@ -1485,7 +1552,7 @@ def serve(path):
         access_file = root / 'portal-access.json'
         access = json.loads(access_file.read_text()) if access_file.exists() else {}
         host = m.get('public_ip', '127.0.0.1') if m.get('is_insecure') else m.get('server_name', 'localhost')
-        subscription = f"https://{access.get('username','')}:{access.get('password','')}@{host}:{m.get('subscription_port',8443)}/{data['token']}/clash.yaml"
+        subscription = f"https://{access.get('username','')}:{access.get('password','')}@{host}:{resolve_subscription_port(m)[0]}/{data['token']}/clash.yaml"
         
         now_ts = int(time.time())
         display_users = {}
@@ -3101,7 +3168,7 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
                     host = m.get('public_ip', server_name) if m.get('is_insecure') else server_name
                     listen_port = m.get('listen_port', 19984)
                     obfs_badge = "Salamander" if m.get('obfs_password') else "QUIC"
-                    page = user_page_html(server_name, host, listen_port, obfs_badge, target_uid, u_copy, uri, clash_yaml, sing_json, qr_svg, data['token'], expected_k, m.get('subscription_port'))
+                    page = user_page_html(server_name, host, listen_port, obfs_badge, target_uid, u_copy, uri, clash_yaml, sing_json, qr_svg, data['token'], expected_k, resolve_subscription_port(m)[0])
                     return self.reply(200, page.encode('utf-8'), 'text/html; charset=utf-8')
                 else:
                     return self.reply(404, b'Not found')

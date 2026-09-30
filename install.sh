@@ -23,7 +23,7 @@ HY2_BIN="/usr/local/bin/hysteria"
 HY2_SERVICE="/etc/systemd/system/hysteria-server.service"
 HY2_CERT_DIR="${HY2_DIR}/cert"
 HY2_META_FILE="${HY2_DIR}/client_meta.json"
-HY2_SUB_PORT="8443"
+HY2_SUB_PORT=""   # 由 select_subscription_port() 动态分配；空值表示"尚未确定"
 
 # ---- AmneziaWG (AWG) ----
 # 引擎逻辑全部在 awgctl.sh 里，本脚本只做交互封装。
@@ -546,10 +546,18 @@ setup_system_firewall() {
 
 select_subscription_port() {
     # bind 实际验证 IPv4 TCP 端口；不解析 ss 标题，不进行无限循环。
+    # 🔴 不要优先尝试 8443：它是常见 Web 端口，且本项目在门户的端口分配里
+    # 已把它列为**黑名单**成员（生成代理/AWG 服务时主动避开）。若这里优先
+    # 选中它，就会出现"订阅端口用了黑名单端口"的自相矛盾，也与
+    # 门户侧 `resolve_subscription_port` 的取值意图不符。
+    # 直接从高位随机端口里挑，并用 bind 验证真实可用性。
     HY2_SUB_PORT=$(python3 - <<'PYPORT'
 import socket, secrets
-for i in range(100):
-    port = 8443 if i == 0 else 10000 + secrets.randbelow(50000)
+RESERVED = {8443, 19898, 22, 80, 443, 40000, 56195}
+for _ in range(100):
+    port = 10000 + secrets.randbelow(50000)
+    if port in RESERVED or 20000 <= port <= 40000:
+        continue        # 20000-40000 是 Hysteria 的端口跳跃区间，必须避开
     with socket.socket() as sock:
         try:
             sock.bind(('0.0.0.0', port))
