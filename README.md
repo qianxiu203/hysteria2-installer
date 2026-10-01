@@ -49,6 +49,28 @@ bash <(wget -qO- https://raw.githubusercontent.com/yys9253462-gif/hysteria2-inst
 > 如果确认刚更新过却看不到新行为，等几分钟再执行一次即可。脚本内部拉取 `awgctl.sh` 时已改用
 > **GitHub API → jsDelivr → raw** 三级回退来规避这个问题（raw 实测不把查询串算进缓存键，加时间戳参数无效）。
 
+### 免交互部署（云 init / CI / 批量装机）
+
+核心安装支持环境变量，配 `install` 子命令即可无人值守：
+
+```bash
+HY2_CERT_TYPE=3 HY2_DOMAIN=hy2.example.com HY2_EMAIL=me@example.com bash install.sh install
+```
+
+| 环境变量 | 取值说明 |
+| :--- | :--- |
+| `HY2_PORT` | 监听 UDP 端口，须为 1-65535 的整数。留空则自动选取 |
+| `HY2_PASSWORD` | 连接认证密码。留空则自动生成 |
+| `HY2_NODE_MODE` | `1` 单机（默认） / `2` 集群 Agent |
+| `HY2_CERT_TYPE` | `1` 自签名 / `2` 指定已有证书文件 / `3` 域名自动申请 Let's Encrypt / `4` 自动扫描本机已装证书 |
+| `HY2_DOMAIN` | 绑定域名（SNI）。**`HY2_CERT_TYPE=3` 时必填** |
+| `HY2_EMAIL` | Let's Encrypt 通知邮箱 |
+
+> ⚠️ `HY2_CERT_TYPE=2` **不适合纯无人值守**：它需要你再回答证书与私钥的文件路径。
+> 要做完全免交互请选 `1`、`3`（配 `HY2_DOMAIN`）或 `4`。
+>
+> 这些变量在**动工之前**就会校验，非法值会立即报错退出，不会装到一半才失败。
+
 ---
 
 ## 📋 控制台交互菜单
