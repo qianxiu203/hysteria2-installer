@@ -1315,29 +1315,63 @@ def serve(path):
             pass
 
     def reload_gost():
-        """通过 systemctl reload 或 SIGHUP 平滑重载 gost 配置. 未安装 gost 时静默跳过.
-        关键: reload 必须异步执行 (Popen + 短 timeout), 避免 gost 卡住导致 portal do_POST 永久挂起."""
+        """让 gost 重新读取 gost.yml. 未安装 gost 时静默跳过.
+
+        ⚠️ 这里有两个踩过的坑, 改动前务必读完:
+
+        坑 1 —— subprocess.run **不检查退出码**, 只在超时/找不到命令时抛异常.
+        因此早期写成:
+
+            try:
+                subprocess.run(['systemctl', 'reload', 'gost'], timeout=2)
+            except Exception:
+                ... kill -HUP ...
+                except Exception:
+                    ... restart ...
+
+        是**完全错的**: 当 unit 没有 ExecReload 时, systemctl 会打印
+        "Job type reload is not applicable for unit gost.service." 并且
+        **以退出码 3 正常返回** —— 不抛异常, 于是两个 fallback 成了永不执行的
+        死代码. 结果是: 配置写进了 gost.yml, 但 gost 进程从未重载, 新代理的端口
+        一直不监听. 现象极具误导性 —— `systemctl is-active gost` 是 active,
+        页面提示"创建成功", 但代理就是连不上.
+
+        坑 2 —— 判断"reload 是否可用"不能靠猜, 要实际执行后看返回码.
+        `systemctl reload` 在以下两种情况下行为完全不同:
+          - unit 有 ExecReload  -> CanReload=yes, 返回 0, 配置真正重载
+          - unit 没有 ExecReload -> CanReload=no,  返回 3, **什么都没做**
+        两种情况下 subprocess.run 都不抛异常, 所以**必须显式查 returncode**.
+
+        现行策略: 先试 reload, 返回码非 0 就退化为 restart (restart 一定生效).
+        另外 unit 里还配了 gost 官方的 `-R 30s` 周期自动重载作为第二重保险
+        (实测 v3.3.0 的 -R 有效: 改配置后 2 秒内自动重载并换端口).
+
+        保持异步执行 (daemon 线程 + 短 timeout), 避免 gost 卡住时把 portal 的
+        do_POST 一起拖死.
+        """
         if not gost_status():
             return
+        # 先自愈 unit: 老机器的 unit 可能没有 ExecReload (那样 reload 会静默失败).
+        ensure_gost_unit()
         write_gost_config()
-        # 异步触发 reload, 进程退出/超时都不阻塞 portal HTTP 响应
+
         def _do_reload():
+            # 第一优先: systemctl reload (平滑, 不断开现有连接).
+            # 必须查 returncode —— 见坑 1/2.
             try:
-                subprocess.run(['systemctl', 'reload', 'gost'],
-                               capture_output=True, timeout=2)
+                r = subprocess.run(['systemctl', 'reload', 'gost'],
+                                   capture_output=True, timeout=5)
+                if r.returncode == 0:
+                    return
             except Exception:
-                try:
-                    r = subprocess.run(['systemctl', 'show', '-p', 'MainPID', '--value', 'gost'],
-                                       capture_output=True, text=True, timeout=2)
-                    pid = r.stdout.strip()
-                    if pid.isdigit():
-                        subprocess.run(['kill', '-HUP', pid], capture_output=True, timeout=2)
-                except Exception:
-                    try:
-                        subprocess.run(['systemctl', 'restart', 'gost'],
-                                       capture_output=True, timeout=3)
-                    except Exception:
-                        pass
+                pass
+            # 退化路径: restart. 代价是断开当前连接, 但**一定**能生效.
+            try:
+                subprocess.run(['systemctl', 'restart', 'gost'],
+                               capture_output=True, timeout=10)
+            except Exception:
+                pass
+
         threading.Thread(target=_do_reload, daemon=True).start()
 
     # 远端根目录文件 sha 的短缓存。
@@ -1392,6 +1426,48 @@ def serve(path):
         except Exception:
             return False
 
+    def write_gost_selfcheck():
+        """把启动自检脚本写到 GOST_SELFCHECK_PATH (unit 的 ExecStartPost 调用).
+
+        install.sh 的 install_gost() 会写同一份内容; 这里再写一次是为了覆盖
+        "服务器上已装过旧版 gost、unit 却没有自检" 的情况。
+        """
+        try:
+            GOST_SELFCHECK_PATH.parent.mkdir(parents=True, exist_ok=True)
+            GOST_SELFCHECK_PATH.write_text(GOST_SELFCHECK_SCRIPT)
+            os.chmod(str(GOST_SELFCHECK_PATH), 0o755)
+        except OSError:
+            pass
+
+    def ensure_gost_unit():
+        """幂等地把 gost.service 补齐成当前标准内容（缺 ExecReload / -R / 自检就重写）.
+
+        为什么必须做：老机器上的 unit 是历史版本生成的（没有 ExecReload、
+        没有 -R、没有自检）。只在"一键安装 gost"时覆写 unit 是不够的 ——
+        老用户不重装就永远拿不到修复，而 reload_gost() 又依赖 unit 里的
+        ExecReload 才能平滑重载。所以每次改配置前先自愈一次。
+
+        判据用**逐项包含**而不是整体比较：comment 行的措辞变化不该触发重写，
+        真正影响行为的三项（ExecReload / -R / ExecStartPost）才是关键。
+        只在确实缺失时才写盘 + daemon-reload，避免无谓重启。
+        """
+        unit_path = Path('/etc/systemd/system/gost.service')
+        try:
+            current = unit_path.read_text() if unit_path.exists() else ''
+        except OSError:
+            return
+        needed = ('ExecReload=/bin/kill -HUP $MAINPID',
+                  '-R 30s',
+                  'ExecStartPost=' + GOST_SELFCHECK_PATH.as_posix())
+        if all(s in current for s in needed):
+            return                                   # 已是最新, 不做任何事
+        try:
+            write_gost_selfcheck()
+            unit_path.write_text(GOST_UNIT_CONTENT)
+            subprocess.run(['systemctl', 'daemon-reload'], capture_output=True, timeout=5)
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     # AmneziaWG (AWG) 支持
     #
@@ -1410,6 +1486,114 @@ def serve(path):
     AWG_SVC_NAME = 'amneziawg-server'
     # 当前运行的面板文件本身（用于与远端比对版本）
     PORTAL_SELF = Path(__file__).resolve()
+
+    # ------------------------------------------------------------------
+    # gost 入站代理的 systemd 单元
+    #
+    # ⚠️ 这份内容必须与 install.sh 里 install_gost() 写出的**完全一致**。
+    # 曾经两处不一致（install.sh 有 ExecReload、portal.py 没有），后果是:
+    # 门户走 reload_gost() 调 `systemctl reload gost` 时, 因为 unit 缺 ExecReload
+    # 而 CanReload=no, systemctl 返回码 3 且"什么都没做" —— 新代理端口永远不监听.
+    # tests/test_portal_gost_reload.py 有断言钉死两处一致, 改一处必须同步另一处.
+    #
+    # 三个要点:
+    #   1) `ExecReload=/bin/kill -HUP $MAINPID` —— gost v3 支持 SIGHUP 重载配置
+    #      (已实测: 改 gost.yml 后 kill -HUP, 端口 42197->42198 成功切换).
+    #   2) `-R 30s` —— gost 官方的周期自动重载. 这是**兜底**: 即使门户侧的
+    #      reload/restart 因任何原因失败, 配置也会在 30 秒内自动生效.
+    #      实测 v3.3.0 有效 (改配置后 2 秒内完成重载).
+    #   3) `ExecStartPost` 轮询 ss 确认端口已监听 —— 把"active 但无监听"的
+    #      静默故障变成**启动失败**, 从而触发 systemd 重试而不是假装健康.
+    # ------------------------------------------------------------------
+    # 启动自检脚本: 从 gost.yml 解析出所有监听端口, 逐个确认已监听.
+    # 无代理配置 (services 为空) 时直接放行 —— 那是合法状态.
+    # 目的: 把"systemd 说 active、实际没监听"的静默故障转成**启动失败**, 交给 systemd 重试.
+    #
+    # 写成独立脚本文件 (/usr/local/lib/hy2-gost-selfcheck) 而不是塞进 unit 的
+    # ExecStartPost 一行里, 是因为后者要嵌套四层引号 (systemd -> sh -c -> python3 -c
+    # -> JSON), 极难读也极易写错. 独立文件把复杂度降到一层.
+    GOST_SELFCHECK_PATH = Path('/usr/local/lib/hy2-gost-selfcheck')
+    GOST_SELFCHECK_SCRIPT = '''#!/usr/bin/env python3
+"""确认 /etc/hysteria/gost.yml 里声明监听的服务端口都真的在监听.
+
+由 gost.service 的 ExecStartPost 调用. 无代理配置时返回 0 (合法状态).
+任何端口 5 秒内未监听 -> 返回 1, 使 systemd 判定本次启动失败并重试,
+而不是留下一个 "active 但无监听" 的假健康状态.
+"""
+import json
+import socket
+import sys
+import time
+
+CFG = '/etc/hysteria/gost.yml'
+
+
+def listening(port):
+    for fam, addr in ((socket.AF_INET, '127.0.0.1'), (socket.AF_INET6, '::1')):
+        s = socket.socket(fam, socket.SOCK_STREAM)
+        try:
+            s.settimeout(1)
+            if s.connect_ex((addr, port)) == 0:
+                return True
+        except OSError:
+            pass
+        finally:
+            s.close()
+    return False
+
+
+def main():
+    try:
+        with open(CFG, encoding='utf-8') as fh:
+            svc = json.load(fh).get('services') or []
+    except Exception as exc:                     # 配置读不了 -> 交给 gost 自己报错
+        print('selfcheck: 无法读取配置: %s' % exc, file=sys.stderr)
+        return 0
+
+    ports = []
+    for s in svc:
+        addr = str(s.get('addr') or '')
+        tail = addr.rsplit(':', 1)[-1]
+        if tail.isdigit():
+            ports.append(int(tail))
+    ports = sorted(set(ports))
+    if not ports:
+        return 0                                  # 尚无代理, 合法
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        missing = [p for p in ports if not listening(p)]
+        if not missing:
+            return 0
+        time.sleep(0.5)
+    print('selfcheck: 端口未监听: %s' % missing, file=sys.stderr)
+    return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
+'''
+
+    GOST_UNIT_CONTENT = (
+        '[Unit]\n'
+        'Description=GOST Proxy Service (SOCKS5/HTTP/HTTPS inbound)\n'
+        'After=network-online.target\n'
+        'Wants=network-online.target\n'
+        '\n'
+        '[Service]\n'
+        'Type=simple\n'
+        'ExecStart=/usr/local/bin/gost -C /etc/hysteria/gost.yml -R 30s\n'
+        '# 平滑重载: gost v3 收到 SIGHUP 会重新读取 -C 指定的配置文件\n'
+        'ExecReload=/bin/kill -HUP $MAINPID\n'
+        'Restart=always\n'
+        'RestartSec=3\n'
+        'LimitNOFILE=65535\n'
+        '# 启动自检: 确认 gost.yml 里声明的端口都真的监听了, 否则视为启动失败\n'
+        'ExecStartPost=' + GOST_SELFCHECK_PATH.as_posix() + '\n'
+        '\n'
+        '[Install]\n'
+        'WantedBy=multi-user.target\n'
+    )
 
     def awg_read_json(path, default):
         try:
@@ -2361,19 +2545,9 @@ def serve(path):
                                                  'error': '下载或解压 GOST 失败 —— ' + ' ｜ '.join(errors)})
 
                 # 确保 systemd 服务存在
-                service_content = '''[Unit]
-Description=GOST Proxy Service (SOCKS5/HTTP/HTTPS inbound)
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/gost -C /etc/hysteria/gost.yml
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-'''
+                # 先落地启动自检脚本 (unit 的 ExecStartPost 会调用它), 再写 unit.
+                write_gost_selfcheck()
+                service_content = GOST_UNIT_CONTENT
                 Path('/etc/systemd/system/gost.service').write_text(service_content)
                 subprocess.run(['systemctl', 'daemon-reload'], capture_output=True)
                 subprocess.run(['systemctl', 'enable', 'gost'], capture_output=True)
@@ -2382,6 +2556,11 @@ WantedBy=multi-user.target
                 write_gost_config()
                 subprocess.run(['systemctl', 'restart', 'gost'], capture_output=True, timeout=10)
 
+                # 核实真的起来了 —— 不谎报成功 (见技能 §12).
+                # `is-active` 为 active 但端口未绑定, 是本项目踩过的静默故障.
+                if not gost_status():
+                    return self.reply_json(500, {'ok': False,
+                                                 'error': 'GOST 已安装但服务未启动成功，请查看 journalctl -u gost -n 20'})
                 return self.reply_json(200, {'ok': True, 'message': f'GOST {tag} 官方核心安装成功，服务已自动配置并启动！'})
             except Exception as e:
                 return self.reply_json(500, {'ok': False, 'error': f'执行异常: {str(e)}'})

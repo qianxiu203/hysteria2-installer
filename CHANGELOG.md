@@ -2,6 +2,67 @@
 
 ## 未发布
 
+### 修复：门户新建 gost 入站代理后端口一直不监听（`reload_gost()` 静默失效）
+- **现象（真实故障）**：在门户里新建 HTTP / SOCKS5 代理，页面提示「创建成功」、
+  二维码和连接串都正常显示，但**代理就是连不上** —— 对应的端口从未被监听。
+  `systemctl is-active gost` 是 `active`，`journalctl` 里也没有任何错误，极具误导性。
+- **根因**：`reload_gost()` 依赖 `subprocess.run` 的**异常**来判断 reload 是否成功：
+
+  ```python
+  try:
+      subprocess.run(['systemctl', 'reload', 'gost'], timeout=2)
+  except Exception:            # ← 以为失败会抛异常
+      ... kill -HUP ...
+      except Exception:
+          ... restart ...
+  ```
+
+  但 `subprocess.run` **不检查退出码**，只在超时或找不到命令时才抛异常。
+  而 `portal.py` 生成的 unit **没有 `ExecReload`**（`CanReload=no`），
+  此时 `systemctl reload` 会打印
+  `Job type reload is not applicable for unit gost.service.`
+  并且**以退出码 3 正常返回** —— 不抛异常。
+  于是 `kill -HUP` 与 `restart` 两个 fallback **全是永不执行的死代码**。
+  结果：`gost.yml` 写进了新服务，gost 进程却从未重载。
+- **实测证据（服务器上复现）**：
+  ```
+  systemctl reload gost                    -> 退出码 3
+  subprocess.run(...)                      -> 不抛异常, returncode=3
+  写配置含 :42194 后等 3 秒                -> ss 里没有 42194   ← BUG
+  ```
+- **修法（四层防护，每一层都单独能救场）**：
+  1. **`reload_gost()` 显式检查 `returncode`**：返回 0 才算成功，否则退化为
+     `systemctl restart`（restart 一定生效）。不再依赖异常判断，也删掉了
+     那套手工 `kill -HUP` 的死代码。
+  2. **unit 加 `ExecReload=/bin/kill -HUP $MAINPID`** —— gost v3 支持 SIGHUP 重载
+     配置（实测：改 `gost.yml` 后 `kill -HUP`，端口 42197 → 42198 成功切换）。
+  3. **unit 的 `ExecStart` 加 `-R 30s`** —— gost 官方的周期自动重载，作为兜底。
+     实测 v3.3.0 有效（改配置后 2 秒内完成重载）。即使门户侧 reload / restart
+     全部失败，配置也会在 30 秒内自动生效。
+  4. **unit 加 `ExecStartPost` 启动自检**（`/usr/local/lib/hy2-gost-selfcheck`）：
+     解析 `gost.yml` 里声明的端口，逐个确认真的在监听；任一端口 5 秒内未监听
+     就返回非 0 —— 把「`active` 但无监听」的**假健康**变成**启动失败**，
+     交给 systemd 重试。无代理配置时放行（那是合法状态）。
+- **顺带修掉的两处不一致 / 隐患**：
+  - `install.sh` 与 `portal.py` 生成的 unit **此前不一致**（前者有 `ExecReload`、
+    后者没有），这正是「命令行装的 gost 能被 reload、门户装的不能」的原因。
+    现在统一为一处定义、两处逐字节一致，并加了断言钉死。
+  - 新增 **`ensure_gost_unit()`**：每次改配置前幂等自愈 unit。
+    否则**老机器不重装就永远拿不到修复** —— 它们的 unit 缺 `ExecReload`，
+    reload 会一直静默失败。自愈判据用「逐项包含」而非整体比对，
+    避免注释措辞变化触发无谓重写。
+  - `Path.as_posix()` 替代 `str(Path)` 拼接 unit 内容：
+    后者在 Windows 上会把路径渲染成反斜杠（`\usr\local\lib\...`）。
+- 新增 `tests/test_portal_gost_reload.py`（**15 项**）：
+  锁死「reload 必须看 `returncode`」「两处 unit 必须一致且含三项关键配置」
+  「自检脚本在端口未监听时必须返回非 0」。
+  做过两组反向验证：① 去掉 `returncode` 检查 → 2 项失败；
+  ② 去掉 `-R 30s` → 2 项失败（含两处一致性断言）。
+- **真机端到端验证（us 节点）**：走门户 API 新建代理 → 新端口 42188 在 4 秒内
+  成功监听；经该代理 `curl https://api.ipify.org` 返回 `200` 与出口 IP；
+  错误密码被拒（HTTP 000）；删除代理后端口正常关闭；
+  `systemctl show -p CanReload gost` 由 `no` 变为 **`yes`**。
+
 ### 修复：订阅链接端口兜底成伪造的 8443，导致客户端导入失败
 - **现象**：面板生成的 Clash 订阅链接指向 `:8443`，而机器上**根本没有 8443 在监听**，
   客户端只报一句笼统的「订阅导入失败」，用户完全无从下手。

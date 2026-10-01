@@ -1498,19 +1498,100 @@ services: []
 EOF
     fi
 
-    # 创建 systemd 守护服务（支持 SIGHUP 热重载）
+    # 落盘启动自检脚本 (unit 的 ExecStartPost 会调用它)
+    # ⚠️ 内容必须与 portal.py 的 GOST_SELFCHECK_SCRIPT 常量一致
+    # (tests/test_portal_gost_reload.py 有断言钉死).
+    mkdir -p /usr/local/lib
+    cat > /usr/local/lib/hy2-gost-selfcheck <<'PYSELFCHECK'
+#!/usr/bin/env python3
+"""确认 /etc/hysteria/gost.yml 里声明监听的服务端口都真的在监听.
+
+由 gost.service 的 ExecStartPost 调用. 无代理配置时返回 0 (合法状态).
+任何端口 5 秒内未监听 -> 返回 1, 使 systemd 判定本次启动失败并重试,
+而不是留下一个 "active 但无监听" 的假健康状态.
+"""
+import json
+import socket
+import sys
+import time
+
+CFG = '/etc/hysteria/gost.yml'
+
+
+def listening(port):
+    for fam, addr in ((socket.AF_INET, '127.0.0.1'), (socket.AF_INET6, '::1')):
+        s = socket.socket(fam, socket.SOCK_STREAM)
+        try:
+            s.settimeout(1)
+            if s.connect_ex((addr, port)) == 0:
+                return True
+        except OSError:
+            pass
+        finally:
+            s.close()
+    return False
+
+
+def main():
+    try:
+        with open(CFG, encoding='utf-8') as fh:
+            svc = json.load(fh).get('services') or []
+    except Exception as exc:                     # 配置读不了 -> 交给 gost 自己报错
+        print('selfcheck: 无法读取配置: %s' % exc, file=sys.stderr)
+        return 0
+
+    ports = []
+    for s in svc:
+        addr = str(s.get('addr') or '')
+        tail = addr.rsplit(':', 1)[-1]
+        if tail.isdigit():
+            ports.append(int(tail))
+    ports = sorted(set(ports))
+    if not ports:
+        return 0                                  # 尚无代理, 合法
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        missing = [p for p in ports if not listening(p)]
+        if not missing:
+            return 0
+        time.sleep(0.5)
+    print('selfcheck: 端口未监听: %s' % missing, file=sys.stderr)
+    return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
+PYSELFCHECK
+    chmod 755 /usr/local/lib/hy2-gost-selfcheck
+
+    # 创建 systemd 守护服务
+    # ⚠️ 这份内容必须与 portal.py 的 GOST_UNIT_CONTENT 常量**完全一致**
+    # （门户"一键安装 gost"会覆写同一个 unit）。曾经两处不一致 —— install.sh 有
+    # ExecReload 而 portal.py 没有 —— 导致门户创建的 gost 无法被 reload，
+    # 新加代理的端口一直不监听。tests/test_portal_gost_reload.py 有断言钉死一致性。
+    #
+    # 三个要点：
+    #   ExecReload  —— gost v3 收到 SIGHUP 会重读配置（实测有效）
+    #   -R 30s      —— gost 官方周期自动重载，作为兜底（实测 v3.3.0 有效）
+    #   ExecStartPost —— 跑自检脚本确认端口真的监听了，把"active 但无监听"
+    #                    的静默故障变成启动失败，交给 systemd 重试
     cat > /etc/systemd/system/gost.service <<EOF
 [Unit]
 Description=GOST Proxy Service (SOCKS5/HTTP/HTTPS inbound)
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${GOST_BIN} -C ${GOST_CONFIG}
+ExecStart=${GOST_BIN} -C ${GOST_CONFIG} -R 30s
+# 平滑重载: gost v3 收到 SIGHUP 会重新读取 -C 指定的配置文件
 ExecReload=/bin/kill -HUP \$MAINPID
 Restart=always
 RestartSec=3
 LimitNOFILE=65535
+# 启动自检: 确认 gost.yml 里声明的端口都真的监听了, 否则视为启动失败
+ExecStartPost=/usr/local/lib/hy2-gost-selfcheck
 
 [Install]
 WantedBy=multi-user.target
@@ -1519,6 +1600,7 @@ EOF
     systemctl daemon-reload
     systemctl enable gost >/dev/null 2>&1
     systemctl restart gost
+    # 核实服务真的在跑（不谎报成功）
     sleep 1
     if systemctl is-active --quiet gost; then
         log_info "gost 入站代理引擎安装成功！现在可在 Web 控制台添加 SOCKS5/HTTP/HTTPS 代理账号。"
