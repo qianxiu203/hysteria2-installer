@@ -164,7 +164,26 @@ def resolve_subscription_port(m, config_path='/etc/hysteria/config.yaml'):
     return 443, 'fallback'
 
 
-def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token="", session_secret=""):
+def portal_access_payload(url, username, password, api_key):
+    """portal-access.json 的**唯一**构造点。
+
+    这里必须收敛成一个函数，因为同一个负载现在有两个消费者：
+
+      1. prepare()  —— 原子写盘成 /etc/hysteria/portal-access.json
+      2. page_html() —— 渲染成「接入 TEYIR 控制台」卡片上那个「复制整份凭据」按钮
+
+    两者若各写各的，字段顺序或分隔符一旦漂移，操作者从面板复制出来的就不再是
+    磁盘上那份文件的内容 —— 而它俩看起来一模一样，出问题时极难察觉。
+    收成一个函数后，「面板上复制的 == 磁盘上的 == 控制台解析的」由构造保证，
+    不再依赖谁记得同步。
+
+    注意 dict 的插入顺序就是 json.dumps 的输出顺序，改成别的顺序会改变字节。
+    """
+    return dict(url=url, username=username, password=password, api_key=api_key)
+
+
+def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token="", session_secret="",
+              username="", password=""):
     def field(identifier, value, kind="link"):
         return f'<textarea id="{identifier}" class="{kind}" aria-label="{identifier}" readonly spellcheck="false">{html.escape(value)}</textarea>'
     def copy(identifier):
@@ -262,6 +281,69 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
     field_sing_cfg = field("sing-config", sing, "config")
     copy_sing_cfg = copy("sing-config")
 
+    # 接入 TEYIR 控制台（hy2-ops-console）用的四个字段。
+    #
+    # 设计要点：username/password 本来就已经以明文出现在本页的订阅链接里
+    # （field_sub = clash-subscription 那条 https://user:password@host:port/…），
+    # 而本页本身又必须通过 Basic 鉴权才打得开 —— 能看到这一页的人，手上必然
+    # 已经有这对凭据。所以把四项单列出来**没有引入任何新的暴露面**，
+    # 只是把「翻 SSH cat 文件」换成「点一下复制」。
+    #
+    # 反过来，绝不能把这份负载挂到 /api/v1/ 的 Bearer 链路上去：api_key 的权限
+    # 明确低于 Basic（前者够不着门户网页端），用低权限凭据换高权限凭据就是提权。
+    access_url = f"https://{host}:{sub_port}/{token}/"
+    access_json = json.dumps(
+        portal_access_payload(access_url, username, password, api_key or ""),
+        ensure_ascii=False)
+    field_access_json = (
+        f'<textarea id="teyir-access-json" class="config" aria-label="teyir-access-json" '
+        f'readonly spellcheck="false" style="height:92px">{html.escape(access_json)}</textarea>')
+    copy_access_json = copy("teyir-access-json")
+
+    def _access_row(identifier, label, value):
+        """克隆既有 api-box 的结构，保持与「API 基础地址」一行完全一致的观感。"""
+        return (f'<div class="api-box"><div><div style="font-size:11px;color:var(--muted);'
+                f'font-weight:700">{label}</div>'
+                f'<div class="api-key-code" id="{identifier}">{html.escape(value)}</div></div>'
+                f'<button class="button" type="button" data-copy="{identifier}" '
+                f'data-orig="复制">复制</button></div>')
+
+    teyir_block = f"""
+<section class="card" id="teyir-join-card" style="border-left:4px solid var(--accent)">
+  <div class="card-head"><span class="step">面板</span><div>
+    <h2>接入 TEYIR 控制台（一键复制）</h2>
+    <p>把整份凭据粘到控制台的「添加节点」输入框，就不必再 SSH 上机器 cat 文件</p>
+  </div></div>
+
+  <div class="api-box" style="align-items:flex-start">
+    <div style="flex:1;min-width:0">
+      <div style="font-size:11px;color:var(--muted);font-weight:700">整份 portal-access.json（推荐：一次粘好全部字段）</div>
+      {field_access_json}
+    </div>
+    {copy_access_json}
+  </div>
+
+  <details style="margin-top:6px">
+    <summary class="hint" style="cursor:pointer">或按字段单独复制（控制台里手工填写时才需要）</summary>
+    <div style="display:grid;gap:10px;margin-top:12px">
+      {_access_row("teyir-url-val", "门户地址 url", access_url)}
+      {_access_row("teyir-user-val", "门户用户名 username", username)}
+      {_access_row("teyir-pass-val", "门户密码 password", password)}
+      {_access_row("teyir-key-val", "api_key（Bearer 鉴权）", api_key or "")}
+    </div>
+  </details>
+
+  <p class="hint" style="margin-top:12px">
+    这四项与 <code>/etc/hysteria/portal-access.json</code> 完全一致。控制台侧：
+    「节点」→「添加节点」→ 把上面整份 JSON 粘进<strong>整份 portal-access.json</strong> 输入框 →
+    点「读取节点信息」→ 保存。登记后即可在面板里管理用户、代理服务、版本升级、BBR、Reality、WARP、
+    AmneziaWG 与组件安装，<strong>无需 SSH 密钥或密码</strong>。
+    <br>api_key 走 Bearer，权限较低（够不着门户网页端）；username + password 走 HTTP Basic，
+    才是门户管理员凭据。两者请都按密码对待。
+  </p>
+</section>
+"""
+
     return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>HY2 · 节点与集群中心</title><style>{STYLE}</style></head><body><main>
 <nav class="topbar" aria-label="页面标识"><div class="brand"><span class="logo">H₂</span> HYSTERIA <span> / 控制中心</span></div><span class="private">● 集群运行中</span></nav>
 <header class="hero"><div class="eyebrow">HYSTERIA 2 NODE DASHBOARD</div><h1>{html.escape(server_name)}</h1><p>官方核心驱动 · 极速 QUIC 代理 · 多用户开户与流量/IP限制</p></header>
@@ -272,7 +354,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
   <button class="tab-btn" data-tab="users">👥 多用户管理 ({active_count}/{len(users)})</button>
   <button class="tab-btn" data-tab="proxies">🧩 代理 · WARP · AWG</button>
   <button class="tab-btn" data-tab="reality">🛡️ VLESS-Reality (备用)</button>
-  <button class="tab-btn" data-tab="cluster">🔑 通用 REST API 对接</button>
+  <button class="tab-btn" data-tab="cluster">🔑 接入控制台 / REST API</button>
   <button class="tab-btn" data-tab="configs">⚙️ 高级配置</button>
 </div>
 
@@ -697,6 +779,8 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
 
 <!-- Tab 3: 集群与通用 REST API 对接视图 -->
 <div class="tab-pane" id="pane-cluster">
+{teyir_block}
+
   <section class="card" style="border-left:4px solid var(--accent)">
     <div class="card-head"><span class="step">API</span><div><h2>通用 REST API 接口与集群对接凭据</h2><p>支持接入任何自动化发卡商城、用户控制中心或第三方管理系统</p></div></div>
     
@@ -1187,13 +1271,14 @@ def prepare(meta_path, port, node_api_key=None):
             'note': 'Master Admin'
         }
     }
-    page = page_html(m, uri, subscription, clash, sing, users=users, api_key=api_key, token=token, session_secret=session_secret)
+    page = page_html(m, uri, subscription, clash, sing, users=users, api_key=api_key, token=token, session_secret=session_secret,
+                     username=user, password=password)
     auth = base64.b64encode(f'{user}:{password}'.encode())
 
     data = dict(port=int(port), token=token, auth_hash=hashlib.sha256(auth).hexdigest(),
                 session_secret=session_secret, api_key=api_key, users=users,
                 proxy_services=[], page=page, qr=qr.decode(), clash=clash, sing=sing)
-    for filename, value in [('portal.json', data), ('portal-access.json', dict(url=base, username=user, password=password, api_key=api_key))]:
+    for filename, value in [('portal.json', data), ('portal-access.json', portal_access_payload(base, user, password, api_key))]:
         path = root / filename
         path.write_text(json.dumps(value, ensure_ascii=False))
         path.chmod(0o600)
@@ -1232,7 +1317,8 @@ def refresh(meta_path):
         }
     if 'proxy_services' not in data:
         data['proxy_services'] = []
-    data['page'] = page_html(m, uri, subscription, clash, sing, users=data['users'], api_key=data['api_key'], token=data['token'], session_secret=data.get('session_secret', ''))
+    data['page'] = page_html(m, uri, subscription, clash, sing, users=data['users'], api_key=data['api_key'], token=data['token'], session_secret=data.get('session_secret', ''),
+                             username=access.get('username', ''), password=access.get('password', ''))
     
     temporary = path.with_suffix('.tmp')
     temporary.write_text(json.dumps(data, ensure_ascii=False))
@@ -1758,7 +1844,8 @@ if __name__ == '__main__':
                 u_copy['online_ips'] = user_ips
                 display_users[uid] = u_copy
 
-            data['page'] = page_html(m, uri, subscription, clash, sing, users=display_users, api_key=data.get('api_key'), token=data['token'], session_secret=session_secret)
+            data['page'] = page_html(m, uri, subscription, clash, sing, users=display_users, api_key=data.get('api_key'), token=data['token'], session_secret=session_secret,
+                                     username=access.get('username', ''), password=access.get('password', ''))
         save_data()
 
     def sign_session(token):
