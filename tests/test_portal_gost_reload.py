@@ -174,9 +174,86 @@ class ReloadGostChecksReturncode(unittest.TestCase):
                       '已装机的旧 unit 缺 ExecReload，reload 会一直静默失败')
 
 
+class ReloadGostStartsWhenInactive(unittest.TestCase):
+    """gost 已装但未运行时，写配置后必须把它拉起来（而不是静默跳过）。
+
+    来源事故（2026-10-01 在 jp2 节点实测定位）：
+    控制台「代理服务 → 新建代理」创建成功、条目也出现在页面上，
+    但对应端口一直不监听 —— 因为机器上 gost 处于 inactive，
+    而旧逻辑第一行就是：
+
+        if not gost_status():
+            return                     # ← 未运行就什么都不做
+
+    于是配置没写、服务没起，但调用方拿到的是 ok=true。
+    现象与「reload 不查 returncode」高度相似（页面说成功、代理连不上），
+    区别在于这次连 gost.yml 都没被写。
+
+    时间线证据（tokyo 57.181.25.17）：
+        19:55:00  控制台创建代理成功，条目入库
+        19:55~19:57  gost 无任何启动记录（静默 return）
+        19:57:14  gost 才被后续手动操作拉起     ← 不是 add 拉起的
+    """
+
+    def setUp(self):
+        tree = ast.parse(PORTAL_SRC)
+        self.fn = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == 'reload_gost':
+                self.fn = node
+        self.assertIsNotNone(self.fn, 'portal.py 里找不到 reload_gost')
+        body = list(self.fn.body)
+        if (body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            body = body[1:]                      # 去掉 docstring
+        self.code = '\n'.join(
+            ast.get_source_segment(PORTAL_SRC, n) or '' for n in body)
+
+    def test_skip_guard_is_binary_presence_not_running_state(self):
+        """跳过条件必须只看「二进制是否存在」，不能看服务是否在跑。
+
+        用 AST 找顶层 `if not gost_status(): return` 这个形状 ——
+        它正是"未运行就静默跳过"的元凶。
+        """
+        offenders = []
+        for node in ast.walk(self.fn):
+            if not isinstance(node, ast.If):
+                continue
+            src = ast.get_source_segment(PORTAL_SRC, node) or ''
+            # 只有「单个 return」的守卫才是致命的；带 else 分支的处理不算
+            if ('gost_status' in src and 'not ' in src
+                    and len(node.body) == 1 and isinstance(node.body[0], ast.Return)
+                    and not node.orelse
+                    and '/usr/local/bin/gost' not in src):
+                offenders.append(src.splitlines()[0].strip())
+        self.assertEqual(
+            offenders, [],
+            'reload_gost 仍在「gost 未运行就直接 return」：已装但没跑时应写配置并 '
+            '拉起服务，否则控制台报成功、端口却不监听')
+
+    def test_skips_only_when_binary_missing(self):
+        """唯一合法的跳过理由是二进制不存在。"""
+        self.assertIn('/usr/local/bin/gost', self.code,
+                      'reload_gost 应以「gost 二进制是否存在」作为跳过判据')
+
+    def test_writes_config_unconditionally(self):
+        """写配置必须在状态判断**之前**、且不在任何 if 分支内无条件执行。
+
+        旧代码把整个流程卡在 `if not gost_status(): return` 之后，
+        导致"没跑 = 连配置都不写"。这里断言 write_gost_config 出现在
+        gost_status 之前，确保它不再被运行状态门禁挡住。
+        """
+        idx_cfg = self.code.find('write_gost_config')
+        self.assertNotEqual(idx_cfg, -1, 'reload_gost 没有调用 write_gost_config')
+        idx_status = self.code.find('gost_status')
+        self.assertTrue(
+            idx_status == -1 or idx_cfg < idx_status,
+            'write_gost_config 出现在 gost_status 之后：写配置不该被运行状态门禁挡住')
+
+
 class GostUnitConsistency(unittest.TestCase):
     """install.sh 与 portal.py 生成的 unit 必须一致，且含三项关键配置。"""
-
     def setUp(self):
         self.portal_unit = _const('GOST_UNIT_CONTENT')
         self.shell_unit = _shell_unit()

@@ -1403,7 +1403,14 @@ def serve(path):
     def reload_gost():
         """让 gost 重新读取 gost.yml. 未安装 gost 时静默跳过.
 
-        ⚠️ 这里有两个踩过的坑, 改动前务必读完:
+        ⚠️ 这里踩过三个坑, 改动前务必读完:
+
+        坑 0 —— 「未运行就不管」是错的. 2026-10-01 真实事故: 机器装了 gost 但
+        服务处于 inactive（重启后 enabled 但被手工停过 / 首次创建代理时还没起过）,
+        旧逻辑 `if not gost_status(): return` 直接静默返回 —— 配置没写、服务没起,
+        控制台却提示"创建成功", 端口永远不监听. 正确行为: **已安装但未运行时,
+        写好配置并 systemctl start**（安装了二进制就代表能力存在, 起不来再报错）.
+        只有「二进制不存在」才静默跳过.
 
         坑 1 —— subprocess.run **不检查退出码**, 只在超时/找不到命令时抛异常.
         因此早期写成:
@@ -1428,30 +1435,34 @@ def serve(path):
           - unit 没有 ExecReload -> CanReload=no,  返回 3, **什么都没做**
         两种情况下 subprocess.run 都不抛异常, 所以**必须显式查 returncode**.
 
-        现行策略: 先试 reload, 返回码非 0 就退化为 restart (restart 一定生效).
+        现行策略: 二进制不存在 -> 静默跳过; 已安装但 inactive -> 写配置并 start;
+        运行中 -> 先试 reload, 返回码非 0 就退化为 restart (restart 一定生效).
         另外 unit 里还配了 gost 官方的 `-R 30s` 周期自动重载作为第二重保险
         (实测 v3.3.0 的 -R 有效: 改配置后 2 秒内自动重载并换端口).
 
         保持异步执行 (daemon 线程 + 短 timeout), 避免 gost 卡住时把 portal 的
         do_POST 一起拖死.
         """
-        if not gost_status():
-            return
+        if not Path('/usr/local/bin/gost').exists():
+            return                                  # 未安装: 静默跳过 (唯一合法的跳过理由)
         # 先自愈 unit: 老机器的 unit 可能没有 ExecReload (那样 reload 会静默失败).
         ensure_gost_unit()
         write_gost_config()
 
         def _do_reload():
-            # 第一优先: systemctl reload (平滑, 不断开现有连接).
+            active = gost_status()
+            # 第一优先: 服务在运行则平滑 reload (不断开现有连接).
             # 必须查 returncode —— 见坑 1/2.
-            try:
-                r = subprocess.run(['systemctl', 'reload', 'gost'],
-                                   capture_output=True, timeout=5)
-                if r.returncode == 0:
-                    return
-            except Exception:
-                pass
-            # 退化路径: restart. 代价是断开当前连接, 但**一定**能生效.
+            if active:
+                try:
+                    r = subprocess.run(['systemctl', 'reload', 'gost'],
+                                       capture_output=True, timeout=5)
+                    if r.returncode == 0:
+                        return
+                except Exception:
+                    pass
+            # 退化路径: inactive 未被上面 start 兜住 / reload 不可用 / reload 失败.
+            # restart 对三种状态都有效 (inactive 时等价于 start), 代价是断当前连接.
             try:
                 subprocess.run(['systemctl', 'restart', 'gost'],
                                capture_output=True, timeout=10)
@@ -2251,14 +2262,24 @@ if __name__ == '__main__':
                     return self.reply_json(200, {
                         'ok': True, 'id': proxy_id, 'type': ptype, 'host': host, 'port': port,
                         'username': username, 'password': password, 'note': note,
-                        'url': uri_link, 'format': f"{host}:{port}:{username}:{password}"
+                        'url': uri_link, 'format': f"{host}:{port}:{username}:{password}",
+                        'gost_active': gost_status(),
                     })
 
                 elif sub == 'proxy-services/list':
                     with data_lock:
                         items = list(data.get('proxy_services', []))
+                    m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+                    host = m.get('public_ip', '127.0.0.1') if m.get('is_insecure') else m.get('server_name', 'localhost')
                     # 不脱敏 password, 调用方是受信 API key
-                    return self.reply_json(200, {'ok': True, 'count': len(items), 'services': items})
+                    return self.reply_json(200, {
+                        'ok': True,
+                        'count': len(items),
+                        'gost_installed': Path('/usr/local/bin/gost').exists(),
+                        'gost_active': gost_status(),
+                        'host': host,
+                        'services': items,
+                    })
 
                 elif sub == 'proxy-services/delete':
                     proxy_id = (params.get('id') or '').strip()
@@ -3390,7 +3411,18 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
                 if sub == 'proxy-services/list':
                     with data_lock:
                         items = list(data.get('proxy_services', []))
-                    return self.reply_json(200, {'ok': True, 'count': len(items), 'services': items})
+                    # 面板只看这条 API: 补齐 host 与 gost 运行状态,
+                    # 否则列表显示不出主机名, 也无法区分"服务真的可用"和"条目存在".
+                    m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+                    host = m.get('public_ip', '127.0.0.1') if m.get('is_insecure') else m.get('server_name', 'localhost')
+                    return self.reply_json(200, {
+                        'ok': True,
+                        'count': len(items),
+                        'gost_installed': Path('/usr/local/bin/gost').exists(),
+                        'gost_active': gost_status(),
+                        'host': host,
+                        'services': items,
+                    })
                 return self.reply_json(404, {'ok': False, 'error': 'API endpoint not found'})
 
             if not self.check_rate_limit(bucket='web'):
