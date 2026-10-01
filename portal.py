@@ -43,6 +43,11 @@ except ImportError as _e:      # pragma: no cover - 只在部署缺文件时触�
         '修复：重新执行一次安装 / 更新（bash install.sh install 或门户里的「更新」）。' % _e
     )
 
+# 机主账号。它的 password 就是 Hysteria 的 auth_password —— /auth 是遍历
+# data['users'] 按密码匹配的，这条记录一旦被删，主密码立刻变成 "User not found"，
+# 机主本人都会被踢下线且再也连不上（只能重装）。因此全站禁止注销它。
+MASTER_USER_ID = 'admin_master'
+
 
 def strip_acl_block(text):
     """去掉 Hysteria config.yaml 里的 acl: 块，保留其余【所有】内容。
@@ -237,11 +242,12 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
           <td><code style="font-size:11px">{html.escape(u.get("password","")[:4] + "****" + u.get("password","")[-4:])}</code></td>
           <td>
             <button class="button primary btn-user-connect" style="padding:4px 10px;font-size:11px;margin-right:6px" type="button" data-uid="{html.escape(uid)}" data-token="{token}" data-key="{user_key}">专属连接</button>
-            <form method="POST" action="/{token}/manage-user" style="display:inline" onsubmit="return confirm('确定注销此用户？')">
+            {'' if uid == MASTER_USER_ID else f'''<form method="POST" action="/{token}/manage-user" style="display:inline" class="js-confirm-delete" data-confirm="确定注销此用户？此操作不可撤销。">
               <input type="hidden" name="action" value="delete">
               <input type="hidden" name="user_id" value="{html.escape(uid)}">
               <button class="button danger" style="padding:4px 10px;font-size:11px" type="submit">删除</button>
-            </form>
+            </form>'''}
+            {'<span style="font-size:11px;color:var(--muted)">机主账号不可注销</span>' if uid == MASTER_USER_ID else ''}
           </td>
         </tr>""")
 
@@ -931,7 +937,7 @@ def login_html(token, error_msg=None):
 <form class="login-form" method="POST" action="/{token}/login">
 {error_banner}
 <div class="field-group"><label class="field-label" for="username">用户名 (Username)</label><input class="field-input" id="username" name="username" type="text" autocomplete="username" required autofocus placeholder="输入随机生成的用户名"></div>
-<div class="field-group"><div class="field-label"><label for="password">密码 (Password)</label></div><div class="field-pwd"><input class="field-input" id="password" name="password" type="password" autocomplete="current-password" required placeholder="输入访问密钥"><button type="button" class="toggle-pwd" onclick="toggleSecret('password', this)">显示</button></div></div>
+<div class="field-group"><div class="field-label"><label for="password">密码 (Password)</label></div><div class="field-pwd"><input class="field-input" id="password" name="password" type="password" autocomplete="current-password" required placeholder="输入访问密钥"><button type="button" class="toggle-pwd">显示</button></div></div>
 <div class="remember-row"><input type="checkbox" id="remember" name="remember" value="1" checked><label for="remember">在此浏览器保持登录（30天）</label></div>
 <button class="btn-submit" type="submit">立即进入私密中心 →</button>
 </form>
@@ -1170,7 +1176,7 @@ def prepare(meta_path, port, node_api_key=None):
     api_key = node_api_key or secrets.token_hex(24)
 
     users = {
-        'admin_master': {
+        MASTER_USER_ID: {
             'password': m['auth_password'],
             'expires_at': 2085974400,
             'ip_limit': 0,
@@ -1213,7 +1219,7 @@ def refresh(meta_path):
         (root / 'portal-access.json').write_text(json.dumps(access, ensure_ascii=False))
     if 'users' not in data:
         data['users'] = {
-            'admin_master': {
+            MASTER_USER_ID: {
                 'password': m['auth_password'],
                 'expires_at': 2085974400,
                 'ip_limit': 0,
@@ -1885,6 +1891,9 @@ def serve(path):
                     user_id = str(params.get('user_id', '')).strip()
                     if not VALID_USER_ID_RE.match(user_id):
                         return self.reply_json(400, {'ok': False, 'error': 'Invalid user_id format'})
+                    # 与 Web 表单同一条保护：机主账号注销 = 主密码在 /auth 里失效。
+                    if user_id == MASTER_USER_ID:
+                        return self.reply_json(400, {'ok': False, 'error': 'Cannot delete the master account'})
                     with data_lock:
                         if user_id in data.get('users', {}):
                             del data['users'][user_id]
@@ -2809,6 +2818,13 @@ net.ipv4.tcp_slow_start_after_idle = 0
                             'note': note
                         }
                 elif action == 'delete' and user_id:
+                    # 🔴 admin_master 不能被注销：它的 password 就是 Hysteria 的
+                    # auth_password（机主本人的主密码）。/auth 是遍历 data['users']
+                    # 按密码匹配的，一旦这条记录被删，主密码在 /auth 里立刻变成
+                    # "User not found" —— 机主自己都被踢下线、再也连不上节点，
+                    # 只能重装。所以这里必须拒绝，UI 那边也不渲染删除按钮。
+                    if user_id == MASTER_USER_ID:
+                        return self.reply(400, b'Cannot delete the master account')
                     with data_lock:
                         if user_id in data.get('users', {}):
                             del data['users'][user_id]

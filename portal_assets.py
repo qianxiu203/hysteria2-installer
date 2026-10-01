@@ -336,6 +336,23 @@ function showConfirm(options = {}) {
   });
 }
 
+// 🔴 删除用户的二次确认不能写成内联的 onsubmit="return confirm(...)"：
+// CSP 的 script-src 只允许带哈希的脚本、没有 'unsafe-inline'，内联事件处理器
+// 会被浏览器直接拒绝 —— 表现为点了「删除」毫无提示、用户被静默删掉。
+// 必须在这里用 addEventListener 绑定。
+document.querySelectorAll('form.js-confirm-delete').forEach(form => {
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    showConfirm({
+      title: '注销用户',
+      text: form.dataset.confirm || '确定注销此用户？此操作不可撤销。',
+      icon: '⚠️',
+      isDanger: true,
+      confirmText: '确定注销'
+    }).then(ok => { if (ok) form.submit(); });
+  });
+});
+
 function switchTab(tabId) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
   document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
@@ -414,11 +431,25 @@ function renderWarpRules(rules) {
     return;
   }
   warpTagsCloud.innerHTML = rules.map(d => {
+    // 🔴 不能写成 onclick="delWarpRule('...')"：CSP 的 script-src 只有哈希白名单、
+    // 没有 'unsafe-inline'，内联事件会被浏览器直接丢弃，表现为"× 点了没反应"。
+    // 改为 data-domain + 下方容器上的事件委托（对动态重渲染的标签同样生效）。
     return `<span class="warp-tag-item">
       <span class="warp-tag-text">${d}</span>
-      <a href="javascript:void(0)" class="warp-tag-del" onclick="delWarpRule('${d}')" title="移除此域名">×</a>
+      <a href="javascript:void(0)" class="warp-tag-del" data-domain="${d}" title="移除此域名">×</a>
     </span>`;
   }).join('');
+}
+
+// WARP 分流标签的删除按钮：容器级事件委托（标签是动态重渲染的，不能逐个绑定）
+if (warpTagsCloud) {
+  warpTagsCloud.addEventListener('click', (e) => {
+    const del = e.target.closest('.warp-tag-del');
+    if (!del) return;
+    e.preventDefault();
+    const dom = del.getAttribute('data-domain');
+    if (dom) delWarpRule(dom);
+  });
 }
 
 async function addWarpRule(domain) {
@@ -1569,6 +1600,17 @@ function toggleSecret(id, btn) {
     btn.textContent = '显示';
   }
 }
+
+// 🔴 不能写成 <button onclick="toggleSecret(...)"> —— CSP 的 script-src 只有
+// 哈希白名单、没有 'unsafe-inline'，内联事件处理器会被浏览器直接拒绝执行，
+// 按钮点了毫无反应。必须在这里用 addEventListener 绑定（整段脚本有 CSP 哈希，
+// 因此被允许）。
+document.querySelectorAll('.toggle-pwd').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const input = btn.parentElement.querySelector('input');
+    if (input) toggleSecret(input.id, btn);
+  });
+});
 """
 
 # ============================================================================
