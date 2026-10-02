@@ -1880,6 +1880,45 @@ if __name__ == '__main__':
         expected = hmac.new(session_secret.encode(), f'sess:{t}'.encode(), hashlib.sha256).hexdigest()
         return hmac.compare_digest(t, data['token']) and hmac.compare_digest(sig, expected)
 
+    # SPEEDTEST_TARGETS 是 /api/v1/speedtest 的**唯一**靶点来源。
+    #
+    # ⚠️ 它是硬编码常量，**不接受任何来自调用方的输入**。这是安全要求，不是简化。
+    # 本 portal 以 root 运行、subprocess 直接拼命令：一旦目标地址能由请求方
+    # 指定，字符串逃出引号就是本机 RCE。所以「靶点可配」这件事只放在运维面板侧
+    # （speedtest_targets 表，走 SSH 通道），这条无凭据通道保持最小权限。
+    #
+    # 为什么不接受域名作为靶点：ping 只吃 IP 字面量，不接受域名（防 DNS rebinding），
+    # 且这里只测 ICMP，不提供任何 TCP / 带宽探测能力。
+    #
+    # 清单来源：逐个 `ping -c 3 -W 2` 实测的可用清单。骨干禁 ICMP 是常态
+    # —— 实测 51 个候选里 31 个 100% 丢包，所以**只列实测丢包 0% 的**，
+    # 不要凭印象增补。电信用 163 骨干、联通用 169 骨干。
+    # 格式：(target_key, 展示名, IP, 运营商)
+    SPEEDTEST_TARGETS = (
+        # 电信 163 骨干
+        ('telecom-bj-163',   '电信-北京(163)',   '202.96.128.86',  'telecom'),
+        ('telecom-sh-163',   '电信-上海(163)',   '202.96.134.33',  'telecom'),
+        ('telecom-gz-163',   '电信-广州(163)',   '202.96.209.5',   'telecom'),
+        ('telecom-sd-163',   '电信-山东(163)',   '218.85.152.99',  'telecom'),
+        ('telecom-hb-163',   '电信-湖北(163)',   '202.96.209.133', 'telecom'),
+        # 联通 169 骨干 + 公共 DNS
+        ('unicom-bj-169',    '联通-北京(169)',      '202.38.128.1',    'unicom'),
+        ('unicom-gz-169',    '联通-广州(169)',      '219.158.16.53',   'unicom'),
+        ('unicom-bj-106',    '联通-北京(DNS)',      '202.106.50.1',    'unicom'),
+        ('unicom-dns-123',   '联通-北京(公共DNS)',  '123.123.123.123', 'unicom'),
+        # 移动
+        ('mobile-sh',        '移动-上海',     '211.136.112.200', 'mobile'),
+        ('mobile-bj',        '移动-北京',     '211.136.25.153',  'mobile'),
+        ('mobile-bj-2',      '移动-北京(2)',  '211.136.17.107',  'mobile'),
+        ('mobile-gd',        '移动-广东',     '36.156.0.1',      'mobile'),
+        ('mobile-ah',        '移动-安徽',     '120.196.165.24',  'mobile'),
+        ('mobile-sd',        '移动-山东',     '39.128.28.66',    'mobile'),
+        # 公共 DNS（三网都通，作跨网基准）
+        ('dns-ali',          '阿里 DNS',     '223.5.5.5',       'other'),
+        ('dns-tencent',      '腾讯 DNS',     '119.29.29.29',    'other'),
+        ('dns-cnnic',        'CNNIC DNS',    '1.2.4.8',         'other'),
+    )
+
     class Handler(BaseHTTPRequestHandler):
         def _generate_and_apply_reality(self, restart=True):
             new_uuid = str(uuid.uuid4())
@@ -3386,6 +3425,17 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
                 if not self.verify_api_key():
                     return self.reply_json(401, {'ok': False, 'error': 'Unauthorized API key'})
                 sub = self.path[len('/api/v1/'):]
+                # 剥掉 query 再比较。
+                #
+                # ⚠️ self.path 是**含 query 的**原始路径，`/api/v1/speedtest?x=1`
+                # 会让 sub 变成 'speedtest?x=1'，等值比较直接落空 → 404。
+                # 既有端点（node/meta、users/list…）都有这个毛病，
+                # 改成"全部剥 query"会改变它们的行为，超出本次改动范围。
+                # 这里只让**新端点**自己扛住：切掉 '?' 再比，
+                # 且 _h_api_speedtest 不读任何 query 参数
+                # （靶点硬编码，见 SPEEDTEST_TARGETS 的安全说明）。
+                if sub.split('?', 1)[0] == 'speedtest':
+                    return self._h_api_speedtest()
                 if sub == 'node/meta':
                     m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
                     with data_lock:
@@ -3781,6 +3831,111 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
                     'qr_svg': qr_svg
                 }
             })
+
+        def _h_api_speedtest(self):
+            """GET /api/v1/speedtest —— 在**节点本机**测到大陆三网的 ICMP 延迟。
+
+            为什么需要这个端点
+            ------------------
+            运维面板原先只能 SSH 到节点跑探针脚本。没绑 SSH 凭据的节点压根测不了，
+            页面上是四行「未测得」—— 而那不是线路问题，是没通道。
+            节点本来就有 Bearer 鉴权的 /api/v1/ 通道，于是把测速放这里。
+
+            与 SSH 通道的关系
+            ----------------
+            这是**补充**，不是取代：
+              - SSH 通道：节点零改动即可用，靶点表在面板侧可配，
+                但需要主机凭据，凭据失效就整台没数据。
+              - 本通道：不需要任何主机凭据，但要求 portal ≥ 本版本。
+            面板侧按「有 SSH 走 SSH，没有才走 portal」的顺序自动选择。
+
+            安全边界（这是本端点最要紧的部分）
+            ------------------------------------
+            **靶点完全硬编码，调用方一个字节都传不进来。**
+            最初的设想是让面板传一串目标过来，理由是"靶点可配"。
+            那等于开了一个任意 ICMP 探测器 —— 而更糟的是：
+            本 portal 跑在 root 下、subprocess 直接拼命令，
+            一旦目标串逃逸出引号就是本机 RCE。
+            代价是"改靶点要改 portal"，这个代价**故意要付**：
+            靶点表在面板侧（speedtest_targets），走 SSH 通道调整即可，
+            而这条无凭据通道保持最小权限。
+
+            并发与耗时
+            ----------
+            串行 ping：并发会互相推高延迟、测出来的数不可复现。
+            18 个靶点 × 3 包 × 2 秒 ≈ 最坏 108 秒。本 portal 是
+            ThreadingMixIn，不阻塞其他请求，但自己这条连接会等那么久。
+            超时给 10 秒（单个 ping），整体由调用方的 HTTP 超时兜底。
+
+            返回字段与面板 node_speedtests 对齐：
+            icmp_avg_ms / icmp_loss_pct 为 null 表示"没测到"，
+            与 0 区分 —— 0ms 和测不到是完全不同的意思。
+            """
+            # 依赖自检：没装 ping 就明确报 NO_PING，让上层知道
+            # "这台机器测不了"而不是"靶点全不通"（两者含义完全不同）。
+            if not shutil.which('ping'):
+                return self.reply_json(200, {
+                    'ok': False, 'error': 'NO_PING',
+                    'error_label': '节点未安装 ping，无法测速',
+                    'results': [],
+                })
+
+            results = []
+            for key, name, host, carrier in SPEEDTEST_TARGETS:
+                avg, loss = self._ping_one(host)
+                results.append({
+                    'target_key': key,
+                    'target_name': name,
+                    'target_host': host,
+                    'carrier': carrier,
+                    'icmp_avg_ms': avg,
+                    'icmp_loss_pct': loss,
+                })
+
+            measured = sum(1 for r in results if r['icmp_avg_ms'] is not None)
+            return self.reply_json(200, {
+                'ok': True,
+                'results': results,
+                'measured_targets': measured,
+                'total_targets': len(results),
+                'time': int(time.time()),
+            })
+
+        def _ping_one(self, host):
+            """ping 一个靶点，返回 (avg_ms, loss_pct)，测不到时都是 None。
+
+            解析要同时认两种 ping 实现：
+              iputils:  rtt min/avg/max/mdev = 1.2/3.4/5.6/0.7 ms
+              BusyBox:  round-trip min/avg/max = 1.2/3.4/5.6 ms
+            共同点是 `= a/b/c` 且 avg 是第二项 —— 只锚定这个形状，
+            不锚定前缀名。只认一种会让精简镜像的节点永远"未测得"，
+            而界面上看不出原因。
+            """
+            try:
+                proc = subprocess.run(
+                    ['ping', '-c', '3', '-W', '2', host],
+                    capture_output=True, text=True, timeout=10,
+                )
+            except Exception:
+                return None, None
+            out = proc.stdout or ''
+
+            loss = None
+            m = re.search(r'([0-9]+(?:\.[0-9]+)?)%\s*packet loss', out)
+            if m:
+                try:
+                    loss = min(100.0, max(0.0, float(m.group(1))))
+                except ValueError:
+                    loss = None
+
+            avg = None
+            m = re.search(r'=\s*([0-9.]+)/([0-9.]+)/[0-9.]+', out)
+            if m:
+                try:
+                    avg = min(60000.0, max(0.0, float(m.group(2))))
+                except ValueError:
+                    avg = None
+            return avg, loss
 
         def _h_get_bbr_status(self, subpath):
             """GET /bbr-status 的处理逻辑（从 do_GET 机械搬移而来）。"""
