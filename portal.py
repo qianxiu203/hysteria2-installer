@@ -1170,7 +1170,96 @@ def get_cert_pin_sha256(root_path):
         return ''
 
 
-def artifacts(m, auth_override=None, name_override=None):
+def reality_uuid_for_user(user_id):
+    """为某个 Hy2 用户派生**稳定**的 VLESS UUID。
+
+    为什么用派生而不是随机（2026-10-03）：
+    随机 UUID 的话，「开户 → 销户 → 再开户」每次都要改 xray.json，
+    而且**同一用户每次拉订阅拿到的 Reality 链接都会变** ——
+    客户端会当成新节点，旧的配置失效。
+
+    派生（uuid5）让「同一个 user_id 永远得到同一个 UUID」，
+    于是：
+      * 订阅可以重复拉取，链接稳定；
+      * 销户时只要从 clients 里删掉对应 id 即可；
+      * 再开户同 user_id 时链接与之前一致（幂等）。
+
+    命名空间固定为 URL —— 换 namespace 会让已发出去的链接全部失效。
+    """
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, 'hy2-portal-reality:' + str(user_id)))
+
+
+def reality_registry(data):
+    """从 portal.json 的 data 里取出「user_id → UUID」的 Reality 账号表。
+
+    存在 data['reality_users'] 里；首次调用时按现有 users 回填
+    （保证升级后老用户也有 UUID，不需要重新开户）。
+    """
+    reg = data.get('reality_users')
+    if not isinstance(reg, dict):
+        reg = {}
+    changed = False
+    for uid in list(data.get('users', {}).keys()):
+        if uid not in reg:
+            reg[uid] = reality_uuid_for_user(uid)
+            changed = True
+    # 清理已不存在用户的条目 —— 避免 xray clients 无限增长
+    for uid in list(reg.keys()):
+        if uid not in data.get('users', {}):
+            del reg[uid]
+            changed = True
+    if changed:
+        data['reality_users'] = reg
+    return reg
+
+
+def reality_clients(data):
+    """生成 xray inbound.settings.clients —— 每个 Hy2 用户一个 VLESS 身份。
+
+    空表也要返回**一个**占位 client：xray 的 vless inbound 在
+    clients 为空时会拒绝所有连接，且 `systemctl restart xray` 仍然成功 ——
+    表现为「服务 active 但所有人都连不上」，极难排查（2026-10-03 实测踩过）。
+    所以宁可给一个随机占位 UUID，也不要让 clients 空着。
+    """
+    reg = reality_registry(data)
+    clients = [{'id': uid_uuid, 'flow': 'xtls-rprx-vision', 'email': uid}
+               for uid, uid_uuid in sorted(reg.items())]
+    if not clients:
+        clients = [{'id': str(uuid.uuid4()), 'flow': 'xtls-rprx-vision',
+                    'email': 'placeholder'}]
+    return clients
+
+
+def reality_uri_for_user(rcfg, user_id, public_ip, label=None):
+    """给某个用户拼他自己的 VLESS-Reality 直链。
+
+    rcfg 是 data['reality_config']（含 uuid/short_id/dest_sni/port/public_key）。
+    单用户的 rcfg 里存的是**旧版单账号**的 uuid —— 这里忽略它，
+    改用该 user_id 派生出的 UUID（reality_uuid_for_user）。
+    """
+    if not rcfg:
+        return ''
+    short_id = rcfg.get('short_id', '')
+    dest_sni = rcfg.get('dest_sni', 'www.apple.com')
+    port = rcfg.get('port', 443)
+    pub_key = rcfg.get('public_key', '')
+    if not (short_id and dest_sni and pub_key):
+        return ''
+    uid_uuid = reality_uuid_for_user(user_id)
+    tag = label or ('VLESS-Reality-' + str(user_id))
+    return (f"vless://{uid_uuid}@{public_ip}:{port}"
+            f"?security=reality&encryption=none&pbk={pub_key}"
+            f"&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision"
+            f"&sni={dest_sni}&sid={short_id}#{quote(tag)}")
+
+
+def artifacts(m, auth_override=None, name_override=None, reality=None, user_id=None):
+    """生成 hy2:// 直链 + Clash / Sing-box 配置。
+
+    reality（可选）—— 传 rcfg 时会**额外产出一条 VLESS-Reality 节点**，
+    并把 Clash 的 PROXY 组改成 url-test（Hy2 与 Reality 自动择优），
+    这样「UDP 被 QoS 的网络」会自己切到 TCP 通道（2026-10-03）。
+    """
     is_insecure = m.get('is_insecure', False)
     server_name = m.get('server_name') or m.get('public_ip', 'localhost')
     public_ip = m.get('public_ip', server_name)
@@ -1211,10 +1300,71 @@ def artifacts(m, auth_override=None, name_override=None):
     if obfs_password:
         proxy.update({'obfs': 'salamander', 'obfs-password': obfs_password})
         sing['obfs'] = dict(type='salamander', password=obfs_password)
-    clash = {'mixed-port': 7890, 'allow-lan': False, 'mode': 'rule', 'proxies': [proxy],
-             'proxy-groups': [{'name': 'PROXY', 'type': 'select', 'proxies': [name, 'DIRECT']}],
+
+    # ---- Reality 备用通道（可选）----
+    #
+    # 目标是「一条订阅里既有 UDP 的 Hy2、又有 TCP 的 Reality」，
+    # 客户端用 url-test 自动择优：UDP 通走 Hy2，UDP 被 QoS/阻断时自动切 Reality。
+    # ⚠️ 只有 reality + user_id 同时给出时才追加 —— 单机管理员视角（user_id=None）
+    # 仍只出一条 Hy2，避免给自己输出一个用不上的节点。
+    reality_proxy = None
+    reality_sing = None
+    if reality and user_id:
+        ruri = reality_uri_for_user(reality, user_id, public_ip,
+                                    label=(name + '-Reality'))
+        r_uuid = reality_uuid_for_user(user_id)
+        r_port = reality.get('port', 443)
+        r_sni = reality.get('dest_sni', 'www.apple.com')
+        r_pbk = reality.get('public_key', '')
+        r_sid = reality.get('short_id', '')
+        if ruri and r_pbk and r_sid:
+            rname = name + '-Reality'
+            reality_proxy = dict(name=rname, type='vless', server=public_ip,
+                                 port=r_port, uuid=r_uuid, udp=True,
+                                 tls=dict(servername=r_sni),
+                                 flow='xtls-rprx-vision',
+                                 servername=r_sni,
+                                 reality_opts=dict(public_key=r_pbk,
+                                                   short_id=r_sid),
+                                 client_fingerprint='chrome')
+            reality_sing = dict(type='vless', tag=rname, server=public_ip,
+                               server_port=r_port, uuid=r_uuid,
+                               flow='xtls-rprx-vision',
+                               tls=dict(enabled=True, server_name=r_sni,
+                                        reality=dict(enabled=True,
+                                                     public_key=r_pbk,
+                                                     short_id=r_sid),
+                                        utls=dict(enabled=True,
+                                                  fingerprint='chrome')))
+
+    proxies = [proxy] + ([reality_proxy] if reality_proxy else [])
+    sing_outbounds = [sing] + ([reality_sing] if reality_sing else [])
+
+    if reality_proxy:
+        # url-test：客户端定时探测两条链路，自动选延迟低的。
+        # 比 select 好在「不需要用户手动切」——UDP 被 QoS 时会自己落到 Reality。
+        group_proxies = [name, reality_proxy['name']]
+        group = {'name': 'PROXY', 'type': 'url-test', 'proxies': group_proxies,
+                 'url': 'https://www.gstatic.com/generate_204',
+                 'interval': 300, 'tolerance': 50}
+    else:
+        group = {'name': 'PROXY', 'type': 'select', 'proxies': [name, 'DIRECT']}
+
+    clash = {'mixed-port': 7890, 'allow-lan': False, 'mode': 'rule',
+             'proxies': proxies, 'proxy-groups': [group],
              'rules': ['MATCH,PROXY']}
-    return uri, json.dumps(clash, ensure_ascii=False, indent=2), json.dumps({'outbounds': [sing]}, ensure_ascii=False, indent=2)
+    sing_doc = {'outbounds': sing_outbounds}
+    if reality_sing:
+        # sing-box 侧同样给一个 urltest outbound，让 SFA/SFI 自动择优。
+        sing_doc['outbounds'].append({
+            'type': 'urltest', 'tag': 'PROXY',
+            'outbounds': [sing['tag'], reality_sing['tag']],
+            'url': 'https://www.gstatic.com/generate_204',
+            'interval': '5m', 'tolerance': 50,
+        })
+        sing_doc['route'] = {'final': 'PROXY'}
+    return (uri, json.dumps(clash, ensure_ascii=False, indent=2),
+            json.dumps(sing_doc, ensure_ascii=False, indent=2))
 
 
 def sync_pin(m, root, meta_path):
@@ -1231,10 +1381,10 @@ def sync_pin(m, root, meta_path):
             new = get_cert_pin_sha256(root)
             if new != m.get('pin_sha256'):
                 m['pin_sha256'] = new
-                Path(meta_path).write_text(json.dumps(m, ensure_ascii=False))
+                Path(meta_path).write_text(json.dumps(m, ensure_ascii=False), encoding='utf-8')
     elif m.get('pin_sha256'):
         m['pin_sha256'] = ''
-        Path(meta_path).write_text(json.dumps(m, ensure_ascii=False))
+        Path(meta_path).write_text(json.dumps(m, ensure_ascii=False), encoding='utf-8')
 
 
 def prepare(meta_path, port, node_api_key=None):
@@ -1252,7 +1402,7 @@ def prepare(meta_path, port, node_api_key=None):
     sub_port, sub_port_src = resolve_subscription_port(m)
     if m.get('subscription_port') != sub_port:
         m['subscription_port'] = sub_port
-        Path(meta_path).write_text(json.dumps(m, ensure_ascii=False, indent=2))
+        Path(meta_path).write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding='utf-8')
         print(f'[portal] 订阅端口已自愈为 {sub_port}（来源: {sub_port_src}）', file=sys.stderr)
     base = f"https://{host}:{sub_port}/{token}/"
     subscription = f"https://{user}:{password}@{host}:{sub_port}/{token}/clash.yaml"
@@ -1280,7 +1430,7 @@ def prepare(meta_path, port, node_api_key=None):
                 proxy_services=[], page=page, qr=qr.decode(), clash=clash, sing=sing)
     for filename, value in [('portal.json', data), ('portal-access.json', portal_access_payload(base, user, password, api_key))]:
         path = root / filename
-        path.write_text(json.dumps(value, ensure_ascii=False))
+        path.write_text(json.dumps(value, ensure_ascii=False), encoding='utf-8')
         path.chmod(0o600)
 
 
@@ -1301,7 +1451,7 @@ def refresh(meta_path):
     if 'api_key' not in data:
         data['api_key'] = access.get('api_key') or secrets.token_hex(24)
         access['api_key'] = data['api_key']
-        (root / 'portal-access.json').write_text(json.dumps(access, ensure_ascii=False))
+        (root / 'portal-access.json').write_text(json.dumps(access, ensure_ascii=False), encoding='utf-8')
     if 'users' not in data:
         data['users'] = {
             MASTER_USER_ID: {
@@ -1321,7 +1471,7 @@ def refresh(meta_path):
                              username=access.get('username', ''), password=access.get('password', ''))
     
     temporary = path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(data, ensure_ascii=False))
+    temporary.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
     temporary.chmod(0o600)
     temporary.replace(path)
 
@@ -1344,16 +1494,24 @@ def serve(path):
 
     def save_data():
         with data_lock:
+            # ⚠️ 必须显式 encoding='utf-8'（2026-10-03 实测）。
+            # Path.write_text 不给 encoding 时跟随 locale：Linux 上是 UTF-8
+            # 没事，但 Windows 上是 GBK —— 页面里含 `₂` 之类字符时
+            # 直接 UnicodeEncodeError 把 HTTP handler 打死，客户端看到的是
+            # "Remote end closed connection without response"，
+            # 排查时完全看不出是编码问题。
             try:
                 temp = portal_path.with_suffix('.tmp')
-                temp.write_text(json.dumps(data, ensure_ascii=False))
+                temp.write_text(json.dumps(data, ensure_ascii=False),
+                                encoding='utf-8')
                 temp.chmod(0o600)
                 temp.replace(portal_path)
             except OSError:
                 disk_path = Path('/etc/hysteria/portal.json')
                 if disk_path.exists():
                     disk_temp = disk_path.with_suffix('.tmp')
-                    disk_temp.write_text(json.dumps(data, ensure_ascii=False))
+                    disk_temp.write_text(json.dumps(data, ensure_ascii=False),
+                                         encoding='utf-8')
                     disk_temp.chmod(0o600)
                     disk_temp.replace(disk_path)
 
@@ -1394,7 +1552,7 @@ def serve(path):
         cfg = {'services': services}
         try:
             tmp = gost_cfg_path.with_suffix('.tmp')
-            tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
+            tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding='utf-8')
             tmp.chmod(0o644)
             tmp.replace(gost_cfg_path)
         except OSError:
@@ -1531,7 +1689,7 @@ def serve(path):
         """
         try:
             GOST_SELFCHECK_PATH.parent.mkdir(parents=True, exist_ok=True)
-            GOST_SELFCHECK_PATH.write_text(GOST_SELFCHECK_SCRIPT)
+            GOST_SELFCHECK_PATH.write_text(GOST_SELFCHECK_SCRIPT, encoding='utf-8')
             os.chmod(str(GOST_SELFCHECK_PATH), 0o755)
         except OSError:
             pass
@@ -1560,7 +1718,7 @@ def serve(path):
             return                                   # 已是最新, 不做任何事
         try:
             write_gost_selfcheck()
-            unit_path.write_text(GOST_UNIT_CONTENT)
+            unit_path.write_text(GOST_UNIT_CONTENT, encoding='utf-8')
             subprocess.run(['systemctl', 'daemon-reload'], capture_output=True, timeout=5)
         except Exception:
             pass
@@ -1920,55 +2078,116 @@ if __name__ == '__main__':
     )
 
     class Handler(BaseHTTPRequestHandler):
-        def _generate_and_apply_reality(self, restart=True):
-            new_uuid = str(uuid.uuid4())
+        def _sync_reality_clients(self):
+            """把 data['users'] 派生出的 UUID 列表写进 xray.json 并热重载。
 
-            priv_key = ''
-            pub_key = ''
+            只在 **xray 已安装**（/etc/hysteria/xray.json 存在）时才动手 ——
+            没装 Reality 的节点不该因为一次开户就被创建出 xray 配置。
+            静默跳过是**正确**的：这不是错误，只是该节点没启用 Reality。
+            """
+            xj = Path('/etc/hysteria/xray.json')
+            if not xj.exists():
+                return False
             try:
-                p = subprocess.run(['/usr/local/bin/xray', 'x25519'], capture_output=True, text=True, timeout=5)
-                for line in p.stdout.splitlines():
-                    if 'PrivateKey:' in line:
-                        priv_key = line.split('PrivateKey:')[1].strip()
-                    elif 'Password (PublicKey):' in line or 'PublicKey:' in line:
-                        pub_key = line.split(':')[1].strip()
+                cfg = json.loads(xj.read_text())
             except Exception:
-                pass
+                return False
+            inbounds = cfg.get('inbounds') or []
+            vless = next((i for i in inbounds
+                          if i.get('protocol') == 'vless'
+                          and (i.get('streamSettings') or {}).get('security') == 'reality'),
+                         None)
+            if vless is None:
+                return False
+            with data_lock:
+                clients = reality_clients(data)
+            vless.setdefault('settings', {})['clients'] = clients
+            vless['settings']['decryption'] = vless['settings'].get('decryption', 'none')
+            try:
+                xj.write_text(json.dumps(cfg, indent=2), encoding='utf-8')
+            except Exception:
+                return False
+            # 热重载：先 reload，失败再 restart（xray 不一定支持 reload）
+            r = subprocess.run(['systemctl', 'reload', 'xray'],
+                               capture_output=True, timeout=5)
+            if r.returncode != 0:
+                subprocess.run(['systemctl', 'restart', 'xray'],
+                               capture_output=True, timeout=5)
+            return True
 
-            if not priv_key or not pub_key:
-                priv_key = 'SKHsyFDGviRODhpQJQLAxAU-qRBBWjKjntbVXp8KW10'
-                pub_key = '2uyjYiLgv9SAjn6eVC21EywA55xyiebI-wg03rgBH2g'
+        def _generate_and_apply_reality(self, restart=True, force=False):
+            """生成（或刷新）Reality 的服务端配置。
 
-            short_id = secrets.token_hex(4)
-            dest_sni = 'www.apple.com'
-            listen_port = 443
+            ⚠️ 2026-10-03 关键修正：**密钥对与 clients 都必须稳定**。
+            旧实现每次调用都 `uuid.uuid4()` 重新生成 UUID 并把 clients 写死成
+            1 个元素，于是：
+              * 每刷新一次 Reality，**所有客户端的链接全部失效**；
+              * 多用户共用同一个 UUID —— 任何一个人销户都会连累所有人。
+
+            现在：密钥对只在「首次」生成（已有就复用），clients 由
+            reality_clients(data) 从 data['users'] 派生，一个用户一个 UUID。
+
+            force=True —— 只给「重置密钥对」按钮用：
+            强制重新生成 private/public key 与 short_id。
+            ⚠️ 仍然**不会**改任何用户的 UUID（那是 uuid5 派生的），
+            所以重置密钥不会让已发出去的链接全挂 —— 只有私钥变了，
+            客户端的 pbk（公钥）需要更新。
+            """
+            with data_lock:
+                rcfg_old = dict(data.get('reality_config', {}) or {})
+
+            priv_key = '' if force else rcfg_old.get('private_key', '')
+            pub_key = '' if force else rcfg_old.get('public_key', '')
+            if not (priv_key and pub_key):
+                # 首次才生成。xray 不可用时回落到硬编码常量（沿用旧行为）。
+                try:
+                    p = subprocess.run(['/usr/local/bin/xray', 'x25519'],
+                                       capture_output=True, text=True, timeout=5)
+                    for line in p.stdout.splitlines():
+                        if 'PrivateKey:' in line:
+                            priv_key = line.split('PrivateKey:')[1].strip()
+                        elif 'Password (PublicKey):' in line or 'PublicKey:' in line:
+                            pub_key = line.split(':')[1].strip()
+                except Exception:
+                    priv_key = pub_key = ''
+                if not priv_key or not pub_key:
+                    priv_key = 'SKHsyFDGviRODhpQJQLAxAU-qRBBWjKjntbVXp8KW10'
+                    pub_key = '2uyjYiLgv9SAjn6eVC21EywA55xyiebI-wg03rgBH2g'
+
+            short_id = (secrets.token_hex(4) if force
+                        else (rcfg_old.get('short_id') or secrets.token_hex(4)))
+            dest_sni = rcfg_old.get('dest_sni') or 'www.apple.com'
+            listen_port = rcfg_old.get('port') or 443
 
             m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
             public_ip = m.get('public_ip', '127.0.0.1')
-            server_name = m.get('server_name') or public_ip
-
-            vless_link = f"vless://{new_uuid}@{public_ip}:{listen_port}?security=reality&encryption=none&pbk={pub_key}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni={dest_sni}&sid={short_id}#%E8%8F%B2%E5%BE%8B%E5%AE%BE-VLESS-Reality"
 
             with data_lock:
                 data['reality_config'] = {
-                    'uuid': new_uuid,
                     'private_key': priv_key,
                     'public_key': pub_key,
                     'short_id': short_id,
                     'dest_sni': dest_sni,
                     'port': listen_port,
-                    'uri': vless_link
                 }
+                # 单用户视角的 uri 仍然给（Web 面板二维码要用），
+                # 取机主自己的 UUID —— 保证刷新后链接不变。
+                data['reality_config']['uuid'] = reality_uuid_for_user(MASTER_USER_ID)
+                data['reality_config']['uri'] = reality_uri_for_user(
+                    data['reality_config'], MASTER_USER_ID, public_ip,
+                    label='Teyir-VLESS-Reality')
+                clients = reality_clients(data)
             save_data()
 
             xray_json = {
                 "log": {"loglevel": "warning"},
                 "inbounds": [
                     {
+                        "tag": "vless-reality-in",
                         "port": listen_port,
                         "protocol": "vless",
                         "settings": {
-                            "clients": [{"id": new_uuid, "flow": "xtls-rprx-vision"}],
+                            "clients": clients,
                             "decryption": "none"
                         },
                         "streamSettings": {
@@ -1989,11 +2208,14 @@ if __name__ == '__main__':
                         }
                     }
                 ],
-                "outbounds": [{"protocol": "freedom"}]
+                "outbounds": [{"protocol": "freedom", "tag": "direct"}]
             }
-            Path('/etc/hysteria/xray.json').write_text(json.dumps(xray_json, indent=2), encoding='utf-8')
+            Path('/etc/hysteria/xray.json').write_text(
+                json.dumps(xray_json, indent=2), encoding='utf-8')
             if restart:
-                subprocess.run(['systemctl', 'restart', 'xray'], capture_output=True, timeout=5)
+                subprocess.run(['systemctl', 'restart', 'xray'],
+                               capture_output=True, timeout=5)
+            return clients
 
         server_version = 'Gateway'
         sys_version = ''
@@ -2168,13 +2390,24 @@ if __name__ == '__main__':
                             'created_at': now_ts,
                             'note': note
                         }
+                        # 同步 Reality 账号表（2026-10-03）：一个 Hy2 用户
+                        # 对应一个 VLESS UUID，开户即生效。
+                        reality_registry(data)
+                        rcfg = dict(data.get('reality_config', {}) or {})
                     regenerate_page()
 
+                    # 销户/开户都要让 xray 的 clients 跟着变（多协议共用一套账号）
+                    self._sync_reality_clients()
+
                     m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
-                    uri, clash_yaml, sing_json = artifacts(m, auth_override=pwd, name_override=f"Teyir-Hy2-{user_id}")
-                    with data_lock:
-                        rcfg = dict(data.get('reality_config', {}))
-                    reality_uri = rcfg.get('uri', '')
+                    # artifacts 传入 reality + user_id ⇒ 输出「Hy2 + Reality」双节点
+                    # 且 Clash / Sing-box 的策略组变成 url-test（自动择优）。
+                    uri, clash_yaml, sing_json = artifacts(
+                        m, auth_override=pwd, name_override=f"Teyir-Hy2-{user_id}",
+                        reality=rcfg, user_id=user_id)
+                    public_ip = m.get('public_ip', '127.0.0.1')
+                    reality_uri = reality_uri_for_user(
+                        rcfg, user_id, public_ip, label=f"Teyir-Reality-{user_id}")
                     return self.reply_json(200, {
                         'ok': True,
                         'user_id': user_id,
@@ -2184,6 +2417,7 @@ if __name__ == '__main__':
                         'expires_at': expires,
                         'uri': uri,
                         'reality_uri': reality_uri,
+                        'reality_uuid': reality_uuid_for_user(user_id),
                         'clash': clash_yaml,
                         'sing_box': sing_json
                     })
@@ -2220,11 +2454,17 @@ if __name__ == '__main__':
                             del data['users'][user_id]
                             if user_id in ip_tracker:
                                 del ip_tracker[user_id]
+                            # 2026-10-03：同步删掉该用户的 Reality 身份。
+                            # 不删的话 —— xray 里那个 UUID 还在，买家退了款
+                            # 照样能用 Reality 连上，属于「钱退了货还在」。
+                            reality_registry(data)
                             deleted = True
                         else:
                             deleted = False
                     if deleted:
                         regenerate_page()
+                        # 把 clients 变更热重载到 xray（不装 Reality 时静默跳过）
+                        self._sync_reality_clients()
                         return self.reply_json(200, {'ok': True, 'message': 'User deleted'})
                     return self.reply_json(404, {'ok': False, 'error': 'User not found'})
 
@@ -2734,7 +2974,7 @@ if __name__ == '__main__':
                 # 先落地启动自检脚本 (unit 的 ExecStartPost 会调用它), 再写 unit.
                 write_gost_selfcheck()
                 service_content = GOST_UNIT_CONTENT
-                Path('/etc/systemd/system/gost.service').write_text(service_content)
+                Path('/etc/systemd/system/gost.service').write_text(service_content, encoding='utf-8')
                 subprocess.run(['systemctl', 'daemon-reload'], capture_output=True)
                 subprocess.run(['systemctl', 'enable', 'gost'], capture_output=True)
 
@@ -3038,7 +3278,7 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 '''
-                Path('/etc/systemd/system/xray.service').write_text(service_content)
+                Path('/etc/systemd/system/xray.service').write_text(service_content, encoding='utf-8')
                 subprocess.run(['systemctl', 'daemon-reload'], capture_output=True)
                 subprocess.run(['systemctl', 'enable', 'xray'], capture_output=True)
                 self._generate_and_apply_reality(True)
@@ -3085,7 +3325,9 @@ WantedBy=multi-user.target
                     return self.reply_json(200, {'ok': True, 'active': new_active})
 
                 elif action == 'reset':
-                    self._generate_and_apply_reality(True)
+                    # force=True：只有「重置密钥」按钮才真的换密钥对。
+                    # 用户的 UUID 是 uuid5 派生的，不受密钥轮换影响。
+                    self._generate_and_apply_reality(True, force=True)
                     return self.reply_json(200, {'ok': True, 'message': '已重置密钥并重启生效'})
 
                 return self.reply_json(400, {'ok': False, 'error': 'Invalid action'})
