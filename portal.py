@@ -2228,6 +2228,38 @@ if __name__ == '__main__':
                         return self.reply_json(200, {'ok': True, 'message': 'User deleted'})
                     return self.reply_json(404, {'ok': False, 'error': 'User not found'})
 
+                elif sub == 'users/set_status':
+                    # 可恢复的停用/启用：只改 status，不动密码/到期/已用流量。
+                    # 鉴权回调会检查 status（见 handle_auth），所以置为 disabled
+                    # 后**已连接与再连接的客户端都会立刻被拒**。
+                    # 重新置回 active 即原样恢复，买家不用重配 —— 这是与
+                    # users/delete（不可恢复、且会清零 used_bytes）的关键区别。
+                    user_id = str(params.get('user_id', '')).strip()
+                    if not VALID_USER_ID_RE.match(user_id):
+                        return self.reply_json(400, {'ok': False, 'error': 'Invalid user_id format'})
+                    if 'active' not in params:
+                        return self.reply_json(400, {'ok': False, 'error': 'Missing required field: active'})
+                    want = 'active' if params.get('active') else 'disabled'
+                    # 与 users/delete 同一条保护：机主账号不允许停用，
+                    # 否则会出现"把面板自己锁在门外"的后果。
+                    if user_id == MASTER_USER_ID and want != 'active':
+                        return self.reply_json(400, {'ok': False, 'error': 'Cannot disable the master account'})
+                    with data_lock:
+                        u = data.get('users', {}).get(user_id)
+                        if not u:
+                            return self.reply_json(404, {'ok': False, 'error': 'User not found'})
+                        before = u.get('status', 'active')
+                        u['status'] = want
+                    regenerate_page()
+                    return self.reply_json(200, {
+                        'ok': True,
+                        'user_id': user_id,
+                        'status': want,
+                        # changed=false 表示本来就是该状态（幂等）。
+                        # 调用方据此区分"真的改了"与"重复调用"。
+                        'changed': before != want,
+                    })
+
                 elif sub == 'users/list':
                     # BUGFIX #10: 商城节点对账用, 列出所有动态用户 (脱敏不返回 password)
                     now_ts = int(time.time())
@@ -2237,7 +2269,14 @@ if __name__ == '__main__':
                             entry = {
                                 'user_id': uid,
                                 'expires_at': info.get('expires_at', 0),
-                                'active': info.get('expires_at', 0) > now_ts,
+                                # ⚠️ active 必须**同时**看 status 与到期：
+                                # 鉴权回调判的是 status（见 handle_auth），
+                                # 而这里原实现只看 expires_at —— 两者不一致的后果是
+                                # "停用后列表仍报 active，但客户端连不上"，
+                                # 那是最难排查的一类矛盾。两者必须同源。
+                                'active': (info.get('status', 'active') == 'active'
+                                           and info.get('expires_at', 0) > now_ts),
+                                'status': info.get('status', 'active'),
                                 'traffic_limit_bytes': info.get('limit_bytes', 0),
                                 'traffic_used_bytes': info.get('used_bytes', 0),
                                 'ip_limit': info.get('ip_limit', 0),
@@ -3450,7 +3489,10 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
                             users_out.append({
                                 'user_id': uid,
                                 'expires_at': info.get('expires_at', 0),
-                                'active': info.get('expires_at', 0) > now_ts,
+                                # 与 API 通道同一判据（status + 到期），理由见那边注释。
+                                'active': (info.get('status', 'active') == 'active'
+                                           and info.get('expires_at', 0) > now_ts),
+                                'status': info.get('status', 'active'),
                                 'traffic_limit_bytes': info.get('limit_bytes', 0),
                                 'traffic_used_bytes': info.get('used_bytes', 0),
                                 'ip_limit': info.get('ip_limit', 0),
