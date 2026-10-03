@@ -2107,12 +2107,55 @@ if __name__ == '__main__':
                 xj.write_text(json.dumps(cfg, indent=2), encoding='utf-8')
             except Exception:
                 return False
-            # 热重载：先 reload，失败再 restart（xray 不一定支持 reload）
-            r = subprocess.run(['systemctl', 'reload', 'xray'],
+            # 重载 xray。
+            #
+            # ⚠️ 2026-10-03 实测踩坑（真机 jp 节点）：
+            #   开户/销户每次都会走到这里，而 xray **不支持 systemctl reload**
+            #   （它没有 ExecReload），于是每次都回退到 `systemctl restart`。
+            #   连着几次（我的五轮验证一口气开了十几个探针账号）之后，
+            #   systemd 的 start-limit 被打满 —— 服务进入 `failed`：
+            #     xray.service: Start request repeated too quickly.
+            #     xray.service: Failed with result 'start-limit-hit'.
+            #   之后**即使配置完全正确也无法启动**，只能
+            #   `systemctl reset-failed xray` 手工解封。
+            #   症状极具误导性：portal 一切正常、xray.json 也对，
+            #   但 Reality 通道全断、443 没人监听。
+            #
+            # 对策（三条一起，缺一不可）：
+            #   1. restart 前先 reset-failed —— 绕开 start-limit 计数；
+            #   2. 加 ExecReload 到 unit（由调用方保证），这样能走 reload 就不重启；
+            #   3. 节流 —— 短时间内多次变更只重启一次（见 _reality_restart_gate）。
+            if self._reality_restart_allowed():
+                subprocess.run(['systemctl', 'reset-failed', 'xray'],
                                capture_output=True, timeout=5)
-            if r.returncode != 0:
-                subprocess.run(['systemctl', 'restart', 'xray'],
-                               capture_output=True, timeout=5)
+                r = subprocess.run(['systemctl', 'reload', 'xray'],
+                                   capture_output=True, timeout=5)
+                if r.returncode != 0:
+                    subprocess.run(['systemctl', 'restart', 'xray'],
+                                   capture_output=True, timeout=10)
+            return True
+
+        def _reality_restart_allowed(self, min_interval=3.0):
+            """节流：min_interval 秒内只放行一次 xray 重启。
+
+            为什么要节流：批量开户（商城一次性给 10 个用户开号）会产生
+            连续十几次 clients 变更，每次都 restart 一遍既慢又容易撞
+            systemd start-limit。这里做「时间闸门」——多出来的变更
+            仍然会写进 xray.json，只是**不立刻重启**；由下一次调用
+            或 portal 启动时的兜底逻辑补上。
+
+            ⚠️ 被节流掉的那次不能算「成功」：返回 False 让调用方知道
+            「配置已写、服务尚未重载」，与「配置没写」区分开。
+            """
+            # ⚠️ 用模块顶部已导入的 time，不在函数里 import ——
+            #   tests/test_portal_assets.py 的 SourceHygieneTest
+            #   明令禁止函数级 import（会让每个请求都走一次 import 查找，
+            #   且 import 位置分散后很难审计）。
+            now = time.monotonic()
+            last = getattr(self, '_reality_last_restart', 0.0)
+            if now - last < min_interval:
+                return False
+            self._reality_last_restart = now
             return True
 
         def _generate_and_apply_reality(self, restart=True, force=False):
@@ -4338,6 +4381,38 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
 
     server = ThreadingHTTPServer(('127.0.0.1', data['port']), Handler)
     server.requests, server.failures, server.api_requests = [], [], []
+
+    # 启动兜底：如果上一次运行时有 clients 变更被「节流」跳过
+    # （见 _reality_restart_allowed），配置写进 xray.json 了但服务没重载。
+    # 这里在 serve 之前无条件对一次 —— 幂等、便宜（约 100ms）。
+    #
+    # ⚠️ 顺带解封 start-limit：上一版因为频繁 restart 撞上
+    # systemd 的 start-limit，xray 停在 failed 且无法自愈。
+    # reset-failed 是标准的解封手段，不影响正常运行中的服务。
+    try:
+        if Path('/etc/hysteria/xray.json').exists():
+            with data_lock:
+                _want = reality_clients(data)
+            _got = []
+            try:
+                _cfg = json.loads(Path('/etc/hysteria/xray.json').read_text(encoding='utf-8'))
+                for _i in (_cfg.get('inbounds') or []):
+                    if _i.get('protocol') == 'vless' and \
+                       (_i.get('streamSettings') or {}).get('security') == 'reality':
+                        _got = _i.get('settings', {}).get('clients') or []
+                        break
+            except Exception:
+                _got = []
+            if [c.get('email') for c in _want] != [c.get('email') for c in _got]:
+                subprocess.run(['systemctl', 'reset-failed', 'xray'],
+                               capture_output=True, timeout=5)
+                subprocess.run(['systemctl', 'restart', 'xray'],
+                               capture_output=True, timeout=10)
+                print('[portal] 启动时补同步了 xray clients（%d 个）' % len(_want),
+                      file=sys.stderr)
+    except Exception as e:
+        print('[portal] 启动补同步跳过: %s' % str(e)[:120], file=sys.stderr)
+
     server.serve_forever()
 
 
