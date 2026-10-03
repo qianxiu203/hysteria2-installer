@@ -48,6 +48,16 @@ except ImportError as _e:      # pragma: no cover - 只在部署缺文件时触�
 # 机主本人都会被踢下线且再也连不上（只能重装）。因此全站禁止注销它。
 MASTER_USER_ID = 'admin_master'
 
+# 节点门户的版本号（2026-10-04 加）。
+#
+# 用途：主控面板要靠它判断「这台节点跑的是新 portal 还是老 portal」——
+# 老门户没有 capabilities 端点、没有多用户 Reality，功能表现完全不同。
+# 之前只能靠 SSH 上去 grep 源码，主面板看不见。
+#
+# ⚠️ 改动 portal.py 的**能力**时记得同步 +1，否则主面板会按旧能力显示。
+# 格式固定 `PORTAL_VERSION = 'x.y'`（capabilities 端点按行首匹配解析它）。
+PORTAL_VERSION = '2.2'
+
 
 def strip_acl_block(text):
     """去掉 Hysteria config.yaml 里的 acl: 块，保留其余【所有】内容。
@@ -3760,6 +3770,115 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
                 # （靶点硬编码，见 SPEEDTEST_TARGETS 的安全说明）。
                 if sub.split('?', 1)[0] == 'speedtest':
                     return self._h_api_speedtest()
+                if sub == 'capabilities':
+                    # 节点能力总览（2026-10-04 加）。
+                    #
+                    # 为什么需要：主面板要一眼知道「这台节点有什么、什么版本、
+                    # 什么开着」。此前这些信息散在 /reality-status、/bbr-status、
+                    # /warp-status、/awg-state 等多个端点上，而且**全部走网页会话
+                    # 鉴权**（is_authenticated），Bearer api_key 够不到 ——
+                    # 于是主面板只能显示"未知"。
+                    #
+                    # 设计边界（很重要）：
+                    #   * 只暴露**能力与状态**（装没装、开没开、什么版本），
+                    #   **不暴露任何凭据**（私钥/公钥/UUID/api_key/密码）。
+                    #   * 那些敏感值仍只在网页会话下可见，主面板拿不到也不需要。
+                    #   * 因此这个端点可以安全地留在 Bearer 通道上。
+                    m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+                    with data_lock:
+                        d_snap = {
+                            'reality': dict(data.get('reality_config') or {}),
+                            'warp_enabled': bool(data.get('warp_enabled')),
+                            'users_count': len(data.get('users', {})),
+                            'proxy_services': list(data.get('proxy_services') or []),
+                        }
+
+                    def _svc_active(unit):
+                        try:
+                            out = subprocess.run(['systemctl', 'is-active', unit],
+                                                 capture_output=True, text=True,
+                                                 timeout=3).stdout.strip()
+                            return out == 'active'
+                        except Exception:
+                            return False
+
+                    def _bin(name):
+                        return Path('/usr/local/bin/' + name).exists()
+
+                    def _bbr_now():
+                        """读当前内核拥塞控制算法。返回 (是否 BBR 系, 算法名)。
+
+                        ⚠️ 每个请求跑一次 sysctl 是本意：BBR 是**内核运行态**，
+                        缓存它会让面板显示与真实状态脱节（刚开完 BBR 却仍显示 cubic）。
+                        sysctl -n 是纯内存读取，开销可忽略。
+                        """
+                        try:
+                            cc = subprocess.run(
+                                ['sysctl', '-n', 'net.ipv4.tcp_congestion_control'],
+                                capture_output=True, text=True, timeout=3
+                            ).stdout.strip()
+                        except Exception:
+                            cc = ''
+                        return (cc.startswith('bbr'), cc)
+
+                    # 节点门户自身版本：这个文件里写着版本号常量，
+                    # 主面板据此判断"节点跑的是新 portal 还是老 portal"。
+                    portal_version = ''
+                    try:
+                        for line in Path(__file__).read_text(encoding='utf-8').splitlines()[:80]:
+                            if line.startswith('PORTAL_VERSION'):
+                                portal_version = line.split('=', 1)[1].strip().strip('"\'')
+                                break
+                    except Exception:
+                        portal_version = ''
+
+                    return self.reply_json(200, {
+                        'ok': True,
+                        'portal_version': portal_version,
+                        'generated_at': int(time.time()),
+                        'protocols': {
+                            # 主协议恒有；其余按实际安装情况报。
+                            'hysteria2': {
+                                'installed': True,
+                                'active': _svc_active('hysteria-server'),
+                                'port': int(m.get('listen_port', 0) or 0),
+                            },
+                            'vless_reality': {
+                                'installed': _bin('xray'),
+                                'active': _svc_active('xray'),
+                                # 只报端口，不报 UUID/公钥/私钥。
+                                'port': int(d_snap['reality'].get('port', 0) or 0),
+                                # 是否已配置。
+                                #
+                                # ⚠️ 刻意**不引用** reality_config 里的密钥字段名。
+                                # 本端点在 Bearer 通道上，虽然只输出 bool（不泄漏值），
+                                # 但「响应体构造代码里出现密钥字段名」是个**坏信号**：
+                                # ① 后来者照抄很容易顺手把值也带出去；
+                                # ② 静态检查/人工审计无法一眼区分「读了」和「输出了」。
+                                # short_id 是配置过的可靠标志（每次生成配置都会写它），
+                                # 用它判断既准确又让这段代码零密钥字段引用。
+                                'configured': bool(d_snap['reality'].get('short_id')),
+                            },
+                        },
+                        'extras': {
+                            'gost': {'installed': _bin('gost'),
+                                     'active': _svc_active('gost'),
+                                     'services': len(d_snap['proxy_services'])},
+                            'amneziawg': {'installed': _bin('amneziawg-go'),
+                                          'active': _svc_active('amneziawg-go')},
+                            'warp': {'installed': Path('/etc/hysteria/warp').exists()
+                                     or _bin('wireproxy'),
+                                     'enabled': d_snap['warp_enabled']},
+                            'bbr': {'enabled': _bbr_now()[0], 'algo': _bbr_now()[1]},
+                        },
+                        'node': {
+                            'public_ip': m.get('public_ip', ''),
+                            'server_name': m.get('server_name', ''),
+                            'is_insecure': bool(m.get('is_insecure')),
+                            'hop_port_range': m.get('hop_port_range', ''),
+                            'users_count': d_snap['users_count'],
+                        },
+                    })
                 if sub == 'node/meta':
                     m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
                     with data_lock:
