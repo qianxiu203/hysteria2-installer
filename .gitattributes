@@ -1,2 +1,19 @@
-*.sh text eol=lf
-*.py text eol=lf
+* text=auto
+
+# 显式声明 eol=lf：Windows 上 PortableGit 把 core.autocrlf 设成 true，
+# 若不逐类声明，检出结果会是 CRLF，传到 Linux 会报
+# `bash: $'\r': command not found`（.py 则表现为 gofmt/py_compile 正常但行尾不一致）。
+*.sh  text eol=lf
+*.py  text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md  text eol=lf
+*.json text eol=lf
+Dockerfile* text eol=lf
+
+# 二进制资源不做行尾转换
+*.png binary
+*.jpg binary
+*.gz  binary
+*.tar binary
+*.svg text eol=lf

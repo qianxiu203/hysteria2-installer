@@ -1,0 +1,130 @@
+name: Tests
+
+# 守住几条容易悄悄退化的不变量：
+#   1. portal.py 必须走运行时获取，不允许再内嵌回 install.sh
+#      （内嵌副本曾占 install.sh 七成行数，每次改门户都要手动同步，极易漏）
+#   2. AmneziaWG 混淆参数必须始终满足上游硬约束，且服务端/客户端配置逐字节一致
+#   3. portal.py 改过 SCRIPT 之后 CSP 的 sha256 白名单必须自动跟上
+#   4. 三份 shell 脚本的语法
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shell-and-portal:
+    name: 语法 / AWG 逻辑 / 门户
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 确保 shell 可执行位
+        run: chmod +x install.sh awgctl.sh tests/test_awgctl.sh
+
+      - name: 安装依赖（jq / qrencode 是测试与门户的硬依赖）
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq qrencode
+
+      - name: Shell 语法校验
+        run: |
+          bash -n install.sh
+          bash -n awgctl.sh
+          bash -n tests/test_awgctl.sh
+          # 下面三个是「真机冒烟」脚本：需要 root + 已部署的服务（会真的装/卸 AWG、
+          # 创建删除用户、重启面板），所以 CI 里只做语法校验，不在 runner 上执行。
+          bash -n tests/awg-e2e-smoke.sh
+          bash -n tests/awg-internet-netns.sh
+          bash -n tests/awg-internet-capture.sh
+          bash -n tests/portal-buttons-smoke.sh
+          bash -n tests/portal-update-cycle.sh
+          bash -n fix_cert_chain.sh
+
+      - name: 交互逻辑行为测试
+        # 这些不是语法检查，而是真的把脚本跑起来验行为 ——
+        # 下面几条都是新手真实踩过的坑，必须锁住。
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+
+          # 1) 脚本从 stdin 读入（curl … | bash）必须被拦住，并告知正确用法。
+          #    拦不住的话，所有 read 都会去读脚本体，表现为菜单乱跳/卡住且无报错。
+          set +e
+          out=$(cat install.sh | bash 2>&1); rc=$?
+          set -e
+          echo "$out" | grep -q '脚本是从 stdin 读入' || fail "未拦截 curl|bash 用法"
+          [ "$rc" -ne 0 ] || fail "拦截后未以非零码退出"
+
+          # 2) 答案从 stdin 喂入（printf '1\n' | bash install.sh）是正常自动化用法，
+          #    不能被上面的检测误杀。
+          #    ⚠️ 这里不能断言"菜单会出现" —— CI runner 是非 root，
+          #    check_root 会在打印菜单之前就退出；要断言的是"拦截逻辑没有触发"。
+          out2=$(printf '0\n' | bash install.sh 2>&1 || true)
+          if echo "$out2" | grep -q '脚本是从 stdin 读入'; then
+            fail "管道喂答案被误拦（脚本来源检测不该触发）"
+          fi
+          echo "  ✓ 管道喂答案未被误拦"
+
+          # 3) 端口校验：合法放行、非法拒绝
+          eval "$(sed -n '/^is_valid_port()/,/^}/p' install.sh)"
+          for p in 1 80 8443 65535; do
+            is_valid_port "$p" || fail "合法端口被拒: $p"
+          done
+          for p in 0 65536 abc '' '80 ' -1 8080x; do
+            if is_valid_port "$p"; then fail "非法端口被放行: [$p]"; fi
+          done
+
+          # 4) 免交互环境变量必须在动工之前就校验（否则装到一半才报错）
+          out4=$(HY2_PORT=abc bash install.sh install 2>&1 || true)
+          echo "$out4" | grep -q '不是合法端口' || fail "HY2_PORT 非法值未被拦"
+          out5=$(HY2_CERT_TYPE=9 bash install.sh install 2>&1 || true)
+          echo "$out5" | grep -q 'HY2_CERT_TYPE' || fail "HY2_CERT_TYPE 非法值未被拦"
+          out6=$(HY2_CERT_TYPE=3 bash install.sh install 2>&1 || true)
+          echo "$out6" | grep -q 'HY2_DOMAIN' || fail "选了 ACME 但缺 HY2_DOMAIN 未被拦"
+
+          echo "✅ 交互逻辑行为测试全部通过"
+
+      - name: 确认 node 可用
+        # tests/test_portal_assets.py 会用 node --check 做内嵌 JS 的语法检查。
+        # 缺 node 时该测试会静默 skip —— 那样就等于没有防护，所以这里显式失败。
+        # （曾因 SCRIPT 常量的换行被 Python 转义吃掉导致 JS 语法错误，
+        #   整段脚本失效、Web 面板所有按钮失灵，而当时没有任何测试能拦住。）
+        run: node --version
+
+      - name: 校验 portal.py 是运行时获取而非内嵌
+        # 内嵌副本曾占 install.sh 约七成行数（4948 行 / 244KB），每次改 portal.py
+        # 都要手动同步一次，漏一次就是「仓库里的门户」与「装到机器上的门户」不一致。
+        # 现已改为运行时获取（install.sh 已从 7121 行降到 2255 行），这里锁住新不变量。
+        # 同样的断言也在 tests/test_portal.py 里，此处单独列出是为了在 CI 输出里显眼。
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          script = Path('install.sh').read_text(encoding='utf-8')
+          if "<<'PYPORTAL'" in script:
+              raise SystemExit('install.sh 又内嵌 portal.py 了；请改回运行时获取')
+          need = ['portal_fetch_py() {', 'portal_ensure_py() {', 'ast.parse',
+                  'api.github.com', 'cdn.jsdelivr.net', 'raw.githubusercontent.com']
+          missing = [t for t in need if t not in script]
+          if missing:
+              raise SystemExit('install.sh 缺少预期内容: ' + ', '.join(missing))
+          print('✅ portal.py 走运行时获取，三源回退与语法校验均在位')
+          PY
+
+      - name: 门户程序获取逻辑冒烟（真跑拉取 + 失败路径）
+        # 门户现在由 install.sh 运行时获取，这条拉取路径成了新的关键链路，
+        # 所以不能只做静态检查，要真的把函数跑起来：
+        #   1. 三源都不可达时必须明确报错并中止（且不留半成品文件）
+        #   2. 语法不合法的内容必须被拒绝
+        #   3. 正常路径能取到并通过 Python 语法校验
+        run: bash tests/portal-py-fetch-smoke.sh
+
+      - name: AmneziaWG 纯逻辑测试
+        run: bash tests/test_awgctl.sh
+
+      - name: Python 测试套件
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
