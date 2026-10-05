@@ -1224,7 +1224,26 @@ def reality_registry(data):
 
 
 def reality_clients(data):
-    """生成 xray inbound.settings.clients —— 每个 Hy2 用户一个 VLESS 身份。
+    """生成 xray inbound.settings.clients —— 每个**在用**的 Hy2 用户一个 VLESS 身份。
+
+    ⚠️ 2026-10-04 修的关键缺口：**必须排除 status='disabled' 的用户**。
+
+    为什么（这是在 us2 上真实连接测出来的）：
+        Reality 走的是 **xray 自己的 UUID 白名单**，它**不经过 hy2 的
+        handle_auth** —— 而 status 字段只在 handle_auth 里被检查。
+        于是旧实现下：
+            users/set_status(active=False)  -> Hy2 立刻被拒，但 **Reality 照样能连**
+        实测：停用后拿原参数连 Reality 仍返回 204。
+        这就是「停用了但货还在」—— 与 10-03 那批孤儿账号同源。
+
+    为什么在**生成时过滤**而不是**从 registry 里删**：
+        registry（data['reality_users']）是「user_id -> UUID」的**持久映射**，
+        UUID 由 uuid5 派生、与 user_id 一一对应。
+        停用是**可恢复**语义（买家不用重配），所以：
+          - 停用：UUID 仍留在 registry（保住映射），但从 clients 里**消失** → 连不上
+          - 启用：同一 uuid5 让它**自动回到** clients → 原样恢复，无需重发配置
+        如果改成停用时删 registry 条目，启用后虽然能重新派生出一样的 UUID，
+        但中间那段「注册表与真实用户不一致」的状态容易在别处被误读，不如只过滤干净。
 
     空表也要返回**一个**占位 client：xray 的 vless inbound 在
     clients 为空时会拒绝所有连接，且 `systemctl restart xray` 仍然成功 ——
@@ -1232,12 +1251,204 @@ def reality_clients(data):
     所以宁可给一个随机占位 UUID，也不要让 clients 空着。
     """
     reg = reality_registry(data)
-    clients = [{'id': uid_uuid, 'flow': 'xtls-rprx-vision', 'email': uid}
-               for uid, uid_uuid in sorted(reg.items())]
+    users = data.get('users', {}) or {}
+    clients = []
+    for uid, uid_uuid in sorted(reg.items()):
+        info = users.get(uid) or {}
+        # 只有 active 的用户才进白名单。
+        # 缺 status 视为 active —— 与 handle_auth 的判据保持同源
+        # （那边也是 `info.get('status', 'active') == 'active'`），
+        # 两处判据必须一致，否则又会出现「一处放行、一处拒绝」的矛盾状态。
+        if info.get('status', 'active') != 'active':
+            continue
+        clients.append({'id': uid_uuid, 'flow': 'xtls-rprx-vision', 'email': uid})
     if not clients:
         clients = [{'id': str(uuid.uuid4()), 'flow': 'xtls-rprx-vision',
                     'email': 'placeholder'}]
     return clients
+
+
+def _reality_public_params(rcfg):
+    """挑出 Reality 的**客户端公开参数**（白名单）。
+
+    背景（2026-10-04）：主面板要把 Reality 接进合并订阅，就必须知道每台节点
+    自己的 pbk / sid / sni / port。此前这些只在节点 Web 会话里可见，
+    Bearer 通道拿不到 → 面板只能下发 Hy2，订阅里永远没有 Reality。
+
+    为什么这些可以走 Bearer 通道：
+        pbk（公钥）、sid（short_id）、sni 本来就会写进下发给客户端的订阅链接，
+        客户端人手一份 —— 它们是**客户端配置必须携带的公开值**，不是机密。
+        **private_key 才是服务端机密**，这里**绝不**包含它。
+
+    为什么用白名单而不是整字典透传：
+        reality_config 里同时存着 private_key。整字典透传等于把私钥
+        送上 Bearer 通道；而白名单让「以后新增字段」默认**不**泄漏 ——
+        加字段必须显式改这里，是一次有意识的决定。
+
+    返回值恒为 dict（即使 rcfg 为空），方便调用方直接 ** 展开：
+    缺少的参数会缺席，而不是变成 None —— 面板据此判断"这台没配 Reality"。
+    """
+    if not isinstance(rcfg, dict):
+        return {}
+    out = {}
+    # 只挑明确要用的四个键。顺序固定，便于人读与测试对比。
+    pub_key = rcfg.get('public_key')
+    if isinstance(pub_key, str) and pub_key.strip():
+        out['public_key'] = pub_key.strip()
+    short_id = rcfg.get('short_id')
+    if isinstance(short_id, str) and short_id.strip():
+        out['short_id'] = short_id.strip()
+    dest_sni = rcfg.get('dest_sni')
+    if isinstance(dest_sni, str) and dest_sni.strip():
+        out['dest_sni'] = dest_sni.strip()
+    try:
+        port = int(rcfg.get('port') or 0)
+    except (TypeError, ValueError):
+        port = 0
+    if 1 <= port <= 65535:
+        out['port'] = port
+    return out
+
+
+def _listening_ports():
+    """读出「当前已被监听」的 TCP/UDP 端口集合。
+
+    ⚠️ 为什么用 `ss` 而不是 `socket.bind()` 探测（2026-10-04 遵循既有教训）：
+    本文件里 gost 那段代码明确记着一条血泪——
+        「BUGFIX: 不再用 socket bind 做端口探测 (在某些环境会卡住)」
+    所以这里沿用同一条路线：**只读地看内核里已有的监听表**，不主动 bind。
+    好处是不卡、无副作用、也不需要 root 之外的任何能力。
+
+    返回 set；`ss` 不可用或输出异常时返回**空集**——
+    调用方据此退回到「只避开内置黑名单」，而不是直接失败。
+    （宁可少避开一个端口，也不该让整个 Reality 配置生成不出来。）
+    """
+    ports = set()
+    for flag in ('-lntH', '-lunH'):
+        try:
+            out = subprocess.run(['ss', flag], capture_output=True, text=True,
+                                 timeout=5).stdout
+        except Exception:
+            continue
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            # 第 4 列形如 0.0.0.0:8443 / [::]:22 / 127.0.0.1:43685 / *:54344
+            addr = parts[3]
+            if ':' not in addr:
+                continue
+            tail = addr.rsplit(':', 1)[1]
+            if tail.isdigit():
+                ports.add(int(tail))
+    return ports
+
+
+# Reality 自动选端口时**永不使用**的端口。
+#
+# 分两类，理由不同：
+#   1. 系统/常规服务端口：22(ssh) 80 443 —— 其中 443 要单独处理（见下），
+#      80/22 绝不能被 Reality 抢走。
+#   2. 本项目自用的固定端口：19898(hy2 备用) 40000(端口跳跃上限)
+#      8443(默认订阅端口) 56195 —— 这些在别的节点上就是别人的位置。
+#      ⚠️ 洛杉矶-NTT 实测：8443 是 **hysteria 的订阅端口**，
+#      而别的节点 8443 是 xray —— 光看数字无法判断归属，
+#      所以最终判据必须是「实际监听表」，这里只是兜底黑名单。
+_REALITY_RESERVED_PORTS = {
+    22, 80, 19898, 40000, 56195, 8443,
+}
+
+# 自动选端口的候选顺序。
+#
+# 443 放第一位：Reality 伪装成常规 HTTPS，443 最自然、最不容易被
+# 中间设备针对；但**只有它真的空闲时才用**（不少节点 443 被 Caddy 占着）。
+# 其余候选按「远离常见服务区间 + 好记」挑选，覆盖 443 冲突的常见情形。
+_REALITY_PORT_CANDIDATES = [443, 8443, 2053, 2083, 2087, 2096, 9443, 5443, 8444]
+
+
+def _pick_reality_port(preferred=None, extra_blocked=None):
+    """挑一个**确实没被占用**的端口给 Reality 用。
+
+    参数：
+        preferred    —— 期望端口（来自已有配置或调用方指定）。可用就直接用它。
+        extra_blocked—— 额外要避开的端口（如本机 hy2 的 listen_port）。
+
+    返回 (port, reason)：
+        port 为 0 表示**没找到可用端口**，调用方应当报错而不是硬塞一个。
+        reason 是人可读的说明，会写进日志/响应，方便运维判断。
+
+    判定顺序（从「最可信」到「最将就」）：
+        1. preferred 空闲 → 用它（保持既有配置稳定，不随便改端口）
+        2. 候选表里第一个空闲的 → 用它
+        3. 全都不空闲 → 返回 0（**绝不硬塞**，宁可不生成也不配一个撞车的）
+    """
+    listening = _listening_ports()
+    blocked = set(_REALITY_RESERVED_PORTS)
+    if extra_blocked:
+        for p in extra_blocked:
+            try:
+                iv = int(p)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= iv <= 65535:
+                blocked.add(iv)
+
+    def _as_port(v):
+        """把任意输入安全地转成端口号，非法一律返回 0。
+
+        ⚠️ 为什么必须容错（2026-10-04 单测抓到的真 bug）：
+        旧写法直接拿 preferred 参与 `p < 1` 比较，一旦它是字符串（例如
+        portal.json 被手工改坏、或旧版本写入了非数字），就抛
+        TypeError: '<' not supported between instances of 'str' and 'int'，
+        **把整个 Reality 配置生成打死** —— 而调用方只看到 500，
+        根本猜不到是「配置里存了个坏端口值」。
+        这里降级为「忽略这个偏好值」，继续正常选端口。
+        """
+        try:
+            iv = int(v)
+        except (TypeError, ValueError):
+            return 0
+        return iv if 1 <= iv <= 65535 else 0
+
+    # `pref` 必须在 free() 之前算出来 —— free() 要用它判断
+    # 「这个端口是不是 Reality 自己已经在用的」。
+    pref = _as_port(preferred)
+
+    def free(p):
+        # ⚠️⚠️ 顺序与例外（2026-10-04 实测抓到的严重风险，务必看懂再改）：
+        #
+        # 「已在用这个端口的，可能正是 Reality 自己」——这是最常见的情况：
+        # 重新生成配置、点「重置密钥」时，xray 正监听在 8443 上。
+        # 如果把黑名单放在最前面，8443 会被判成「被占用」，
+        # 于是**给一个正在服务的节点换端口** —— tokyo 实测就会从
+        # 8443 换到 2053，**21 个在跑的用户当场全部断线**。
+        #
+        # 所以判据必须是：
+        #   * 该端口在**配置里已经属于 Reality**（preferred == p）
+        #     ⇒ 无论监听表还是黑名单都不算冲突 —— 那就是「自己」。
+        #   * 否则才看黑名单与监听表。
+        if p == pref:
+            return True
+        if p in blocked:
+            return False
+        # 以**实际监听表**为准。黑名单只是补充 ——
+        # 因为「8443 归谁」在不同节点上完全不同，写死数字必然出错。
+        return p not in listening
+
+    # 1) 已有配置的端口优先（避免无谓地改动已有节点的端口）
+    if pref and free(pref):
+        return pref, '沿用已配置端口 %d（空闲）' % pref
+
+    # 2) 按候选顺序找第一个空闲的
+    for cand in _REALITY_PORT_CANDIDATES:
+        if free(cand):
+            if pref:
+                return cand, ('原端口 %d 已被占用，自动改用 %d' % (pref, cand))
+            return cand, '自动选择空闲端口 %d' % cand
+
+    # 3) 失败：绝不硬塞
+    return 0, ('未找到可用端口（候选 %s 全部被占用；'
+               '当前监听 %s）' % (_REALITY_PORT_CANDIDATES, sorted(listening)[:12]))
 
 
 def reality_uri_for_user(rcfg, user_id, public_ip, label=None):
@@ -2210,9 +2421,51 @@ if __name__ == '__main__':
             short_id = (secrets.token_hex(4) if force
                         else (rcfg_old.get('short_id') or secrets.token_hex(4)))
             dest_sni = rcfg_old.get('dest_sni') or 'www.apple.com'
-            listen_port = rcfg_old.get('port') or 443
 
+            # ---- 端口：自动避让，绝不硬塞（2026-10-04 加）----
+            #
+            # 旧实现是 `rcfg_old.get('port') or 443` —— **首次安装无脑用 443**。
+            # 后果（洛杉矶-NTT 实测）：该机 8443 是 hysteria 的订阅端口、
+            # 443 也常被 Caddy 之类的服务占着，闭眼选必然撞车；
+            # 而撞车的表现是「Reality 起不来或端口被抢」，排查成本很高。
+            #
+            # 现在改为：先问内核「哪些端口已在监听」，再从候选表里挑第一个空闲的。
+            # 已有配置且仍空闲 ⇒ 保持原端口不变（不给老节点无谓改配置）。
+            #
+            # 注意：这里**只读**监听表，不做 bind 探测 ——
+            # 本文件 gost 段记着血泪：「不再用 socket bind 做端口探测(在某些环境会卡住)」。
             m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+            _avoid = set()
+            try:
+                _avoid.add(int(m.get('listen_port') or 0))
+            except Exception:
+                pass
+            try:
+                _avoid.add(int(m.get('subscription_port') or 0))
+            except Exception:
+                pass
+
+            listen_port, port_reason = _pick_reality_port(
+                preferred=rcfg_old.get('port'), extra_blocked=_avoid)
+            if not listen_port:
+                # 找不到空闲端口 ⇒ **明确失败**，不生成一份注定冲突的配置。
+                #
+                # ⚠️ 用抛异常而不是改返回值：本函数有 3 个调用点
+                # （install-xray 之后、reality-toggle、reality-reset），
+                # 改签名要同时改三处、且每处后续逻辑不同，很容易漏掉一处
+                # 导致「看起来成功、实际没配置」。抛异常让**所有**调用点
+                # 统一走各自的错误分支，不会有人悄悄拿到 None 当成功用。
+                raise RuntimeError(port_reason)
+            # 端口发生了变更才提示。旧端口可能是非法值（字符串/越界），
+            # 这里同样要容错 —— 别让一个坏的历史值把日志行本身搞崩。
+            try:
+                _old_port = int(rcfg_old.get('port'))
+            except (TypeError, ValueError):
+                _old_port = 0
+            if _old_port and _old_port != listen_port:
+                print('[portal] Reality 端口变更: %s' % port_reason,
+                      file=sys.stderr)
+
             public_ip = m.get('public_ip', '127.0.0.1')
 
             with data_lock:
@@ -2544,6 +2797,21 @@ if __name__ == '__main__':
                         before = u.get('status', 'active')
                         u['status'] = want
                     regenerate_page()
+                    # ⚠️ 2026-10-04 补：停用/启用必须同步到 xray。
+                    #
+                    # 原因：status 只在 hy2 的 handle_auth 里被检查，
+                    # 而 Reality 走的是 xray 自己的 UUID 白名单 ——
+                    # **不经过 handle_auth**。旧实现下停用后 Reality 仍可连
+                    # （us2 实测停用后仍返回 204）。
+                    #
+                    # reality_clients() 现在会过滤掉 disabled 用户，
+                    # 所以这里重写一次 xray.json 就能真正切断。
+                    #
+                    # 只在**状态真的变了**时才同步：重复调用同一状态
+                    # （changed=False）不该触发 xray 重载 —— 面板可能轮询式调用，
+                    # 每次都重启会撞 systemd 的 start-limit（10-03 踩过）。
+                    if before != want:
+                        self._sync_reality_clients()
                     return self.reply_json(200, {
                         'ok': True,
                         'user_id': user_id,
@@ -3780,10 +4048,15 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
                     # 于是主面板只能显示"未知"。
                     #
                     # 设计边界（很重要）：
-                    #   * 只暴露**能力与状态**（装没装、开没开、什么版本），
-                    #   **不暴露任何凭据**（私钥/公钥/UUID/api_key/密码）。
-                    #   * 那些敏感值仍只在网页会话下可见，主面板拿不到也不需要。
-                    #   * 因此这个端点可以安全地留在 Bearer 通道上。
+                    #   * 只暴露**能力、状态与客户端公开参数**。
+                    #   * **服务端机密绝不出现**：private_key、api_key、任何用户的密码。
+                    #   * 为什么公开参数（pbk/sid/sni）可以在这里给：
+                    #     它们本来就会写进下发给客户端的订阅链接，属于「客户端
+                    #     配置必须携带的公开值」，不是机密。主面板要生成合并
+                    #     订阅就必须拿到它们。
+                    #   * 收窄到**白名单**（见 _reality_public_params）：只挑
+                    #     明确要用的几个键，不做整字典透传 —— 这样以后
+                    #     reality_config 里新增任何字段都不会自动泄漏出去。
                     m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
                     with data_lock:
                         d_snap = {
@@ -3843,22 +4116,30 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
                                 'active': _svc_active('hysteria-server'),
                                 'port': int(m.get('listen_port', 0) or 0),
                             },
-                            'vless_reality': {
-                                'installed': _bin('xray'),
-                                'active': _svc_active('xray'),
-                                # 只报端口，不报 UUID/公钥/私钥。
-                                'port': int(d_snap['reality'].get('port', 0) or 0),
-                                # 是否已配置。
+                            'vless_reality': dict(
+                                {
+                                    'installed': _bin('xray'),
+                                    'active': _svc_active('xray'),
+                                    'port': int(d_snap['reality'].get('port', 0) or 0),
+                                    # 是否已配置。
+                                    #
+                                    # short_id 是配置过的可靠标志（每次生成配置都会写它）。
+                                    'configured': bool(d_snap['reality'].get('short_id')),
+                                },
+                                # ---- 客户端公开参数（2026-10-04 加）----
                                 #
-                                # ⚠️ 刻意**不引用** reality_config 里的密钥字段名。
-                                # 本端点在 Bearer 通道上，虽然只输出 bool（不泄漏值），
-                                # 但「响应体构造代码里出现密钥字段名」是个**坏信号**：
-                                # ① 后来者照抄很容易顺手把值也带出去；
-                                # ② 静态检查/人工审计无法一眼区分「读了」和「输出了」。
-                                # short_id 是配置过的可靠标志（每次生成配置都会写它），
-                                # 用它判断既准确又让这段代码零密钥字段引用。
-                                'configured': bool(d_snap['reality'].get('short_id')),
-                            },
+                                # 为什么必须给：主面板要把 Reality 接进**合并订阅**，
+                                # 就必须知道每台节点自己的 pbk / sid / sni。
+                                # 此前只有节点 Web 会话能看到这些值，Bearer 通道
+                                # 拿不到 —— 于是面板只能下发 Hy2，订阅里永远没有
+                                # Reality（2026-10-04 实测确认的缺口）。
+                                #
+                                # 边界（很重要）：这里给的是**客户端配置必须携带的
+                                # 公开值** —— pbk/sid/sni 本来就会写进订阅链接，
+                                # 客户端人手一份，不是机密。
+                                # **private_key 永远不在此输出**，它才是真正的服务端机密。
+                                **_reality_public_params(d_snap['reality']),
+                            ),
                         },
                         'extras': {
                             'gost': {'installed': _bin('gost'),

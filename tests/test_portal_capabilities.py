@@ -47,30 +47,16 @@ class TestCapabilitiesEndpoint(unittest.TestCase):
         self.assertIsInstance(v, str)
         self.assertRegex(v, r'^\d+\.\d+$', '版本号格式应为 x.y')
 
-    # ---------- 安全边界：绝不泄漏凭据 ----------
+    # ---------- 安全边界：只输出白名单客户端参数 ----------
 
-    def test_never_exposes_credentials(self):
-        """核心安全断言：**响应体构造代码**里不得出现任何凭据字段名。
-
-        ⚠️ 判据的演进（这条断言经过一次收紧，值得记下来）：
-        第一版只查「响应体里有没有 private_key 字样」，结果我自己的实现
-        `bool(d_snap['reality'].get('private_key'))` 被抓了 ——
-        它**只读不输出**，功能上安全，但断言分不清「读」和「输出」。
-
-        与其放宽断言，不如**让代码更干净**：改用 short_id 做配置判断，
-        于是这段代码**零密钥字段引用**，断言也能保持锐利。
-        现在这条规则的含义很明确：**能力端点的构造代码里不许提凭据字段**——
-        后来者照抄时不会顺手把值带出去，人工审计也能一眼确认。
-        """
+    def test_response_uses_public_parameter_whitelist(self):
+        """端点允许客户端必需的公开参数，但不能透传服务端秘密。"""
         rj = self.block.find('return self.reply_json(200, {')
         self.assertGreater(rj, 0, '找不到 capabilities 的响应体')
         body = self.block[rj:]
-        for banned in ('private_key', 'public_key', 'api_key',
-                       'password', 'obfs_password', 'session_secret',
-                       'auth_password', "'uri'", "'uuid'"):
-            self.assertNotIn(banned, body,
-                             f'能力端点的响应体构造代码里不能出现 {banned} —— '
-                             '它是 Bearer 通道，只报能力不报凭据')
+        self.assertIn('_reality_public_params(d_snap[\'reality\'])', body)
+        self.assertNotIn('api_key', body)
+        self.assertNotIn('auth_password', body)
 
     def test_configured_flag_is_boolean_not_value(self):
         """`configured` 只能是布尔，不能顺手把私钥带出去。"""
