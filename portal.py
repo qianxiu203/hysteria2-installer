@@ -56,7 +56,7 @@ MASTER_USER_ID = 'admin_master'
 #
 # ⚠️ 改动 portal.py 的**能力**时记得同步 +1，否则主面板会按旧能力显示。
 # 格式固定 `PORTAL_VERSION = 'x.y'`（capabilities 端点按行首匹配解析它）。
-PORTAL_VERSION = '2.2'
+PORTAL_VERSION = '2.3'
 
 
 def strip_acl_block(text):
@@ -2352,9 +2352,10 @@ if __name__ == '__main__':
                 r = subprocess.run(['systemctl', 'reload', 'xray'],
                                    capture_output=True, timeout=5)
                 if r.returncode != 0:
-                    subprocess.run(['systemctl', 'restart', 'xray'],
-                                   capture_output=True, timeout=10)
-            return True
+                    r = subprocess.run(['systemctl', 'restart', 'xray'],
+                                       capture_output=True, timeout=10)
+                return r.returncode == 0
+            return False
 
         def _reality_restart_allowed(self, min_interval=3.0):
             """节流：min_interval 秒内只放行一次 xray 重启。
@@ -2686,6 +2687,8 @@ if __name__ == '__main__':
                     note = str(params.get('note', '')).strip()[:200]
 
                     with data_lock:
+                        if params.get('create_only') and user_id in data.get('users', {}):
+                            return self.reply_json(409, {'ok': False, 'error': 'User already exists'})
                         data.setdefault('users', {})[user_id] = {
                             'password': pwd,
                             'expires_at': expires,
@@ -2702,8 +2705,12 @@ if __name__ == '__main__':
                         rcfg = dict(data.get('reality_config', {}) or {})
                     regenerate_page()
 
-                    # 销户/开户都要让 xray 的 clients 跟着变（多协议共用一套账号）
-                    self._sync_reality_clients()
+                    # 受控对账开户必须确认Reality生效；失败可GET→update同值重试。
+                    if params.get('create_only') and Path('/etc/hysteria/xray.json').exists():
+                        if not self._sync_reality_clients():
+                            return self.reply_json(503, {'ok': False, 'error': 'Reality sync failed; retry required'})
+                    else:
+                        self._sync_reality_clients()
 
                     m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
                     # artifacts 传入 reality + user_id ⇒ 输出「Hy2 + Reality」双节点
@@ -2727,6 +2734,43 @@ if __name__ == '__main__':
                         'clash': clash_yaml,
                         'sing_box': sing_json
                     })
+
+                elif sub == 'users/update':
+                    # 安全属性更新：不接收用量/创建时间/流量额度，不覆盖用户对象。
+                    user_id = str(params.get('user_id', '')).strip()
+                    if not VALID_USER_ID_RE.match(user_id) or user_id == MASTER_USER_ID:
+                        return self.reply_json(400, {'ok': False, 'error': 'Invalid managed user_id'})
+                    allowed = {'user_id', 'password', 'expires_at', 'ip_limit', 'status'}
+                    if set(params) - allowed:
+                        return self.reply_json(400, {'ok': False, 'error': 'Unsupported attribute'})
+                    try:
+                        changes = {}
+                        if 'password' in params:
+                            if not isinstance(params['password'], str) or not params['password']:
+                                raise ValueError()
+                            changes['password'] = params['password']
+                        if 'expires_at' in params:
+                            changes['expires_at'] = int(params['expires_at'])
+                            if changes['expires_at'] < 0: raise ValueError()
+                        if 'ip_limit' in params:
+                            changes['ip_limit'] = int(params['ip_limit'])
+                            if not 0 <= changes['ip_limit'] <= 1000: raise ValueError()
+                        if 'status' in params:
+                            if params['status'] not in ('active', 'disabled'): raise ValueError()
+                            changes['status'] = params['status']
+                    except (ValueError, TypeError):
+                        return self.reply_json(400, {'ok': False, 'error': 'Invalid attribute'})
+                    with data_lock:
+                        u = data.get('users', {}).get(user_id)
+                        if u is None:
+                            return self.reply_json(404, {'ok': False, 'error': 'User not found'})
+                        u.update(changes)
+                        result = {k: v for k, v in u.items() if k != 'password'}
+                    regenerate_page()
+                    # 即使同值也重试权威同步；不得因上次写入已落盘而吞掉重载失败。
+                    if Path('/etc/hysteria/xray.json').exists() and not self._sync_reality_clients():
+                        return self.reply_json(503, {'ok': False, 'error': 'Reality sync failed; retry required'})
+                    return self.reply_json(200, {'ok': True, 'user_id': user_id, 'user': result})
 
                 elif sub == 'users/renew':
                     user_id = str(params.get('user_id', '')).strip()
@@ -2810,8 +2854,8 @@ if __name__ == '__main__':
                     # 只在**状态真的变了**时才同步：重复调用同一状态
                     # （changed=False）不该触发 xray 重载 —— 面板可能轮询式调用，
                     # 每次都重启会撞 systemd 的 start-limit（10-03 踩过）。
-                    if before != want:
-                        self._sync_reality_clients()
+                    if Path('/etc/hysteria/xray.json').exists() and not self._sync_reality_clients():
+                        return self.reply_json(503, {'ok': False, 'error': 'Reality sync failed; retry required'})
                     return self.reply_json(200, {
                         'ok': True,
                         'user_id': user_id,
@@ -4160,6 +4204,16 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
                             'users_count': d_snap['users_count'],
                         },
                     })
+                if sub.startswith('users/get/'):
+                    user_id = sub[len('users/get/'):]
+                    if not VALID_USER_ID_RE.match(user_id):
+                        return self.reply_json(400, {'ok': False, 'error': 'Invalid user_id format'})
+                    with data_lock:
+                        u = data.get('users', {}).get(user_id)
+                        if u is None:
+                            return self.reply_json(404, {'ok': False, 'error': 'User not found'})
+                        result = {k: v for k, v in u.items() if k != 'password'}
+                    return self.reply_json(200, {'ok': True, 'user_id': user_id, 'user': result})
                 if sub == 'node/meta':
                     m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
                     with data_lock:
