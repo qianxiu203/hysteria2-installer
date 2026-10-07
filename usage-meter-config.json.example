@@ -1,0 +1,17 @@
+{
+  "_comment": [
+    "真实计量模块的配置模板。install.sh 部署时会用 config.yaml 里",
+    "trafficStats 的实际 secret 覆盖 hysteria.secret，此处只是占位。",
+    "⚠️ 不要把真实 secret 提交进仓库。",
+    "reality 段：binary 是 xray 可执行文件路径，address 是 StatsService 的",
+    "回环监听地址（模块会校验必须以 127.0.0.1: 开头）。"
+  ],
+  "hysteria": {
+    "url": "http://127.0.0.1:19996",
+    "secret": "REPLACE_ME_AT_INSTALL_TIME"
+  },
+  "reality": {
+    "binary": "/usr/local/bin/xray",
+    "address": "127.0.0.1:19997"
+  }
+}

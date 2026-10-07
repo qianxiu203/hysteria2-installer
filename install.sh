@@ -906,6 +906,38 @@ elif [[ "$TARGET" == "portal" ]]; then
         cp -f "$HY2_DIR/portal.py" "$HY2_DIR/portal.py.bak" 2>/dev/null || true
         mv -f "$TMP_PORTAL" "$HY2_DIR/portal.py"
         chmod 644 "$HY2_DIR/portal.py"
+        # 计量模块一并更新（2026-10-08）。
+        # ⚠️ 只换 portal.py 会让四个计量模块永远停在旧版，而 portal.py
+        # 按固定文件名加载它们 —— 新 portal 配旧模块（或反过来）
+        # 可能因接口不匹配而静默降级为「未开始计量」。
+        _meter_upd_ok=1
+        for _m in usage-meter-core-20261007-v1.py usage-meter-readers-20261007-v1.py usage-meter-runtime-20261007-v1.py usage-meter-xray-config-20261007-v1.py; do
+            _tmp_m="/tmp/$_m.upd"
+            rm -f "$_tmp_m"
+            curl -fsSL -H "Accept: application/vnd.github.raw" "https://api.github.com/repos/${REPO}/contents/${_m}?ref=main" -o "$_tmp_m" 2>/dev/null || true
+            if ! grep -q 'usage' "$_tmp_m" 2>/dev/null; then
+                curl -fsSL "https://cdn.jsdelivr.net/gh/${REPO}@main/${_m}" -o "$_tmp_m" 2>/dev/null || true
+            fi
+            if [[ -s "$_tmp_m" ]]; then
+                if python3 -c 'import ast,sys; ast.parse(open(sys.argv[1],encoding="utf-8").read())' "$_tmp_m" 2>/dev/null; then
+                    mv -f "$_tmp_m" "$HY2_DIR/$_m"
+                    chmod 644 "$HY2_DIR/$_m"
+                else
+                    echo "计量模块 ${_m} 语法校验失败，保留旧版" >&2
+                    rm -f "$_tmp_m"
+                    _meter_upd_ok=0
+                fi
+            else
+                echo "计量模块 ${_m} 拉取失败，保留旧版" >&2
+                rm -f "$_tmp_m"
+                _meter_upd_ok=0
+            fi
+        done
+        if [[ "$_meter_upd_ok" == "1" ]]; then
+            echo "面板与计量模块已更新"
+        else
+            echo "面板已更新，但部分计量模块拉取失败（见上）" >&2
+        fi
         systemctl restart hysteria-portal 2>/dev/null || true
     fi
 fi
@@ -1089,24 +1121,38 @@ show_client_configs() {
 # raw 最后兜底且可能滞后。
 PORTAL_FILES="portal.py portal_assets.py"
 
+# 真实计量模块（2026-10-07 上线，portal.py 通过 spec_from_file_location 加载）。
+# ⚠️ 必须和 portal.py 一起部署：缺任何一个，portal 都会在启动时
+# 打印「真实计量未初始化」并**永久降级**，但安装照样成功——
+# 表现为装完一切正常、界面用量永远「未开始计量」，极难察觉。
+# 计量文件的版本号写进文件名（-20261007-v1）是有意的：
+# 改内容时换文件名，让 portal 的 spec_from_file_location 换模块而不是复用旧实例。
+METER_FILES="usage-meter-core-20261007-v1.py usage-meter-readers-20261007-v1.py usage-meter-runtime-20261007-v1.py usage-meter-xray-config-20261007-v1.py"
+
 # 校验一组门户文件是否完整可用（关键标记 + Python 语法编译）
 portal_files_ok() {
     local dir="$1"
     [[ -s "${dir}/portal.py" ]] && grep -q 'def page_html' "${dir}/portal.py" 2>/dev/null || return 1
     [[ -s "${dir}/portal_assets.py" ]] && grep -q 'SCRIPT = r' "${dir}/portal_assets.py" 2>/dev/null || return 1
+    # 计量模块：缺任何一个都不算通过（理由见 METER_FILES 处的注释）
+    local m
+    for m in $METER_FILES; do
+        [[ -s "${dir}/${m}" ]] || return 1
+    done
     # ast.parse 而不是 py_compile —— 后者会在源文件旁边生成 __pycache__
     python3 -c '
 import ast, sys
 for p in sys.argv[1:]:
     ast.parse(open(p, encoding="utf-8").read())
-' "${dir}/portal.py" "${dir}/portal_assets.py" 2>/dev/null || return 1
+' "${dir}/portal.py" "${dir}/portal_assets.py" $METER_FILES 2>/dev/null || return 1
     return 0
 }
 
 # 把门户文件拉到指定目录；任一文件失败即整体失败
 portal_fetch_files() {
     local dir="$1" base="$2" mode="$3" f
-    for f in $PORTAL_FILES; do
+    # 计量文件与门户文件同源同生命周期，一起拉、一起失败
+    for f in $PORTAL_FILES $METER_FILES; do
         if [[ "$mode" == "api" ]]; then
             curl -fsSL --max-time 30 -H "Accept: application/vnd.github.raw" \
                  "${base}/${f}?ref=main" -o "${dir}/${f}" 2>/dev/null || return 1
@@ -1178,8 +1224,30 @@ portal_ensure_py() {
         [[ -n "$tmpdir" ]] && rm -rf "$tmpdir"
         return 1
     fi
+    local m
+    for m in $METER_FILES; do
+        if ! install -m 0644 "${srcdir}/${m}" "${dest_dir}/${m}"; then
+            log_err "写入计量模块 ${m} 到 ${dest_dir} 失败"
+            [[ -n "$tmpdir" ]] && rm -rf "$tmpdir"
+            return 1
+        fi
+    done
     [[ -n "$tmpdir" ]] && rm -rf "$tmpdir"
-    log_info "门户程序已就位: ${dest_dir}/portal.py + portal_assets.py"
+    # 计量配置：secret 取自本机 config.yaml 的 trafficStats，
+    # 绝不写死进仓库 —— 仓库里只放 usage-meter-config.json.example。
+    if [[ ! -f "${dest_dir}/usage-meter-config.json" ]]; then
+        _meter_secret="$(awk '/^trafficStats:/{f=1;next} f&&/secret:/{gsub(/[^0-9a-f]/,"",$2); print $2; exit}' "$HY2_CONFIG" 2>/dev/null || true)"
+        if [[ -n "$_meter_secret" ]]; then
+            cat > "${dest_dir}/usage-meter-config.json" <<METEREOF
+{"hysteria": {"url": "http://127.0.0.1:19996", "secret": "${_meter_secret}"}, "reality": {"binary": "/usr/local/bin/xray", "address": "127.0.0.1:19997"}}
+METEREOF
+            chmod 600 "${dest_dir}/usage-meter-config.json"
+            unset _meter_secret
+        else
+            log_warn "未能从 ${HY2_CONFIG} 读到 trafficStats secret，计量模块暂不启用（界面会显示「未开始计量」）"
+        fi
+    fi
+    log_info "门户程序已就位: ${dest_dir}/portal.py + portal_assets.py + 计量模块"
 }
 
 refresh_portal() {

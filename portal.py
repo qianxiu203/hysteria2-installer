@@ -1736,6 +1736,27 @@ def serve(path):
                     disk_temp.chmod(0o600)
                     disk_temp.replace(disk_path)
 
+    # 独立计量模块不改变客户 UUID/密码/状态/旧记账值。
+    usage_meter = None
+    try:
+        import importlib.util as _usage_import
+        _usage_runtime_path = Path(__file__).parent / 'usage-meter-runtime-20261007-v1.py'
+        _usage_spec = _usage_import.spec_from_file_location('portal_usage_runtime', _usage_runtime_path)
+        _usage_runtime = _usage_import.module_from_spec(_usage_spec)
+        _usage_spec.loader.exec_module(_usage_runtime)
+        usage_meter = _usage_runtime.from_file(data, data_lock, save_data,
+                                              portal_path.parent / 'usage-meter-config.json')
+    except Exception as _usage_exc:
+        print('[portal] 真实计量未初始化: ' + type(_usage_exc).__name__, file=sys.stderr)
+
+    def usage_summary(uid):
+        if usage_meter is not None:
+            return usage_meter.summary(uid)
+        return {'measured_bytes': None, 'measurement_ok': False,
+                'measurement_scope': 'unavailable', 'measurement_sources': {},
+                'measurement_started_at': None, 'measurement_gaps': [],
+                'legacy_auth_value': data.get('users', {}).get(uid, {}).get('used_bytes', 0)}
+
     def write_gost_config():
         """根据 proxy_services 动态生成 gost.yml 配置并触发热重载。"""
         gost_cfg_path = portal_path.parent / 'gost.yml'
@@ -2517,6 +2538,22 @@ if __name__ == '__main__':
                 ],
                 "outbounds": [{"protocol": "freedom", "tag": "direct"}]
             }
+            # 重生成 Reality 配置时保留计量能力；仅添加回环 StatsService。
+            # 没有计量配置时保持原行为，有配置却不可应用时禁止静默覆盖。
+            _meter_config_path = portal_path.parent / 'usage-meter-config.json'
+            if _meter_config_path.exists():
+                _meter_config = json.loads(_meter_config_path.read_text(encoding='utf-8'))
+                _meter_reality = _meter_config.get('reality')
+                if _meter_reality:
+                    _address = _meter_reality['address']
+                    if not _address.startswith('127.0.0.1:'):
+                        raise ValueError('统计接口必须为回环地址')
+                    import importlib.util as _stats_import
+                    _stats_path = Path(__file__).parent / 'usage-meter-xray-config-20261007-v1.py'
+                    _stats_spec = _stats_import.spec_from_file_location('portal_stats_cfg', _stats_path)
+                    _stats_mod = _stats_import.module_from_spec(_stats_spec)
+                    _stats_spec.loader.exec_module(_stats_mod)
+                    xray_json = _stats_mod.add_stats(xray_json, int(_address.rsplit(':', 1)[1]))
             Path('/etc/hysteria/xray.json').write_text(
                 json.dumps(xray_json, indent=2), encoding='utf-8')
             if restart:
@@ -2596,10 +2633,10 @@ if __name__ == '__main__':
                     req_data = json.loads(body)
                     client_auth = req_data.get('auth', '').strip()
                     client_addr = req_data.get('addr', '')
-                    # tx (客户端上行/服务器接收), rx (客户端下行/服务器发送) 流量增量统计
-                    tx_bytes = int(req_data.get('tx', 0))
-                    rx_bytes = int(req_data.get('rx', 0))
-                    delta_traffic = tx_bytes + rx_bytes
+                    # ⚠️ hysteria HTTP auth 的 tx/rx 是客户端**带宽声明**，
+                    # 不是实际传输字节。把它累加进用量会让数字虚高且离谱。
+                    # 真实用量由计量模块从 hysteria trafficStats / xray stats
+                    # 的单调计数器累计（见 usage-meter-core）。
                     client_ip = client_addr.rsplit(':', 1)[0].strip('[]') if client_addr else ''
                 except Exception:
                     return self.reply_json(200, {'ok': False, 'msg': 'Bad auth request'})
@@ -2624,15 +2661,12 @@ if __name__ == '__main__':
 
                     # -------- 流量限额检查与增量累加 -------- #
                     limit_bytes = int(matched_user.get('limit_bytes', 0))
-                    used_bytes = int(matched_user.get('used_bytes', 0)) + delta_traffic
-                    matched_user['used_bytes'] = used_bytes
-
-                    # 记录实时速率滑动窗口样本 (保留最近 10 秒)
-                    samples = speed_tracker.setdefault(matched_uid, [])
-                    cur_mono = time.monotonic()
-                    samples.append((cur_mono, tx_bytes, rx_bytes))
-                    # 淘汰超过 10 秒的陈旧样本
-                    speed_tracker[matched_uid] = [(t, tx, rx) for (t, tx, rx) in samples if cur_mono - t <= 10]
+                    used_bytes = int(matched_user.get('used_bytes', 0))
+                    # 判超额只看**已累计的真实用量**（used_bytes 由计量模块维护）。
+                    # 这里绝不能把 auth 请求里的 tx/rx 加进来 —— 那是带宽声明。
+                    #
+                    # 速率样本改由计量模块的真实增量提供：/traffic-speed 端点
+                    # 消费 speed_tracker，没有写入侧它会永远返回 0。
 
                     if limit_bytes > 0 and used_bytes >= limit_bytes:
                         # 流量超额，阻断拒绝连接
@@ -2884,6 +2918,16 @@ if __name__ == '__main__':
                                 'status': info.get('status', 'active'),
                                 'traffic_limit_bytes': info.get('limit_bytes', 0),
                                 'traffic_used_bytes': info.get('used_bytes', 0),
+                                **usage_summary(uid),
+                                # 真实在线 IP：来自鉴权时更新的 ip_tracker，
+                                # 窗口与限流判定同一个 IP_TIMEOUT_SECONDS。
+                                # 内存态 —— portal 重启后为空，这是真实语义：
+                                # 重启后确实要等客户端重新认证才知道谁在线。
+                                'online_ips': [
+                                    {'ip': ip, 'last_seen': int(t)}
+                                    for ip, t in sorted(ip_tracker.get(uid, {}).items())
+                                    if now_ts - t < IP_TIMEOUT_SECONDS
+                                ],
                                 'ip_limit': info.get('ip_limit', 0),
                                 'created_at': info.get('created_at', now_ts),
                             }
@@ -4234,6 +4278,13 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
                                 'status': info.get('status', 'active'),
                                 'traffic_limit_bytes': info.get('limit_bytes', 0),
                                 'traffic_used_bytes': info.get('used_bytes', 0),
+                                **usage_summary(uid),
+                                # 见 POST 分支同一字段的注释。
+                                'online_ips': [
+                                    {'ip': ip, 'last_seen': int(t)}
+                                    for ip, t in sorted(ip_tracker.get(uid, {}).items())
+                                    if now_ts - t < IP_TIMEOUT_SECONDS
+                                ],
                                 'ip_limit': info.get('ip_limit', 0),
                                 'created_at': info.get('created_at', now_ts),
                                 'status': info.get('status', 'active'),
@@ -4867,6 +4918,8 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
     except Exception as e:
         print('[portal] 启动补同步跳过: %s' % str(e)[:120], file=sys.stderr)
 
+    if usage_meter is not None:
+        usage_meter.start()
     server.serve_forever()
 
 
