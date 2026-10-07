@@ -1736,6 +1736,35 @@ def serve(path):
                     disk_temp.chmod(0o600)
                     disk_temp.replace(disk_path)
 
+    # 真实字节增量 → speed_tracker（2026-10-08）。
+    #
+    # ⚠️ 为什么不能用 auth 请求里的 tx/rx：那是客户端**带宽声明**，
+    # 不是实际传输字节。真实增量由计量模块从单调计数器算出来。
+    # ⚠️ 写入前必须持 data_lock：speed_tracker 是 serve() 里的普通 dict，
+    # 而采样来自计量线程（daemon thread），不锁会与 /traffic-speed 并发读写。
+    # ⚠️ 只在有字节流动时记样本：/traffic-speed 用「样本时间差」做分母，
+    # 插入零字节样本会把平均速率稀释到接近 0。
+    # ⚠️ 窗口取10 秒的依据：计量线程每 5 秒轮询一次（runtime 的 stop.wait(5)），
+    # 而 /traffic-speed 只取 6 秒内样本。若保留窗口 < 一个轮询周期，
+    # 样本会间歇性为空 → 速率在 0 与真实值之间剧烈跳动。
+    # 10 秒 = 至少两个采样点，滑动平均才稳定。
+    # ⚠️ 这个值必须 ≥ runtime 的轮询间隔，也必须与速率端点的过滤窗口协调：
+    # 端点取 6 秒、这里留 10 秒，是为了保证端点每次都能取到至少 1 个样本。
+    SPEED_WINDOW_SECONDS = 10
+
+    def _meter_speed_sample(uid, tx, rx):
+        if tx <= 0 and rx <= 0:
+            return
+        cur = time.monotonic()
+        with data_lock:
+            samples = speed_tracker.setdefault(uid, [])
+            samples.append((cur, tx, rx))
+            # 保留窗口内样本；顺手清掉空条目，避免字典无限增长。
+            cutoff = cur - SPEED_WINDOW_SECONDS
+            if len(samples) > 256:
+                del samples[:len(samples) - 128]
+            speed_tracker[uid] = [s for s in samples if s[0] >= cutoff]
+
     # 独立计量模块不改变客户 UUID/密码/状态/旧记账值。
     usage_meter = None
     try:
@@ -1745,7 +1774,8 @@ def serve(path):
         _usage_runtime = _usage_import.module_from_spec(_usage_spec)
         _usage_spec.loader.exec_module(_usage_runtime)
         usage_meter = _usage_runtime.from_file(data, data_lock, save_data,
-                                              portal_path.parent / 'usage-meter-config.json')
+                                              portal_path.parent / 'usage-meter-config.json',
+                                              on_speed=_meter_speed_sample)
     except Exception as _usage_exc:
         print('[portal] 真实计量未初始化: ' + type(_usage_exc).__name__, file=sys.stderr)
 

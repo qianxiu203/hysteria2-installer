@@ -48,7 +48,16 @@ def apply_sample(state, source, epoch, counters, sampled_at):
         bucket = totals.setdefault(uid, {})
         bucket[source] = bucket.get(source, 0) + delta
         cursors[uid] = pair
-        deltas[uid] = delta
+        # 分方向记录本轮增量（2026-10-08）：/traffic-speed 需要 tx/rx 分开算速率，
+        # 而上面的 delta 是二者之和（用于 totals 累计）。
+        # ⚠️ 仅在真能拆出方向时才采样，且只在有字节流动时采样：
+        #   - 方向不可知（新 epoch 或该用户首次出现）时不采样。那种情况下
+        #     delta 是「自服务启动起的累计」而非本轮增量，当成 5 秒的增量
+        #     会算出荒谬的速率尖峰。
+        #   - 零字节样本不记：/traffic-speed 用「样本时间差」做分母，
+        #     插零值会把平均速率稀释到接近 0。
+        if delta > 0 and old is not None and not new_epoch:
+            deltas[uid] = (pair['tx'] - old['tx'], pair['rx'] - old['rx'])
     # 消失的用户保持旧游标：临时空响应不能让再次出现的累计值重复计数。
     sources[source] = {'epoch': epoch, 'counters': cursors, 'sampled_at': sampled_at}
     if first_sample:
@@ -65,6 +74,7 @@ def apply_sample(state, source, epoch, counters, sampled_at):
     new['gaps'] = gaps[-100:]
     state.clear()
     state.update(new)
+    # deltas 的 value 是 (tx, rx) 元组 —— 见循环内的注释。
     return {'deltas': deltas, 'baseline_only': first_sample, 'epoch_changed': new_epoch,
             'counter_regressions': reset_users}
 

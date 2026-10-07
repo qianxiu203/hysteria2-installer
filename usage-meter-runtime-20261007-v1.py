@@ -17,11 +17,17 @@ core=load('usage_meter_core', 'usage-meter-core-20261007-v1.py')
 readers=load('usage_meter_readers', 'usage-meter-readers-20261007-v1.py')
 
 class PortalMeter:
-    def __init__(self, data, lock, save, config, read=None, epoch=None):
+    def __init__(self, data, lock, save, config, read=None, epoch=None, on_speed=None):
         self.data, self.lock, self.save, self.config=data,lock,save,config
         self.read=read or self._read
         self.epoch=epoch or readers.service_epoch
         self.stop=threading.Event()
+        # 速率采样回调（2026-10-08）：on_speed(uid, tx, rx)
+        # 由 portal.py 注入，把本轮真实字节增量写进 speed_tracker。
+        # 之前 speed_tracker 没有写入侧，/traffic-speed 长期返回 0。
+        # ⚠️ 参数是**单个用户的增量三元组**，不是整个 deltas 字典 ——
+        # 每个来源每个用户各调一次。
+        self.on_speed=on_speed
 
     def _read(self, source, cfg):
         if source=='hysteria': return readers.read_hysteria(cfg['url'],cfg['secret'])
@@ -43,7 +49,17 @@ class PortalMeter:
                     registered=meter.setdefault('registered_users', list(self.data.get('users',{})))
                     # 已存在客户在后续才第一次出现在计数器中时，core 从零累加是有效的：
                     # 当前服务为所有用户保持单调累计，且初始窗口无计数表示0。
-                    core.apply_sample(meter,source,before,counters,now)
+                    outcome = core.apply_sample(meter,source,before,counters,now)
+                    # 把本轮真实增量交给速率采样（每个来源各调一次，
+                    # 由回调侧累加到同一个样本里）。
+                    cb = self.on_speed
+                    if cb is not None and outcome and outcome.get('deltas'):
+                        for _uid, _pair in outcome['deltas'].items():
+                            try:
+                                cb(_uid, _pair[0], _pair[1])
+                            except Exception:
+                                # 采样失败绝不能拖垮计量本身。
+                                pass
                     meter.setdefault('health',{})[source]={'ok':True,'sampled_at':now,'error':''}
                     meter.setdefault('started_at',now)
                     old=self.data.get('usage_meter')
@@ -88,6 +104,6 @@ class PortalMeter:
         thread.start(); return thread
 
 
-def from_file(data,lock,save,path):
+def from_file(data,lock,save,path,on_speed=None):
     config=json.loads(pathlib.Path(path).read_text(encoding='utf-8'))
-    return PortalMeter(data,lock,save,config)
+    return PortalMeter(data,lock,save,config,on_speed=on_speed)
