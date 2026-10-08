@@ -5137,6 +5137,19 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
             if route is None:
                 return self.reply(404, b'Not found')
             key, mime = route
+            # 🔴 2026-10-09 修（真机演练发现）：clash.yaml / sing-box.json / qr.svg
+            # 必须**每次都重生成**，不能直接吐内存里的 data[key]。
+            #
+            # 原因：selfheal 是在**另一个短命进程**里跑的（systemd timer/path unit
+            # 调 `portal.py selfheal`），它把修好的产物写进了 portal.json；而本门户
+            # 进程持有的 data 是**启动时的内存快照**，对这些磁盘写入一无所知。
+            # 于是磁盘上是新的、端点发出去的是旧的 —— 实测（容器内真机演练）：
+            #   meta / portal.json / 页面直链  = round2.example.com  ✅
+            #   clash.yaml 端点              = newnode.example.com  ❌
+            # 用户扫二维码/导入订阅就是旧节点，直接 CRYPTO_ERROR 0x150。
+            # 页面之所以是对的，只因为 subpath=='' 分支恰好会调 regenerate_page()。
+            if key in ('clash', 'sing', 'qr'):
+                regenerate_page()
             with data_lock:
                 content = data[key].encode()
             self.reply(200, content, mime)

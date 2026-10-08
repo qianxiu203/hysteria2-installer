@@ -2,6 +2,29 @@
 
 ## 未发布
 
+### 修复：换证后 clash/sing/二维码端点仍发旧节点（真机容器演练才发现）
+- **发现方式**：在**干净的 Debian 12 容器**里从头装一遍（systemd 252 / Debian 12，
+  走菜单 1 + 一路回车，13.1 秒装完），然后模拟 Caddy 续期覆盖证书，观察四个出口。
+- **症状**：换证后自愈确实把 `client_meta.json` 修对了，但四个出口**不一致**：
+  ```
+  meta / portal.json / 页面直链 / sing-box.json = round2.example.com   ✅
+  clash.yaml 端点                = newnode.example.com  ❌
+  ```
+  用户「扫二维码导入」或「下载配置」拿到的仍是换证前的旧节点 → `CRYPTO_ERROR 0x150`，
+  而面板看起来一切正常。
+- **根因**：`selfheal` 跑在**另一个短命进程**里（systemd timer / path unit 调
+  `portal.py selfheal`），把修好的产物写进 `portal.json`；而长期运行的门户进程持有的
+  `data` 是**启动时的内存快照**，对这些磁盘写入一无所知。
+  页面之所以正确，只因`subpath==''` 分支恰好会调 `regenerate_page()`；
+  而 `clash.yaml` / `sing-box.json` / `qr.svg` 直接读 `data[key]`。
+- **修法**：这三个下载类端点在吐数据**之前**先 `regenerate_page()`。
+- **注意**：这不是上一条「`sync_download_artifacts` 只在 prepare 写过」的重复 ——
+  那条修的是「refresh 不更新 clash/sing/qr」，这条修的是「即使 refresh 写了磁盘，
+  运行中的进程也读不到」。两条都必须修，缺一个都会继续发旧节点。
+- **实测**：修复后同一演练，四个出口全部 = `round2.example.com`。
+- **回归**：新增 `test_download_routes_regenerate_before_serving`（纯静态检查，
+  不依赖运行时，两平台都跑；变异测试确认能抓到回退）。
+
 ### 修复：小白安装链路全面排查（2 个严重安全漏洞 + 8 个装不上的坑）
 本轮做法：静态审查 `install.sh` 与 `portal.py` 两条链，**逐条在测试机 `se` 上实测复现**
 （不是纸面推断），确认后再修，每条都补了回归用例。
@@ -85,12 +108,25 @@
     新手以为安装漏了东西。改为从 URL 提取端口。
 
 #### 回归
-- 新增 `tests/test_novice_install_audit.py`（26 例）：shell 侧**抽取 install.sh 里的真实函数
+- 新增 `tests/test_novice_install_audit.py`（27 例）：shell 侧**抽取 install.sh 里的真实函数
   真跑一遍**（验证 set -e 下的可达性、兜底、备份、密码复用），python 侧**真起一个 portal**
   验证限流 / 脱敏 / 下载产物同步 / 非 ASCII 头，另有仓库不变量防回退。
-  测试机 se（Linux）**26/26 全绿**，本机（Windows）15绿+11 跳过（缺 bash/jq）。
+  测试机 se（Linux）全绿，本机（Windows）跳过缺 bash/jq 的 7 例。
 - 顺带修好 `tests/test_meter_config.py` 的两处**平台假设**（`pwd -W`、`'/'→'\\'`），
   它此前在 Linux 上是「必失败」的；现在两平台 8/8 全绿。
+
+#### 真机容器演练（`tests/rehearsal/`，可复现）
+在干净 Debian 12 容器（systemd 252）里从头装一遍，**每步单独计时、逐份留日志**：
+- **安装 13.1 秒**完成，`hysteria-server` / `hysteria-portal` 均 active，
+  hysteria 自己的日志证实三个监听全部起来（主端口 / trafficStats / masquerade HTTPS）。
+- **真实客户端自连成功**：用节点自身凭据起 hysteria 客户端，
+  日志出现 `connected to server`，经其 SOCKS5 请求外网拿到出口 IP `13.63.71.232`，
+  与节点公网 IP 一致 —— 证明 TLS + pin + salamander obfs + 鉴权整条链真的通。
+- **真实计量在工作**：`/traffic` 返回 `{"user":{"tx":4271,"rx":12729}}`。
+- **换证自愈 1 秒内完成**，四个出口最终一致（本条修复的直接来源，见上）。
+- 日常操作（菜单 3 / `status` / `info` / restart / 菜单 11 / 卸载回答 n 取消）全部正常。
+- 演练脚本：`tests/rehearsal/{harness,stage1-interactive,stage2-usability,
+  stage3-daily-ops,stage4-certrotation}.sh`。
 
 ### 增强：证书状态卡片 + 到期前告警（把静默的「证书过期」变可见）
 - **动机**：上一条把「证书被换掉」修成了自动对齐，但**证书过期**这件事仍然是静默的 ——

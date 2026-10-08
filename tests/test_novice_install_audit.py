@@ -525,6 +525,30 @@ class TestPortalRuntime(unittest.TestCase):
 # 仓库不变量
 # ==============================================================================
 class TestRepoInvariants(unittest.TestCase):
+    def test_download_routes_regenerate_before_serving(self):
+        """clash/sing/qr 三个下载端点必须**先重生成再吐**。
+
+        回归场景（2026-10-09 真机容器演练发现）：selfheal 跑在**另一个短命进程**里
+        （systemd timer/path unit 调 `portal.py selfheal`），它把修好的产物写进
+        portal.json；而长期运行的门户进程持有的 data 是**启动时的内存快照**，
+        对这些磁盘写入一无所知。于是磁盘是新的、端点发出去的是旧的：
+            meta / portal.json / 页面直链 = round2.example.com   ✅
+            clash.yaml 端点              = newnode.example.com  ❌
+        用户扫二维码/导入订阅拿到的就是旧节点 → CRYPTO_ERROR 0x150。
+        页面看起来正常，只因为 subpath=='' 分支恰好会调 regenerate_page()。
+        """
+        text = PORTAL.read_text(encoding="utf-8")
+        i = text.index("routes = {'': ('page', 'text/html; charset=utf-8')")
+        j = text.index("self.reply(200, content, mime)", i)
+        block = text[i:j]
+        self.assertIn("if key in ('clash', 'sing', 'qr'):", block,
+                      "下载类端点必须在取 data[key] 之前重生成，否则发的是内存旧值")
+        regen = block.index("regenerate_page()")
+        read = block.index("content = data[key].encode()")
+        self.assertLess(regen, read,
+                        "重生成必须发生在读 data[key] 之前")
+
+
     def test_cert_choice_falls_back_to_self_signed(self):
         """症状：选「4 自动扫描本机证书」但机器上没有完整证书链时，
         裸调用 + set -e 直接终止安装，用户没退回自签的出路。"""
