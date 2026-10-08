@@ -4,6 +4,7 @@ import http.client
 import io
 import json
 import re
+import shutil
 from pathlib import Path
 import socket
 import subprocess
@@ -178,7 +179,13 @@ class PortalTest(unittest.TestCase):
                     status, headers, body = request(prefix+route, auth)
                     self.assertEqual(status, 200)
                     self.assertEqual(headers['Cache-Control'], 'no-store')
-                    self.assertTrue(body)
+                    # qr.svg 在**没有 qrencode 的机器**上是空的，这是**正确行为**
+                    # （prepare() 已降级、不再因缺 qrencode 而崩掉整个安装）。
+                    # 断言「必须有内容」等于要求测试机上一定装有 qrencode。
+                    if route == 'qr.svg' and not shutil.which('qrencode'):
+                        self.assertEqual(body, b'')    # 明确降级，而非报错
+                    else:
+                        self.assertTrue(body)
                 self.assertEqual(request(prefix+'../portal.json', auth)[0], 404)
                 self.assertEqual(request(prefix, 'Basic wrong')[0], 401)
 

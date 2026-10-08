@@ -141,10 +141,41 @@ check_arch() {
 }
 
 get_public_ip() {
-    PUBLIC_IP=$(curl -4 -s --max-time 5 https://api.ipify.org || \
-                curl -4 -s --max-time 5 https://icanhazip.com || \
-                curl -4 -s --max-time 5 https://ipinfo.io/ip || \
-                echo "127.0.0.1")
+    # ⚠️ 原来三个源全失败时兜底 `echo "127.0.0.1"`（2026-10-09 修）：
+    #   1) 函数**永远返回 0**，所以所有调用点的 `get_public_ip || exit 1` 都是死代码；
+    #   2) 更糟的是它会把 127.0.0.1 当成真实公网 IP 一路写进 client_meta.json、
+    #      印在信息页 URL 上、还拿去做 DNS 校验。用户的节点会「看起来装好了」，
+    #      但生成的订阅/二维码指向 127.0.0.1，客户端永远连不上 —— 且毫无提示。
+    # 现在：取不到就返回非 0，让调用点那条 `|| exit 1` 真正生效。
+    PUBLIC_IP=$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null || true)
+    if [[ -z "$PUBLIC_IP" ]]; then
+        PUBLIC_IP=$(curl -4 -s --max-time 5 https://icanhazip.com 2>/dev/null || true)
+    fi
+    if [[ -z "$PUBLIC_IP" ]]; then
+        PUBLIC_IP=$(curl -4 -s --max-time 5 https://ipinfo.io/ip 2>/dev/null || true)
+    fi
+    # 清洗：去掉空白与换行，并校验「像一个可用的公网 IPv4」
+    PUBLIC_IP="$(printf '%s' "$PUBLIC_IP" | tr -d '[:space:]')"
+    if ! [[ "$PUBLIC_IP" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        log_err "无法获取本机公网 IP（已尝试 api.ipify.org / icanhazip.com / ipinfo.io）。"
+        log_err "常见原因：服务器没有公网出口、出口被防火墙拦截、或 DNS 异常。"
+        log_err "若这台机器本就在 NAT 后面，请确认已配置端口转发，或改用 Cloudflare WARP 出口。"
+        return 1
+    fi
+    # ⚠️ 回环/私有地址必须显式拒绝（2026-10-09 补）：上面那个正则只验「像不像 IPv4」，
+    # 而 127.0.0.1 / 10.x / 192.168.x 全都合法通过 —— 于是某些出口（本地代理、
+    # docker0、SSRF 跳转）会把回环地址当成公网 IP 写进 client_meta.json，
+    # 生成的订阅与二维码指向 127.0.0.1，客户端永远连不上。
+    # 之前是靠 `echo "127.0.0.1"` 兜底，现在兜底没了，这条检查是最后一道闸。
+    case "$PUBLIC_IP" in
+        127.*|10.*|192.168.*|169.254.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|0.*)
+            log_err "取到的「公网 IP」是回环或私有地址（${PUBLIC_IP}），不能用于对外服务。"
+            log_err "若这台机器确实有公网出口，请检查出口网络/代理设置；"
+            log_err "若本就在 NAT 后面，请确认已配置端口转发，或改用 Cloudflare WARP 出口。"
+            return 1
+            ;;
+    esac
+    return 0
 }
 
 # 解析域名 A/AAAA 记录(三重后备: getent -> dig -> nslookup + 系统解析器)
@@ -222,22 +253,57 @@ verify_domain_resolves_to_this_host() {
 install_dependencies() {
     log_step "检查并安装基础依赖 (curl, wget, jq, openssl, iptables, tar)..."
     if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -qq && apt-get install -y -qq curl wget jq openssl iptables tar ca-certificates qrencode python3
+        apt-get update -qq && apt-get install -y -qq curl wget jq openssl iptables tar ca-certificates qrencode python3 || true
     elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y curl wget jq openssl iptables tar ca-certificates qrencode python3
+        dnf install -y curl wget jq openssl iptables tar ca-certificates qrencode python3 || true
     elif command -v yum >/dev/null 2>&1; then
-        yum install -y curl wget jq openssl iptables tar ca-certificates qrencode python3
+        yum install -y curl wget jq openssl iptables tar ca-certificates qrencode python3 || true
     elif command -v apk >/dev/null 2>&1; then
-        apk add --no-cache curl wget jq openssl iptables tar ca-certificates bash qrencode python3
+        apk add --no-cache curl wget jq openssl iptables tar ca-certificates bash qrencode python3 || true
     else
         log_warn "未识别的包管理器，请确认已安装 curl, wget, jq, openssl, iptables"
     fi
+
+    # ⚠️ 安装后必须逐个校验（2026-10-09 修）：
+    #   包管理器命令失败时不立刻中断（Alpine 上 `apk add iptables` 常因
+    #   iptables/nftables 分包而整体失败），但装完必须确认**关键**依赖真的在。
+    #   原来完全不校验，于是「jq 没装上」这种致命问题要等到几百行之后
+    #   第一次调用 jq 时才炸，用户看到的是完全看不出所以然的报错。
+    #   缺 jq / openssl / python3 直接中止；qrencode 只影响二维码，降级继续。
+    local missing_critical=() missing_soft=()
+    local bin
+    for bin in curl jq openssl python3; do
+        command -v "$bin" >/dev/null 2>&1 || missing_critical+=("$bin")
+    done
+    for bin in iptables tar; do
+        command -v "$bin" >/dev/null 2>&1 || missing_soft+=("$bin")
+    done
+    if (( ${#missing_critical[@]} > 0 )); then
+        log_err "以下关键依赖缺失：${missing_critical[*]}"
+        log_err "缺少它们门户与证书逻辑无法工作。请手动安装后重试，例如："
+        log_err "  Debian/Ubuntu : apt-get update && apt-get install -y ${missing_critical[*]}"
+        log_err "  CentOS/RHEL   : yum install -y ${missing_critical[*]}"
+        log_err "  Alpine        : apk add ${missing_critical[*]}"
+        return 1
+    fi
+    if (( ${#missing_soft[@]} > 0 )); then
+        log_warn "以下可选依赖缺失：${missing_soft[*]} —— 相关功能可能不可用。"
+    fi
+    if ! command -v qrencode >/dev/null 2>&1; then
+        log_warn "未安装 qrencode：节点二维码将不可用（可改用「节点直链 (URI)」导入）。"
+    fi
+    return 0
 }
 
 # 2. 安装与更新官方核心二进制
 install_binary() {
     log_step "获取 Hysteria 2 官方最新版本..."
-    LATEST_TAG=$(curl -s --max-time 10 https://api.github.com/repos/apernet/hysteria/releases/latest | jq -r '.tag_name // empty')
+    # ⚠️ 必须 `|| LATEST_TAG=""`（2026-10-09 修）：命令替换里的 curl 失败会因
+    # `set -eo pipefail` 让整个赋值语句失败退出，于是下面那个 fallback 分支
+    # 永远执行不到 —— 实测 api.github.com 不可达时 exit=6 直接死掉。
+    # 而「api.github.com 被墙/限流」恰恰是本工具用户最常见的处境，
+    # 为此专门写的 download.hysteria.network 直链回退形同虚设。
+    LATEST_TAG=$(curl -s --max-time 10 https://api.github.com/repos/apernet/hysteria/releases/latest | jq -r '.tag_name // empty') || LATEST_TAG=""
     
     if [[ -z "$LATEST_TAG" || "$LATEST_TAG" == "null" ]]; then
         log_warn "从 GitHub API 获取版本失败，尝试直接下载官方最新发布版..."
@@ -322,7 +388,16 @@ setup_certificates() {
     elif [[ "$cert_choice" == "3" ]]; then
         setup_acme_certificate
     elif [[ "$cert_choice" == "4" ]]; then
-        select_local_certificate
+        # ⚠️ 失败必须回退自签，不能裸调用（2026-10-09 修）：
+        # select_local_certificate 会 return 1（本机没扫到完整证书链 / 选错编号 /
+        # 域名留空）。原先是裸调用 + set -e，直接终止整个安装 —— 而菜单里
+        # 自签本来就是一个合法选项，用户选了 4 却被迫重跑整个脚本才能退回去。
+        # 现在回退到自签并说明原因。
+        if ! select_local_certificate; then
+            log_warn "未能使用本机已有证书（未找到完整证书链、或选择无效）。"
+            log_warn "将回退为自签名证书 —— 客户端需开启「跳过证书校验 / insecure」。"
+            generate_self_signed_cert
+        fi
     else
         generate_self_signed_cert
     fi
@@ -351,7 +426,7 @@ select_local_certificate() {
     fi
     echo -e "${GREEN}发现以下本机证书：${PLAIN}"
     for i in "${!certs[@]}"; do echo -e "  ${YELLOW}$((i+1)).${PLAIN} ${certs[$i]%%|*}"; done
-    read -rp "请选择证书编号: " choice
+    read -rp "请选择证书编号: " choice || true   # EOF 时走下面的无效选择分支
     [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#certs[@]} )) || { log_err "无效选择。"; return 1; }
     cert="${certs[$((choice-1))]%%|*}"; key="${certs[$((choice-1))]#*|}"
     CERT_TYPE="custom"; CERT_FILE="$cert"; KEY_FILE="$key"; IS_INSECURE="false"
@@ -703,8 +778,15 @@ setup_acme_certificate() {
 
     # DNS 解析预校验：避免 Let's Encrypt HTTP-01 必然失败导致服务反复重启
     log_step "正在校验 ${SERVER_NAME} 的 DNS A 记录是否指向本机公网 IP ${PUBLIC_IP:-<未知>}..."
-    verify_domain_resolves_to_this_host "$SERVER_NAME"
-    local dns_rc=$?
+    # ⚠️ 必须写成 `|| dns_rc=$?`，不能是裸调用（2026-10-09 修）：
+    # verify_domain_resolves_to_this_host 返回 1（无 A 记录）/ 2（指向别的 IP），
+    # 而本脚本开头是 `set -eo pipefail`。裸调用在 set -e 下**当场终止整个安装**，
+    # 下面那句「仍要继续申请 ACME 证书吗? [y/N]」根本执行不到 ——
+    # 实测 exit=2，"captured rc" 那行永远打不出来。
+    # 后果最恶劣：新手域名刚买、A 记录还没生效（本该是最常见的场景），
+    # 看到红色 DNS 报错后脚本直接静默退出，除了重装没有别的出路。
+    local dns_rc=0
+    verify_domain_resolves_to_this_host "$SERVER_NAME" || dns_rc=$?
     if [[ $dns_rc -eq 1 ]]; then
         # 完全没解析到任何记录 — 强烈不建议继续
         echo -e "${RED}若继续，Let's Encrypt HTTP-01 验证几乎必然失败，Hysteria 服务将反复重启。${PLAIN}"
@@ -784,7 +866,23 @@ setup_ports_and_obfs() {
     fi
 
     # 密码生成
-    RANDOM_PASS=$(openssl rand -hex 16)
+    # ⚠️ 菜单 4「重新修改配置」会走到这里。原先无条件重新随机，等于用户只想
+    # 改个端口、结果 auth 密码和 obfs 密码一起被换掉 —— 所有已发放的客户端配置
+    # 立刻失效，且 portal.json 里的机主/子账号也被 prepare() 重建（见菜单 4 的告警）。
+    # 正确做法：**已装机时沿用旧密码**，只有「明确要换」时才生成新的。
+    if [[ -f "$HY2_META_FILE" ]] && [[ -z "${HY2_PASSWORD:-}" ]]; then
+        _old_pass="$(jq -r '.auth_password // empty' "$HY2_META_FILE" 2>/dev/null || true)"
+        if [[ -n "$_old_pass" ]]; then
+            RANDOM_PASS="$_old_pass"
+            log_info "已保留现有认证密码（菜单 4 默认不换密码，避免已发放的客户端失效）。"
+        else
+            RANDOM_PASS=$(openssl rand -hex 16)
+            log_warn "旧密码读取失败，已生成新密码 —— 已发放的客户端配置需要重新导出。"
+        fi
+    else
+        RANDOM_PASS=$(openssl rand -hex 16)
+    fi
+    unset _old_pass
     if [[ -n "${HY2_PASSWORD:-}" ]]; then
         AUTH_PASSWORD="$HY2_PASSWORD"
         log_info "已使用环境变量 HY2_PASSWORD 指定认证密码。"
@@ -817,6 +915,27 @@ setup_ports_and_obfs() {
         NODE_API_KEY=""
     fi
 
+    # ⚠️ 主监听端口占用检测（2026-10-09 修）：
+    # 脚本本来就有现成的 port_owner()（80/443 检测在用），但主监听端口从没查过。
+    # 撞上已占用端口时 hysteria bind 失败 → 服务反复重启，
+    # 而用户看到的报错完全指不到「你选的这个端口被别人占了」。
+    # 这里提前拦下，并报出占用者进程名；已装的机器（服务本就在跑）跳过。
+    if [[ -n "${LISTEN_PORT:-}" ]] && is_valid_port "$LISTEN_PORT" \
+       && ! systemctl is-active --quiet hysteria-server 2>/dev/null; then
+        _port_user="$(port_owner udp "$LISTEN_PORT")"
+        if [[ -n "$_port_user" ]]; then
+            log_err "所选主监听 UDP 端口 ${LISTEN_PORT} 已被占用（占用进程: ${_port_user}）。"
+            log_err "Hysteria 将无法绑定该端口，服务会反复重启。"
+            read -rp "换一个端口？[y/N]: " _port_retry || true
+            if [[ ! "$_port_retry" =~ ^[Yy]$ ]]; then
+                log_err "已中止安装。请释放该端口或重跑本脚本换一个端口。"
+                return 1
+            fi
+            log_info "请重新运行本脚本并指定其他端口。"
+            return 1
+        fi
+    fi
+
     # 端口跳跃 (默认全自动开启，免询问)
     clear_all_hopping_rules
     HOP_START=20000
@@ -826,7 +945,20 @@ setup_ports_and_obfs() {
     log_info "端口跳跃已默认自动启用: UDP ${HOP_PORT_RANGE} -> ${LISTEN_PORT}"
 
     # Salamander 混淆 (默认全自动开启并生成高熵密钥，免询问)
-    OBFS_PASSWORD=$(openssl rand -hex 16)
+    # 与 auth 密码同理：菜单 4 保留旧 obfs 密钥，否则所有客户端的 obfs-password
+    # 一起变错、握手直接失败（同一个混淆密码必须与服务端一致）。
+    if [[ -f "$HY2_META_FILE" ]]; then
+        _old_obfs="$(jq -r '.obfs_password // empty' "$HY2_META_FILE" 2>/dev/null || true)"
+    else
+        _old_obfs=""
+    fi
+    if [[ -n "$_old_obfs" ]]; then
+        OBFS_PASSWORD="$_old_obfs"
+        log_info "已保留现有 Salamander 混淆密钥（菜单 4 默认不换，避免客户端失效）。"
+    else
+        OBFS_PASSWORD=$(openssl rand -hex 16)
+    fi
+    unset _old_obfs
     log_info "Salamander 混淆已默认自动启用 (抗深度包检测 GFW 免疫)"
 }
 
@@ -937,6 +1069,29 @@ setup_system_firewall() {
     fi
 }
 
+# 重装/改配置前的凭据快照（2026-10-09 修）。
+# 🔴 为什么必须有：菜单 1 与菜单 4 都会**整体重写** client_meta.json，
+#    而 prepare() 会按只剩机主的 users 表重建 portal.json。也就是说
+#    「重新修改配置」这个看起来无害的操作，能把商城开的账号、已发放的凭据、
+#    已记录的订阅端口一并抹掉 —— 而修复前脚本全程没有任何 .bak（实测全仓库无一处）。
+#    出事后用户唯一能做的事是手工翻备份目录，而他根本不知道备份存在哪。
+# 这里在动手之前把四个关键文件各留一份带时间戳的快照，并在菜单里告知位置。
+backup_state_before_reconfigure() {
+    local ts saved=0 f
+    ts="$(date +%Y%m%d-%H%M%S)"
+    for f in "$HY2_META_FILE" "${HY2_DIR}/portal.json" "${HY2_DIR}/portal-access.json" "$HY2_CONFIG"; do
+        [[ -f "$f" ]] || continue
+        if cp -a "$f" "${f}.bak-${ts}" 2>/dev/null; then
+            saved=$((saved + 1))
+        fi
+    done
+    if (( saved > 0 )); then
+        log_info "已备份 ${saved} 个关键文件（后缀 .bak-${ts}），改配置出问题可回滚。"
+    else
+        log_warn "关键文件备份失败（可能是首次安装），请自行确认原数据已无价值。"
+    fi
+}
+
 select_subscription_port() {
     # bind 实际验证 IPv4 TCP 端口；不解析 ss 标题，不进行无限循环。
     # 🔴 不要优先尝试 8443：它是常见 Web 端口，且本项目在门户的端口分配里
@@ -961,14 +1116,27 @@ for _ in range(100):
 else:
     raise SystemExit('无法找到可用 TCP 端口')
 PYPORT
-)
+    ) || HY2_SUB_PORT=""
+    # ⚠️ 必须显式判空（2026-10-09 修）：python3 缺失、或 100 次都撞上占用端口时
+    # 会 raise SystemExit，命令替换失败在 set -e 下直接终止并把 traceback 甩给用户；
+    # 而若侥幸留下空值，后面会写出 `listenHTTPS: :` 与 `ufw allow "/tcp"` 这种
+    # 无效配置 —— 装完必然起不来。现在给出明确报错并中止。
+    if ! is_valid_port "${HY2_SUB_PORT:-}"; then
+        log_err "无法自动选出可用的私密信息页端口（100 次随机尝试均被占用，或 python3 不可用）。"
+        log_err "请释放部分端口后重试，或检查 python3 是否已安装。"
+        return 1
+    fi
     PORTAL_LOCAL_PORT=$(python3 - <<'PYPORT'
 import socket
 with socket.socket() as sock:
     sock.bind(('127.0.0.1', 0))
     print(sock.getsockname()[1])
 PYPORT
-)
+    ) || PORTAL_LOCAL_PORT=""
+    if ! is_valid_port "${PORTAL_LOCAL_PORT:-}"; then
+        log_err "无法分配门户本地监听端口（python3 不可用或 bind 失败）。"
+        return 1
+    fi
 }
 
 clear_all_hopping_rules() {
@@ -1054,7 +1222,7 @@ generate_server_config() {
         log_err "私密网页需要 systemd 247+ 的凭据隔离功能。"
         return 1
     fi
-    select_subscription_port
+    select_subscription_port || { log_err "订阅端口分配失败，安装中止。"; return 1; }
 
     # 真实计量的 secret：hysteria trafficStats 与 usage-meter-config.json 必须一致。
     # 缺失则计量模块启动即 FileNotFoundError，用量永远「未开始计量」（静默降级）。
@@ -1069,11 +1237,15 @@ listen: :${LISTEN_PORT}
 EOF
 
     if [[ "$CERT_TYPE" == "acme" ]]; then
+        # ⚠️ SERVER_NAME / ACME_EMAIL 必须加引号（2026-10-09 修）：
+        # 域名/邮箱里出现空格或 '#' 时，未加引号的裸值会被 YAML 解析成
+        # 另一个值、或把 '#' 之后整行当注释吃掉 —— hysteria 随后报一个
+        # 语法错，现象是「装完服务反复重启」，而错误信息完全指不到输入框。
         cat >> "$HY2_CONFIG" <<EOF
 acme:
   domains:
-    - ${SERVER_NAME}
-  email: ${ACME_EMAIL}
+    - "${SERVER_NAME}"
+  email: "${ACME_EMAIL}"
   type: http
 EOF
     else
@@ -1542,7 +1714,19 @@ show_client_configs() {
     echo -e "${YELLOW}第 3 步 · 确认云服务商安全组已放行端口${PLAIN}"
     echo -e "    ${RED}装好了却连不上，十有八九是这里没放行。${PLAIN}"
     echo -e "    ${GREEN}UDP ${HOP_START:-20000}-${HOP_END:-40000}${PLAIN}   节点连接用的端口跳跃区间（要放行整个区间，不是单个端口）"
-    echo -e "    ${GREEN}TCP ${HY2_SUB_PORT}${PLAIN}        私密信息页（就是上面那个 URL 的端口）"
+    # ⚠️ 端口为空时不能光打印一个 "TCP"（2026-10-09 修）：菜单 3 / `info` 不会
+    # 调 select_subscription_port，此时 HY2_SUB_PORT 就是空的。裸 `${HY2_SUB_PORT}`
+    # 会印出「TCP        私密信息页…」—— 新手以为安装漏了东西，其实上面 URL
+    # 里就有正确端口。从 URL 里取，取不到才给提示。
+    local _sub_port_display="${HY2_SUB_PORT:-}"
+    if [[ -z "$_sub_port_display" ]]; then
+        _sub_port_display="$(printf '%s' "$url" | sed -n 's#.*:\([0-9]\{1,5\}\)/.*#\1#p')"
+    fi
+    if [[ -n "$_sub_port_display" ]]; then
+        echo -e "    ${GREEN}TCP ${_sub_port_display}${PLAIN}        私密信息页（就是上面那个 URL 的端口）"
+    else
+        echo -e "    ${YELLOW}私密信息页端口见上方 URL${PLAIN}"
+    fi
     if [[ "${CERT_TYPE:-}" == "acme" ]]; then
         echo -e "    ${GREEN}TCP 80${PLAIN}        申请 / 续期 Let's Encrypt 证书用"
     fi
@@ -2280,7 +2464,9 @@ install_gost() {
     GOST_CONFIG="${HY2_DIR}/gost.yml"
 
     # 获取最新版本
-    GOST_LATEST=$(curl -s --max-time 15 https://api.github.com/repos/go-gost/gost/releases/latest | jq -r '.tag_name // empty')
+    # ⚠️ 同样要 `|| GOST_LATEST=""`：api.github.com 不可达时 curl 失败会让
+    # set -e 直接终止，下面的兜底版本号永远用不上（与 install_binary 同一个坑）。
+    GOST_LATEST=$(curl -s --max-time 15 https://api.github.com/repos/go-gost/gost/releases/latest | jq -r '.tag_name // empty') || GOST_LATEST=""
     if [[ -z "$GOST_LATEST" || "$GOST_LATEST" == "null" ]]; then
         GOST_LATEST="v3.3.0"
     fi
@@ -2987,16 +3173,25 @@ view_logs() {
 }
 
 uninstall_all() {
-    # AmneziaWG 是独立协议，单独询问再删 —— 避免"卸载 Hysteria 2"顺带删掉
-    # 用户并不想删的客户端配置。
+    # ⚠️ 先问主确认，再问 AWG（2026-10-09 修）：
+    #   原顺序是先问「是否一并卸载 AmneziaWG」。于是用户对第一个破坏性问题
+    #   回答 n、第二个也回答 n，退出 —— 却已经对一个他根本不想动的组件
+    #   做了表态；而且两个 read 都没有 || true，EOF 会中断在提问中间。
+    #   现在：主确认在前，只有确实要卸载时才追问 AWG。
     local awg_confirm="N"
+    local confirm="N"
+    read -rp "确定要彻底卸载 Hysteria 2 服务及所有配置文件吗？[y/N]: " confirm || true
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        log_info "已取消卸载。"
+        return 0
+    fi
     if [[ -f "$AWG_SERVICE" || -f "$AWG_CONFIG" ]]; then
         echo ""
         log_warn "检测到本机还安装了 AmneziaWG。"
-        read -rp "是否也要一并卸载 AmneziaWG（含全部客户端配置）？[y/N]: " awg_confirm
+        log_warn "回答 y 会一并删除 AmneziaWG 引擎与**全部客户端配置**（不可恢复）。"
+        read -rp "是否也要一并卸载 AmneziaWG？[y/N]: " awg_confirm || true
     fi
 
-    read -rp "确定要彻底卸载 Hysteria 2 服务及所有配置文件吗？[y/N]: " confirm
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         log_step "正在停止并删除系统服务..."
         systemctl stop hysteria-server 2>/dev/null || true
@@ -3126,6 +3321,7 @@ menu() {
                     log_info "已取消。如需修改端口/密码/证书，请用菜单第 4 项「重新修改配置」。"
                     continue
                 fi
+                backup_state_before_reconfigure
             fi
             install_dependencies
             get_public_ip || exit 1
@@ -3148,6 +3344,24 @@ menu() {
             ;;
         4)
             check_root
+            # 🔴 改配置前必须警告 + 备份（2026-10-09 修）：
+            # 这条路径会整体重写 client_meta.json 并调 prepare() 重建 portal.json，
+            # 商城开的子账号会消失、订阅端口可能变化。原先**一个字都没提示**，
+            # 用户只是想改个端口，结果已发放的客户端全部失效。
+            # 现在：先讲清后果 → 留快照 → 要求显式确认。
+            if [[ -f "$HY2_CONFIG" ]]; then
+                echo
+                log_warn "「重新修改配置」会重新生成配置文件并重建门户数据，请注意："
+                log_warn "  · 已发放的客户端配置若端口/证书/域名变化，将需要重新导出"
+                log_warn "  · 门户里已开通的子账号会被重建（机主账号保留）"
+                log_warn "  · 认证密码与混淆密钥默认保留，不会被随机换掉"
+                read -rp "确定继续吗？[y/N]: " _reconf_hint || true
+                if [[ ! "$_reconf_hint" =~ ^[Yy]$ ]]; then
+                    log_info "已取消。"
+                    continue
+                fi
+                backup_state_before_reconfigure
+            fi
             install_dependencies
             get_public_ip || exit 1
             setup_certificates

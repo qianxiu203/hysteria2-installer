@@ -203,6 +203,12 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
     server_name = m.get("server_name") or m.get("public_ip", "localhost")
     public_ip = m.get("public_ip", server_name)
     host = public_ip if is_insecure else server_name
+    # 自签模式下 server_name 是**伪装 SNI**（如 www.bing.com），机主既不拥有它、
+    # 它也不指向本机。此前 <h1> 直接显示 server_name，于是每个自签节点的门户
+    # 标题都是 www.bing.com —— 全页最大字号的那一行偏偏是错的，新手第一眼以为
+    # 这面板属于 Bing。标题改用真实 host，并把伪装 SNI 单独标出来说明。
+    fake_sni_hint = (f' · <span style="opacity:.75">伪装 SNI: {html.escape(server_name)}'
+                     f'（自签模式，非真实域名）</span>') if is_insecure else ""
     sub_port = resolve_subscription_port(m)[0]
     _raw_pin = (m.get("pin_sha256") or "").strip().lower()
     pin_sha256 = _raw_pin if (is_insecure and len(_raw_pin) == 64
@@ -356,7 +362,7 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
 
     return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>HY2 · 节点与集群中心</title><style>{STYLE}</style></head><body><main>
 <nav class="topbar" aria-label="页面标识"><div class="brand"><span class="logo">H₂</span> HYSTERIA <span> / 控制中心</span></div><span class="private">● 集群运行中</span></nav>
-<header class="hero"><div class="eyebrow">HYSTERIA 2 NODE DASHBOARD</div><h1>{html.escape(server_name)}</h1><p>官方核心驱动 · 极速 QUIC 代理 · 多用户开户与流量/IP限制</p></header>
+<header class="hero"><div class="eyebrow">HYSTERIA 2 NODE DASHBOARD</div><h1>{html.escape(host)}</h1><p>官方核心驱动 · 极速 QUIC 代理 · 多用户开户与流量/IP限制{fake_sni_hint}</p></header>
 
 <!-- 顶部 Tab 导航栏 -->
 <div class="tab-bar">
@@ -1396,8 +1402,14 @@ def cert_status(root, meta=None, config_path='/etc/hysteria/config.yaml',
     # 所以这里解析文本更稳）。解析失败就留 None，前端只显示「未知」。
     if info['not_after']:
         try:
+            # ⚠️ LC_ALL=C 是必需的（2026-10-09 修）：not_after 来自 openssl，
+            # 永远是英文月份（Oct  9 ...），但 GNU date 解析 'Oct' 要过 LC_TIME。
+            # 在 zh_CN.UTF-8 下解析失败 -> int('') -> ValueError -> 静默留 None ->
+            # warn_level 变 'unknown'，而卡片没有 unknown 分支，会显示成
+            # 「● 正常 · null 天后到期」的**绿色安慰性假象**，恰好毁掉这张卡片的用途。
             ts = subprocess.run(['date', '-d', info['not_after'], '+%s'],
-                                capture_output=True, text=True, timeout=5)
+                                capture_output=True, text=True, timeout=5,
+                                env={**os.environ, 'LC_ALL': 'C', 'LANG': 'C'})
             epoch = int(ts.stdout.strip())
             now = int(time.time())
             info['expires_in_days'] = int((epoch - now) // 86400)
@@ -2016,7 +2028,16 @@ def prepare(meta_path, port, node_api_key=None):
     sync_pin(m, root, meta_path)
 
     uri, clash, sing = artifacts(m)
-    qr = subprocess.run(['qrencode', '-t', 'SVG', '-o', '-'], input=uri.encode(), capture_output=True, check=True).stdout
+    # ⚠️ 不能用 check=True（2026-10-09 修）：qrencode 缺失/失败会抛异常，
+    # 而这里在 prepare() 的主流程上 —— 一个可选的二维码不该让**整个安装失败**。
+    # 实测 qrencode 不在时会 FileNotFoundError，用户的安装跑到这一步直接崩。
+    # 改成降级：二维码留空，页面会提示改用「节点直链 (URI)」导入。
+    try:
+        qr = subprocess.run(['qrencode', '-t', 'SVG', '-o', '-'], input=uri.encode(),
+                            capture_output=True, timeout=20)
+        qr_svg = qr.stdout if qr.returncode == 0 else b''
+    except Exception:
+        qr_svg = b''
     user, password, token = secrets.token_hex(8), secrets.token_urlsafe(32), secrets.token_hex(32)
     host = m['public_ip'] if m['is_insecure'] else m['server_name']
     # 初始化时把订阅端口**解析并写回** client_meta.json（自愈）：
@@ -2050,11 +2071,36 @@ def prepare(meta_path, port, node_api_key=None):
 
     data = dict(port=int(port), token=token, auth_hash=hashlib.sha256(auth).hexdigest(),
                 session_secret=session_secret, api_key=api_key, users=users,
-                proxy_services=[], page=page, qr=qr.decode(), clash=clash, sing=sing)
+                proxy_services=[], page=page, qr=qr_svg.decode('utf-8', 'replace'), clash=clash, sing=sing)
     for filename, value in [('portal.json', data), ('portal-access.json', portal_access_payload(base, user, password, api_key))]:
         path = root / filename
         path.write_text(json.dumps(value, ensure_ascii=False), encoding='utf-8')
         path.chmod(0o600)
+
+
+def sync_download_artifacts(data, uri, clash, sing):
+    """把 data 里的 clash / sing / qr 与刚算出的 artifacts 对齐。
+
+    🔴 为什么必须抽成函数（2026-10-09）：
+    `clash` / `sing` / `qr` 三个键是**用户直接下载的东西** ——
+    「下载配置」按钮、二维码都读它们。它们原先只在 prepare() 里被赋值，
+    于是 refresh() / regenerate_page() 重新算出的 clash/sing 只喂给了 page_html
+    就被丢掉：页面文本框里是新 sni，二维码和下载文件却还是换证**之前**的旧节点。
+    用户扫了码立刻 CRYPTO_ERROR 0x150，而面板显示一切正常。
+
+    qr 单独处理：qrencode 可能不存在，此时**保留旧二维码**而不是清空 ——
+    空白框比旧图更难排查，失败原因另由调用方记录。
+    """
+    data['clash'] = clash
+    data['sing'] = sing
+    try:
+        qr = subprocess.run(['qrencode', '-t', 'SVG', '-o', '-'],
+                            input=uri.encode(), capture_output=True, timeout=20)
+        if qr.returncode == 0 and qr.stdout:
+            data['qr'] = qr.stdout.decode('utf-8', 'replace')
+    except Exception:
+        pass  # 保留旧图，别把框清空
+    return data
 
 
 def refresh(meta_path, config_path='/etc/hysteria/config.yaml'):
@@ -2096,6 +2142,13 @@ def refresh(meta_path, config_path='/etc/hysteria/config.yaml'):
         data['proxy_services'] = []
     data['page'] = page_html(m, uri, subscription, clash, sing, users=data['users'], api_key=data['api_key'], token=data['token'], session_secret=data.get('session_secret', ''),
                              username=access.get('username', ''), password=access.get('password', ''))
+    # 🔴 clash/sing/qr 必须一起更新（2026-10-09 修）：
+    # 这三个键原先**只在 prepare() 里写过**，refresh() 重新算出的 clash/sing
+    # 只喂给了 page_html 就被丢掉，于是「下载配置」按钮和二维码仍在发换证**之前**
+    # 的旧节点。页面文本框显示的是新 sni、二维码却是旧的 —— 用户扫了码导入，
+    # 立刻 CRYPTO_ERROR 0x150，而面板看起来一切正常。这正是 sync_cert_trust
+    # 要消灭的失败模式，只是从下一层又冒了出来。
+    sync_download_artifacts(data, uri, clash, sing)
     
     temporary = path.with_suffix('.tmp')
     temporary.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
@@ -2738,6 +2791,9 @@ if __name__ == '__main__':
 
             data['page'] = page_html(m, uri, subscription, clash, sing, users=display_users, api_key=data.get('api_key'), token=data['token'], session_secret=session_secret,
                                      username=access.get('username', ''), password=access.get('password', ''))
+            # 与 refresh() 同理：二维码/下载配置必须跟着 uri 一起更新，
+            # 否则自愈换了 sni 之后，页面文本框是对的、二维码仍是旧节点。
+            sync_download_artifacts(data, uri, clash, sing)
         save_data()
 
     def sign_session(token):
@@ -3053,6 +3109,12 @@ if __name__ == '__main__':
         def verify_api_key(self):
             auth_header = self.headers.get('Authorization', '')
             expected = 'Bearer ' + data.get('api_key', '')
+            # ⚠️ 必须先挡非 ASCII（2026-10-09 修）：hmac.compare_digest 遇到
+            # 含非 ASCII 字符的 str 会抛 TypeError（只支持 bytes 或纯 ASCII str）。
+            # 一个 `Authorization: Bearer 中文` 的请求就会在处理函数里抛未捕获异常
+            # → 连接被掐断、浏览器只看到通用错误，还分不清是「鉴权失败」还是「服务端坏了」。
+            if not auth_header.isascii():
+                return False
             return hmac.compare_digest(auth_header, expected)
 
         def is_authenticated(self):
@@ -3092,6 +3154,21 @@ if __name__ == '__main__':
                         return False
                     self.server.api_requests.append(now)
                     return True
+                elif bucket == 'auth':
+                    # 🔴 /auth 专用桶（真实漏洞，2026-10-09 修）：
+                    # 原来 /auth 完全不限流，理由写的是「来自 127.0.0.1 豁免」——
+                    # 但 config.yaml 的 masquerade 把**公网 HTTPS 流量代理进本机
+                    # 127.0.0.1:PORTAL**（type: proxy → http://127.0.0.1:PORT/），
+                    # 于是公网攻击者打到的仍是这个 loopback 端口，那条假设不成立。
+                    # 实测：经 masquerade 打 /auth 连发 20 次全部 200，
+                    # 且四种可区分回复（User not found / inactive / expired /
+                    # Traffic quota exceeded）构成完美的密码 oracle，可无限爆破。
+                    # 桶要小得多：/auth 只有 hysteria 握手才会调，QPS 天然很低。
+                    self.server.auth_requests[:] = [t for t in self.server.auth_requests if now - t < 1]
+                    if len(self.server.auth_requests) >= 20:
+                        return False
+                    self.server.auth_requests.append(now)
+                    return True
                 else:
                     self.server.requests[:] = [t for t in self.server.requests if now - t < 1]
                     self.server.failures[:] = [t for t in self.server.failures if now - t < 60]
@@ -3105,9 +3182,46 @@ if __name__ == '__main__':
             with data_lock:
                 self.server.failures.append(now)
 
+        def auth_rate_limited(self):
+            """/auth 专用限流 + 失败累计。
+
+            为什么不用 check_rate_limit('auth') 就完事：那个桶只挡**速率**，
+            挡不住低速爆破（每秒 1 次可以试 3 小时不停）。
+            这里再叠一个 60 秒滑窗的**失败**计数，
+            累计到阈值就短暂拒绝，逼迫爆破者付出时间成本。
+            """
+            now = time.monotonic()
+            with data_lock:
+                # 速率桶：1 秒内超过 20 次直接拒
+                self.server.auth_requests[:] = [t for t in self.server.auth_requests if now - t < 1]
+                too_fast = len(self.server.auth_requests) >= 20
+                if not too_fast:
+                    self.server.auth_requests.append(now)
+                # 失败桶：60 秒内失败超过 30 次就拒（哪怕速率不超）
+                self.server.auth_failures[:] = [
+                    t for t in self.server.auth_failures if now - t < 60]
+                too_many_failures = len(self.server.auth_failures) >= 30
+            return too_fast or too_many_failures
+
+        def record_auth_failure(self):
+            now = time.monotonic()
+            with data_lock:
+                self.server.auth_failures.append(now)
+
         def do_POST(self):
-            # 1. Hysteria 2 本地 HTTP 动态鉴权、实时流量统计与 IP 限额拦截端点 (来自 127.0.0.1 豁免限流)
+            # 1. Hysteria 2 本地 HTTP 动态鉴权、实时流量统计与 IP 限额拦截端点
+            #
+            # 🔴 这里必须限流（2026-10-09 修）：原注释写「来自 127.0.0.1 豁免限流」，
+            # 但 masquerade 会把**公网 HTTPS 流量代理进本机 127.0.0.1:PORTAL**，
+            # 公网攻击者打到的同样是这个 loopback 端口，假设不成立。
+            # 实测经 masquerade 连发 20 次 /auth 全部放行，且回复可区分用户是否存在，
+            # 构成完美的密码 oracle。现在走 auth_rate_limited()，
+            # 并且**失败也计数**（低速爆破同样被挡）。
             if self.path == '/auth':
+                if self.auth_rate_limited():
+                    # 用与成功路径相同的 200 + JSON 形态回复：不给爆破者区分信号。
+                    # （Hysteria 只会看 ok 字段；非 200 可能让它反复重试并刷日志。）
+                    return self.reply_json(200, {'ok': False, 'msg': 'Auth service busy'})
                 try:
                     length = int(self.headers.get('Content-Length', 0))
                     body = self.rfile.read(length).decode('utf-8')
@@ -3120,6 +3234,7 @@ if __name__ == '__main__':
                     # 的单调计数器累计（见 usage-meter-core）。
                     client_ip = client_addr.rsplit(':', 1)[0].strip('[]') if client_addr else ''
                 except Exception:
+                    self.record_auth_failure()
                     return self.reply_json(200, {'ok': False, 'msg': 'Bad auth request'})
 
                 now_ts = int(time.time())
@@ -3132,6 +3247,7 @@ if __name__ == '__main__':
                             break
 
                     if not matched_user:
+                        self.record_auth_failure()
                         return self.reply_json(200, {'ok': False, 'msg': 'User not found'})
 
                     if matched_user.get('status') != 'active':
@@ -4303,6 +4419,20 @@ net.ipv4.tcp_slow_start_after_idle = 0
                     traffic_gb = float(form.get('traffic_gb', ['0'])[0] or 0)
                     limit_bytes = int(traffic_gb * (1024**3)) if traffic_gb > 0 else 0
                     note = form.get('note', [''])[0].strip()[:200]
+                    # 🔴 2026-10-09 修：原来是无条件赋值，同名 id 会被**静默覆盖** ——
+                    # 密码被改、used_bytes 归零（已购/已用流量凭空消失）、有效期重算，
+                    # 而用户拿到的是 200 成功响应。API 那条路径有 create_only 守卫，
+                    # 网页表单这条没有。表单又不预填 id、不提示重名，重复提交很容易撞上。
+                    # 现在显式 409，并回显密码尾号帮机主确认自己是不是认错了人。
+                    with data_lock:
+                        existing = data.get('users', {}).get(user_id)
+                    if existing is not None:
+                        tail = (existing.get('password') or '')[-4:]
+                        used_gb = round(int(existing.get('used_bytes', 0)) / (1024 ** 3), 2)
+                        return self.reply(409, (
+                            f'用户 {user_id} 已存在（当前密码尾号 {tail}，已用 {used_gb} GB）。'
+                            '如需改参数请用「修改」，或先删除该用户再重建。'
+                        ).encode('utf-8'))
                     with data_lock:
                         data.setdefault('users', {})[user_id] = {
                             'password': pwd,
@@ -4748,7 +4878,17 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
                     m = json.loads(meta_path.read_text()) if meta_path.exists() else {}
                     with data_lock:
                         users_count = len(data.get('users', {}))
-                    return self.reply_json(200, {'ok': True, 'meta': m, 'users_count': users_count, 'time': int(time.time())})
+                    # 🔴 白名单，2026-10-09 修（真实泄漏）：
+                    # 原来直接把整个 client_meta.json 原样返回，而 install.sh 往里写了
+                    # auth_password 与 obfs_password。api_key 是**低权限**凭据
+                    # （见 page_html 里那段说明：权限低于 Basic，够不着网页端），
+                    # 把它按设计发到商城/自动化脚本手上，却顺带送了机主密码 ——
+                    # 无限流量、不过期。用低权限凭据换高权限凭据就是提权。
+                    # 实测已确认 auth_password / obfs_password 都被返回。
+                    # capabilities 早就是白名单的，这里对齐同一套做法。
+                    _secret_keys = {'auth_password', 'obfs_password', 'pin_sha256'}
+                    public_meta = {k: v for k, v in m.items() if k not in _secret_keys}
+                    return self.reply_json(200, {'ok': True, 'meta': public_meta, 'users_count': users_count, 'time': int(time.time())})
                 if sub == 'users/list':
                     # BUGFIX #10: 商城节点对账用, 列出所有动态用户 (脱敏不返回 password)
                     now_ts = int(time.time())
@@ -5233,10 +5373,15 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
             而界面上看不出原因。
             """
             try:
+                # ⚠️ LC_ALL=C 是必需的（2026-10-09 修）：下面两个正则只认英文输出
+                # （'% packet loss' / 小数点分隔的 `= a/b/c`）。在本地化 locale 下
+                # 解析会全面失效 —— 实测 zh_CN 下丢包率解析不到，
+                # de_DE 下连 avg 都解析不到（逗号当小数点），测速永远显示「未测得」。
+                # -n 则保证 host 不会被当成命令选项。
                 proc = subprocess.run(
-                    ['ping', '-c', '3', '-W', '2', host],
+                    ['ping', '-n', '-c', '3', '-W', '2', host],
                     capture_output=True, text=True, timeout=10,
-                )
+                    env={**os.environ, 'LC_ALL': 'C', 'LANG': 'C'})
             except Exception:
                 return None, None
             out = proc.stdout or ''
@@ -5410,6 +5555,9 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
 
     server = ThreadingHTTPServer(('127.0.0.1', data['port']), Handler)
     server.requests, server.failures, server.api_requests = [], [], []
+    # /auth 专用限流桶（2026-10-09）：见 auth_rate_limited() 的说明 ——
+    # /auth 经 masquerade 对公网可达，必须有独立的速率+失败计数。
+    server.auth_requests, server.auth_failures = [], []
 
     # 启动兜底：如果上一次运行时有 clients 变更被「节流」跳过
     # （见 _reality_restart_allowed），配置写进 xray.json 了但服务没重载。

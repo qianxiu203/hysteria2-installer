@@ -38,6 +38,7 @@
 写出的自愈段来验证，而不是重写一遍逻辑（重写就等于没测到真代码）。
 """
 import io
+import os
 import re
 import subprocess
 import tempfile
@@ -179,10 +180,18 @@ class SelfHealHarnessTest(unittest.TestCase):
     def _posix_dir(self):
         """建一个本测试独占的临时目录，返回 bash 可见的 POSIX 路径。"""
         self._require_bash()
-        # 用 Windows 原生 temp 建目录，再交给 bash 转成 POSIX 路径，
-        # 避免 /tmp 在跨 bash 实现时指向不同位置。
         td = tempfile.mkdtemp(prefix='metercfg_')
         self.addCleanup(lambda: __import__('shutil').rmtree(td, ignore_errors=True))
+        # Windows：`pwd -W` 给的是 Windows 路径（pwsh/bash on Windows 的 cwd 语义不同，
+        # 必须显式换算）。POSIX：tmpdir 本身就是路径，`pwd -W` 不存在会失败，
+        # 必须在 cd 之前判平台 —— 否则会拿到一个 bash 根本用不了的路径，
+        # 测试表现为「自愈段没生效」（config 里 trafficStats 计数为 0），
+        # 很容易被误判成产品代码坏了。
+        if os.name != 'nt':
+            posix = td.replace('\\', '/')
+            subprocess.run([self._bash, '-c', 'mkdir -p "$1/hysteria"', 'bash', posix],
+                           check=True, capture_output=True)
+            return posix
         r = subprocess.run(
             [self._bash, '-c', 'cd "$1" && pwd -W 2>/dev/null || pwd',
              'bash', td.replace('\\', '/')],
@@ -235,8 +244,13 @@ class SelfHealHarnessTest(unittest.TestCase):
         i = body.index('# 计量配置自愈')
         # 从注释块之后的第一个 `if [[ -f` 开始切，跳过顶格注释
         start = body.index('if [[ -f "$HY2_DIR/config.yaml" ]]', i)
-        j = body.index(
-            'systemctl restart hysteria-portal 2>/dev/null || true', i)
+        # ⚠️ 终点必须锚在「计量自愈块的收尾 fi」上，不能按 systemctl restart 找。
+        # 2026-10-09 之后 do_upgrade.sh 的同一个 heredoc 里又追加了「证书自愈」块，
+        # 它同样以 systemctl restart hysteria-portal 收尾；按后者切会把证书块
+        # （含嵌套 <<'PYEOF2' heredoc）整段带进来，dedent 遇到顶格终止符算错缩进，
+        # 拼进 bash 立刻语法错 —— 表现为「trafficStats 被重复插入」这种假象。
+        _gen = body.index('计量配置已生成（真实计量启用）', i)
+        j = body.index('\n', body.index('\n        fi', _gen) + 1)
         seg = body[start:j]
         # 本地仿真没有 systemd，替换掉重启调用
         seg = seg.replace(
@@ -253,7 +267,7 @@ class SelfHealHarnessTest(unittest.TestCase):
 
     def test_selfheal_adds_traffic_stats_and_meter_config(self):
         base = self._posix_dir()
-        cfg_path = f'{base}/hysteria/config.yaml'.replace('/', '\\')
+        cfg_path = f'{base}/hysteria/config.yaml'
         self._write_file(
             cfg_path,
             'listen: :19906\n'
@@ -296,7 +310,7 @@ class SelfHealHarnessTest(unittest.TestCase):
     def test_selfheal_is_idempotent(self):
         """连跑两次不得重复插入 trafficStats。"""
         base = self._posix_dir()
-        cfg_path = f'{base}/hysteria/config.yaml'.replace('/', '\\')
+        cfg_path = f'{base}/hysteria/config.yaml'
         self._write_file(cfg_path,
                          'listen: :19906\nmasquerade:\n  type: proxy\n')
         seg = self._extract_upgrade_selfheal()
@@ -314,7 +328,7 @@ class SelfHealHarnessTest(unittest.TestCase):
         """已有 trafficStats 的老机器：补 usage-meter-config.json 时必须
         沿用**已存在的 secret**，不许重新生成（否则线上 /traffic 立刻 401）。"""
         base = self._posix_dir()
-        cfg_path = f'{base}/hysteria/config.yaml'.replace('/', '\\')
+        cfg_path = f'{base}/hysteria/config.yaml'
         existing = 'a' * 32
         self._write_file(
             cfg_path,

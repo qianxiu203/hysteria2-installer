@@ -902,6 +902,13 @@ async function checkCertStatus() {
     certBadge.textContent = '🟡 ' + days + ' 天后到期';
     certBadge.style.background = '#fffbe6';
     certBadge.style.color = '#ad6800';
+  } else if (json.warn_level === 'unknown' || days === null || days === undefined) {
+    // ⚠️ 必须单列一支：判级 unknown = 到期时间**读不出来**。
+    // 若让它落进下面的 else，会显示成「● 正常 · null 天后到期」——
+    // 一块绿色的安慰性假象，恰好毁掉这张卡片唯一的存在理由。
+    certBadge.textContent = '⚠️ 到期时间未知';
+    certBadge.style.background = '#fffbe6';
+    certBadge.style.color = '#ad6800';
   } else {
     certBadge.textContent = '● 正常 · ' + days + ' 天后到期';
     certBadge.style.background = '#eaf5ef';
@@ -924,6 +931,9 @@ async function checkCertStatus() {
     } else if (json.warn_level === 'warn') {
       certAlert.classList.add('warn');
       msg = '🟡 证书将在 ' + days + ' 天后到期（' + json.not_after + '）。若使用的是外部签发工具（Caddy / acme.sh），请确认其续期定时任务正常。';
+    } else if (json.warn_level === 'unknown' || days === null || days === undefined) {
+      certAlert.classList.add('warn');
+      msg = '⚠️ 证书到期时间读不出来（解析失败），无法判断临期风险。请手动执行：openssl x509 -enddate -noout -in ' + (json.cert_path || '/etc/hysteria/cert/fullchain.pem') + ' 核对到期时刻。';
     } else if (json.meta_matches_cert === false) {
       certAlert.classList.add('info');
       msg = 'ℹ️ 证书与节点记录存在偏差：订阅使用的 SNI 是「' + (json.server_name || '空') +
