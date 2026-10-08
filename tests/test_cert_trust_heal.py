@@ -21,6 +21,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -348,6 +349,78 @@ class TestShellSyncCertMeta(unittest.TestCase):
 
 
 # ----------------------------------------------------------------------------
+# portal.py::selfheal  (the entry point the systemd timer / path unit calls)
+# ----------------------------------------------------------------------------
+class TestPortalSelfHealEntry(unittest.TestCase):
+    def _call(self, root, config_path=None):
+        sys.path.insert(0, str(REPO))
+        try:
+            if "portal" in sys.modules:
+                del sys.modules["portal"]
+            import portal  # noqa
+            return portal.selfheal(
+                str(root / "client_meta.json"),
+                config_path=str(config_path or (root / "config.yaml")))
+        finally:
+            sys.path.pop(0)
+
+    def test_selfheal_fixes_drift_and_rewrites_portal_json(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            _make_public(td / "cert", cn="se.zy3a.com")
+            (td / "config.yaml").write_text(
+                "listen: :443\ntls:\n  cert: cert/fullchain.pem\n  key: cert/leaf.key\n")
+            (td / "client_meta.json").write_text(json.dumps(
+                {"public_ip": "13.63.71.232", "auth_password": "pw",
+                 "server_name": "www.bing.com", "cert_type": "self_signed",
+                 "is_insecure": True, "pin_sha256": "8" * 64}))
+            # minimal portal.json + portal-access.json so refresh() can run
+            (td / "portal.json").write_text(json.dumps(
+                {"token": "t" * 16, "auth_hash": "a" * 64, "users": {},
+                 "page": "<html>OLD</html>"}))
+            (td / "portal-access.json").write_text(json.dumps(
+                {"username": "u", "password": "p", "api_key": "k" * 24}))
+            changed = self._call(td, config_path=td / "config.yaml")
+            self.assertTrue(changed)
+            out = json.loads((td / "client_meta.json").read_text())
+            self.assertEqual(out["cert_type"], "custom")
+            self.assertIs(out["is_insecure"], False)
+            self.assertEqual(out["server_name"], "se.zy3a.com")
+            # portal.json page must have been regenerated with the new server_name
+            page = json.loads((td / "portal.json").read_text())["page"]
+            self.assertNotEqual(page, "<html>OLD</html>")
+            self.assertIn("se.zy3a.com", page)
+
+    def test_selfheal_is_noop_when_consistent(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            _make_public(td / "cert", cn="se.zy3a.com")
+            (td / "config.yaml").write_text(
+                "listen: :443\ntls:\n  cert: cert/fullchain.pem\n  key: cert/leaf.key\n")
+            (td / "client_meta.json").write_text(json.dumps(
+                {"public_ip": "1.2.3.4", "auth_password": "pw",
+                 "server_name": "se.zy3a.com", "cert_type": "custom",
+                 "is_insecure": False, "pin_sha256": ""}))
+            (td / "portal.json").write_text(json.dumps(
+                {"token": "t" * 16, "auth_hash": "a" * 64, "users": {},
+                 "page": "<html>KEEP</html>"}))
+            (td / "portal-access.json").write_text(json.dumps(
+                {"username": "u", "password": "p", "api_key": "k" * 24}))
+            before = (td / "client_meta.json").read_text()
+            page_before = json.loads((td / "portal.json").read_text())["page"]
+            changed = self._call(td, config_path=td / "config.yaml")
+            self.assertFalse(changed)
+            self.assertEqual(before, (td / "client_meta.json").read_text())
+            # portal.json must NOT be rewritten (that's why selfheal != refresh)
+            self.assertEqual(page_before, json.loads((td / "portal.json").read_text())["page"])
+
+    def test_selfheal_missing_meta_returns_false(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            self.assertFalse(self._call(td))
+
+
+# ----------------------------------------------------------------------------
 # repo invariants (guard against silent removal of the fix)
 # ----------------------------------------------------------------------------
 class TestRepoInvariants(unittest.TestCase):
@@ -366,6 +439,84 @@ class TestRepoInvariants(unittest.TestCase):
         self.assertIn("证书信任模型已自愈", text)
         # do_upgrade.sh portal path must self-heal too
         self.assertIn("证书信任模型已自愈:", text)
+
+    def test_install_ships_scheduled_selfheal_units(self):
+        """选项 2：定时 + 事件双保险必须在仓库里存在且被启用。"""
+        text = INSTALL.read_text(encoding="utf-8")
+        self.assertIn("setup_cert_selfheal() {", text)
+        # called from setup_portal (fresh install) and refresh_portal (existing install)
+        self.assertIn("    setup_cert_selfheal\n", text)
+        self.assertIn("setup_cert_selfheal >/dev/null 2>&1 || true", text)
+        # timer (30 min safety net) + path unit (instant on cert change)
+        self.assertIn("hy2-cert-selfheal.timer", text)
+        self.assertIn("hy2-cert-selfheal.path", text)
+        self.assertIn("OnUnitActiveSec=30min", text)
+        self.assertIn("PathChanged=", text)
+        self.assertIn("enable --now hy2-cert-selfheal.timer", text)
+        self.assertIn("enable --now hy2-cert-selfheal.path", text)
+        # the executable the units call must invoke `portal.py selfheal`
+        self.assertIn('"$HY2_DIR/portal.py" selfheal', text)
+        # do_upgrade.sh must also install them for already-deployed nodes
+        self.assertIn("证书一致性自愈单元已启用", text)
+        # uninstall must clean them up
+        self.assertIn("disable --now hy2-cert-selfheal.timer", text)
+        self.assertIn("rm -f /etc/systemd/system/hy2-cert-selfheal.path", text)
+
+    def test_portal_cli_exposes_selfheal_subcommand(self):
+        text = PORTAL.read_text(encoding="utf-8")
+        self.assertIn("def selfheal(", text)
+        self.assertIn("_cmd == 'selfheal'", text)
+
+    def test_selfheal_script_version_guard_matches_real_marker(self):
+        """版本守卫必须匹配 portal.py 里**真实存在**的标记。
+
+        回归场景（真实踩到）：守卫原本 grep `sys.argv[1] == 'selfheal'`，
+        后来 CLI 重构成 `_cmd == 'selfheal'` —— 守卫从此永远失配，
+        于是新门户装好后自愈仍被误判为「版本过旧」而永不执行，
+        且只在 journal 里留一行，界面/service 全都显示正常。
+        """
+        text = INSTALL.read_text(encoding="utf-8")
+        portal_text = PORTAL.read_text(encoding="utf-8")
+        guard_lines = [ln for ln in text.splitlines()
+                       if ln.strip().startswith("if ! grep -q")
+                       and "portal.py" in ln and "HY2_DIR" in ln]
+        self.assertTrue(guard_lines, "找不到 selfheal 脚本里的版本守卫")
+        checked = 0
+        for line in guard_lines:
+            m = re.search(r"grep -q\s+(['\"])(.*?)\1", line)
+            self.assertIsNotNone(m, f"无法解析守卫行: {line}")
+            marker = m.group(2).replace("\\", "")
+            if "selfheal" in marker or "portal.py" in marker:
+                checked += 1
+                self.assertIn(marker, portal_text,
+                              f"守卫标记 {marker!r} 在 portal.py 里不存在（守卫会永远失配）")
+        self.assertGreaterEqual(checked, 1)
+
+    def test_portal_cli_rejects_unknown_subcommand(self):
+        """未知子命令必须显式报错退出，绝不能落进 serve 分支。
+
+        回归场景（真实踩到）：旧版 portal.py 没有 selfheal，
+        `python3 portal.py selfheal <meta>` 会落到 `else: serve(...)`，
+        于是「自愈」实际去启动第二个门户进程（或报无关的 KeyError），
+        而调用方只看到「命令跑过了」—— 又是一次静默降级。
+        """
+        text = PORTAL.read_text(encoding="utf-8")
+        i = text.rindex("if __name__ == '__main__':")
+        cli = text[i:]
+        self.assertIn("elif _cmd == 'serve':", cli)
+        self.assertIn("未知子命令", cli)
+        self.assertIn("sys.exit(2)", cli)
+        # 关键：else 分支不得再直接调用 serve
+        else_body = cli.split("else:", 1)[-1]
+        self.assertNotIn("serve(sys.argv[2])", else_body)
+
+    def test_refresh_calls_sync_cert_trust(self):
+        """refresh 只调 sync_pin 是不够的 —— 必须也修信任模型四字段。"""
+        text = PORTAL.read_text(encoding="utf-8")
+        i = text.index("def refresh(meta_path")
+        j = text.index("def selfheal(", i)
+        body = text[i:j]
+        self.assertIn("sync_cert_trust(m, root, meta_path", body)
 
 
 if __name__ == "__main__":

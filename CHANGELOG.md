@@ -2,6 +2,43 @@
 
 ## 未发布
 
+### 增强：证书一致性自愈常驻化（定时 + 事件双保险，覆盖外部续期）
+- **动机**：上一条修复只在**安装 / 手动刷新**时对齐信任模型。若证书由**外部**程序
+  续期（Caddy 抢证、`acme.sh --cron` 等），换证当下没有任何本项目的代码被触发 ——
+  用户不点「刷新」就一直带着旧 sni，表现为「都换正式证书了还 CRYPTO_ERROR 0x150」。
+- **修法**：
+  1. `portal.py::selfheal()` —— 独立的轻量入口。只在**检测到漂移**时才动盘：
+     先修 meta，meta 真变了才顺带 `refresh()` 重生成 portal.json 里的页面
+     （避免每 30 分钟无谓重写大 JSON、也让门户 mtime 不再无意义地变）。
+  2. `portal.py` CLI 新增 `selfheal` 子命令；`refresh()` 也补上 `sync_cert_trust`
+     （原先只有 `sync_pin`，等于手动刷新也修不全四个字段）。
+  3. `install.sh::setup_cert_selfheal()` 装三个单元：
+     - `hy2-cert-selfheal.timer`（`OnUnitActiveSec=30min`）—— 兜底扫，覆盖任何换证方式；
+     - `hy2-cert-selfheal.path`（`PathChanged=<证书目录>`）—— 换证落盘即刻触发。
+       盯**目录**而非单文件：Caddy/acme.sh 续期是「写新文件再 rename 覆盖」，
+       单文件 `PathChanged` 在 rename 场景下可能因 inode 变化而漏触发。
+     - `hy2-cert-selfheal.service`（oneshot，执行体只调 `portal.py selfheal`）。
+  4. 老装机无需重装：`refresh_portal()` 与 `do_upgrade.sh portal` 都会幂等补齐单元。
+  5. `uninstall_all()` 清理 timer / path / service 与执行脚本。
+- **顺带修掉两个真坑**：
+  * **未知子命令不再落进 `serve`**：旧版门户没有 `selfheal`，`python3 portal.py selfheal <meta>`
+    会掉进 `else: serve(...)` 分支，于是「自愈」实际去**启动第二个门户进程**
+    （实测还伴随无关的 `KeyError: 'auth_hash'`），而调用方只看到「命令跑过了」。
+    现在未知子命令显式报错并 `exit 2`。
+  * **自愈脚本不再吞掉 stderr**：原来 `>/dev/null 2>&1 || true`，失败完全无痕 ——
+    「服务显示成功、其实啥也没修」又是本项目最忌的静默降级。现在输出进 journal，
+    并在 portal.py 缺 `def selfheal(` 时明确记「版本过旧，请升级门户」。
+- **实测证据（测试机 se，模拟 Caddy 续期）**：把证书换成 `CN=www.bing.com` 自签、
+  meta 仍记 `se.zy3a.com/custom`（漂移），`touch` 证书目录后
+  path unit **自动触发**并自愈为 `self_signed/www.bing.com/true`，
+  `pin_sha256` 与证书真实 SHA-256 指纹逐字符一致，journal 留痕完整；
+  再触发两次均零写入零日志（幂等）；换回真实 Let's Encrypt 证书后自愈**反向**修正为
+  `custom/se.zy3a.com/false`。`hysteria-portal` / `hysteria-server` /
+  `hy2-cert-selfheal.timer` / `hy2-cert-selfheal.path` 全部 active。
+- **回归**：`tests/test_cert_trust_heal.py` 扩到 18 例（新增 selfheal 入口 3 例 +
+  严格 CLI 1 例 + 版本守卫标记一致性 1 例 + 定时/事件单元不变量 1 例），
+  测试机 se 上 18/18 绿。两个新坑都用变异测试验证过用例能抓到。
+
 ### 修复：真实计量从未启用（`install.sh` 从不写 `trafficStats`，portal 静默降级）
 - **现象（真实故障）**：装完后仪表盘「真实计量」永远显示「未开始计量」，
   `/traffic-speed` 恒为 `0`，`users/list` 的 `measurement_ok` 恒为 `false`，

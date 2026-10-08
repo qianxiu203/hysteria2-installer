@@ -1350,6 +1350,74 @@ METEREOF2
                 fi
             fi
         fi
+        # 证书自愈单元自愈安装（2026-10-08）：老装机在线升级后也补齐
+        # timer + path 单元，让 Caddy 等外部续期换证后无需人工点刷新即可自动对齐。
+        if [[ -f "$HY2_DIR/client_meta.json" ]]; then
+            cat > /usr/local/bin/hy2-cert-selfheal.sh <<'EOCS2'
+#!/usr/bin/env bash
+set -u
+HY2_DIR="/etc/hysteria"
+if [[ ! -f "$HY2_DIR/portal.py" || ! -f "$HY2_DIR/client_meta.json" ]]; then
+    logger -t hy2-cert-selfheal "缺少 portal.py 或 client_meta.json，跳过"
+    exit 0
+fi
+if ! grep -q 'def selfheal(' "$HY2_DIR/portal.py" 2>/dev/null; then
+    logger -t hy2-cert-selfheal "当前 portal.py 不支持 selfheal 子命令（版本过旧），请升级门户"
+    exit 0
+fi
+_out="$(python3 "$HY2_DIR/portal.py" selfheal "$HY2_DIR/client_meta.json" 2>&1)"
+if [[ -n "$_out" ]]; then
+    printf '%s\n' "$_out" | logger -t hy2-cert-selfheal
+fi
+unset _out
+exit 0
+EOCS2
+            chmod 755 /usr/local/bin/hy2-cert-selfheal.sh
+            printf '%s\n' \
+              '[Unit]' \
+              'Description=Hysteria 2 certificate trust-model self-heal' \
+              '' \
+              '[Service]' \
+              'Type=oneshot' \
+              'ExecStart=/usr/local/bin/hy2-cert-selfheal.sh' \
+              > /etc/systemd/system/hy2-cert-selfheal.service
+            printf '%s\n' \
+              '[Unit]' \
+              'Description=Run certificate self-heal every 30 minutes' \
+              '' \
+              '[Timer]' \
+              'OnBootSec=2min' \
+              'OnUnitActiveSec=30min' \
+              'Unit=hy2-cert-selfheal.service' \
+              '' \
+              '[Install]' \
+              'WantedBy=timers.target' \
+              > /etc/systemd/system/hy2-cert-selfheal.timer
+            _cwd="$HY2_DIR/cert"
+            _cc="$(awk '/^tls:/{f=1;next} f&&/^[ \t]+cert:/{sub(/^[ \t]*cert:[ \t]*/,"");gsub(/["\x27]/,"");print;exit} f&&/^[^ \t]/{f=0}' "$HY2_DIR/config.yaml" 2>/dev/null || true)"
+            if [[ -n "$_cc" ]]; then
+                case "$_cc" in
+                    /*) _cwd="$(dirname "$_cc")" ;;
+                    *)  _cwd="$(dirname "$HY2_DIR/$_cc")" ;;
+                esac
+            fi
+            [[ -d "$_cwd" ]] || _cwd="$HY2_DIR/cert"
+            printf '%s\n' \
+              '[Unit]' \
+              'Description=Watch certificate dir and self-heal trust model on change' \
+              '' \
+              '[Path]' \
+              "PathChanged=$_cwd" \
+              'Unit=hy2-cert-selfheal.service' \
+              '' \
+              '[Install]' \
+              'WantedBy=paths.target' \
+              > /etc/systemd/system/hy2-cert-selfheal.path
+            systemctl daemon-reload 2>/dev/null || true
+            systemctl enable --now hy2-cert-selfheal.timer >/dev/null 2>&1 || true
+            systemctl enable --now hy2-cert-selfheal.path  >/dev/null 2>&1 || true
+            echo "证书一致性自愈单元已启用"
+        fi
         systemctl restart hysteria-portal 2>/dev/null || true
     fi
 fi
@@ -1850,6 +1918,8 @@ refresh_portal() {
     # 证书可能已被带外替换（Caddy 续期 / 手工换证），先自愈信任模型再 refresh，
     # 否则 refresh 出来的订阅仍带漂移的 sni。
     sync_cert_meta
+    # 老装机此前没有证书自愈单元 —— 借着刷新顺带补齐（幂等，重复调用无副作用）。
+    setup_cert_selfheal >/dev/null 2>&1 || true
     python3 "$HY2_DIR/portal.py" refresh "$HY2_META_FILE"
     systemctl restart hysteria-portal
     log_info "网页已更新，节点参数和登录凭据保持不变。"
@@ -1883,6 +1953,102 @@ EOF
     systemctl restart hysteria-portal
     sleep 1
     systemctl is-active --quiet hysteria-portal || { log_err "信息页服务启动失败"; return 1; }
+    setup_cert_selfheal
+}
+
+# 证书一致性定时/事件自愈（2026-10-08）。
+# 🔴 为什么需要（真实 bug 的下游）：client_meta.json 的信任模型只在安装 / 手动
+#    refresh 时对齐。若证书由**外部**程序续期（Caddy 抢证、acme.sh --cron 等），
+#    换证当下没有任何本项目的代码被触发 —— 用户不点「刷新」就永远带着旧 sni，
+#    表现为换了正式证书后仍 CRYPTO_ERROR 0x150。
+# 双保险：
+#   1) hy2-cert-selfheal.timer  —— 每 30 分钟兜底扫一次（覆盖任何换证方式）；
+#   2) hy2-cert-selfheal.path   —— 监听证书文件本身，inode 一变立刻触发（Caddy
+#      续期是 rename 替换，PathChanged 必然命中），做到「换完即修」。
+# 执行体是一个只调 `portal.py selfheal` 的脚本：幂等，无漂移时零写入。
+setup_cert_selfheal() {
+    cat > /usr/local/bin/hy2-cert-selfheal.sh <<'EOCS'
+#!/usr/bin/env bash
+# 证书信任模型自愈：以 config.yaml 实际使用的证书为唯一事实来源，
+# 幂等修正 client_meta.json 的 cert_type/server_name/is_insecure/pin_sha256。
+# 无漂移时零写入、不发无谓重启。失败只记日志，不让 timer 报错刷屏。
+#
+# ⚠️ 输出必须进 journal（不能用 >/dev/null 2>&1 全吞）：旧版 portal.py 没有
+#    selfheal 子命令时会把参数当成 serve 启动第二个门户进程，这类失败必须留痕，
+#    否则「服务显示成功、其实啥也没修」又是本项目最忌的静默降级。
+set -u
+HY2_DIR="/etc/hysteria"
+if [[ ! -f "$HY2_DIR/portal.py" || ! -f "$HY2_DIR/client_meta.json" ]]; then
+    logger -t hy2-cert-selfheal "缺少 portal.py 或 client_meta.json，跳过"
+    exit 0
+fi
+if ! grep -q 'def selfheal(' "$HY2_DIR/portal.py" 2>/dev/null; then
+    logger -t hy2-cert-selfheal "当前 portal.py 不支持 selfheal 子命令（版本过旧），请升级门户"
+    exit 0
+fi
+_out="$(python3 "$HY2_DIR/portal.py" selfheal "$HY2_DIR/client_meta.json" 2>&1)"
+if [[ -n "$_out" ]]; then
+    printf '%s\n' "$_out" | logger -t hy2-cert-selfheal
+fi
+unset _out
+exit 0
+EOCS
+    chmod 755 /usr/local/bin/hy2-cert-selfheal.sh
+
+    cat > /etc/systemd/system/hy2-cert-selfheal.service <<'EOCU'
+[Unit]
+Description=Hysteria 2 certificate trust-model self-heal
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/hy2-cert-selfheal.sh
+EOCU
+
+    cat > /etc/systemd/system/hy2-cert-selfheal.timer <<'EOCT'
+[Unit]
+Description=Run certificate self-heal every 30 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=30min
+Unit=hy2-cert-selfheal.service
+
+[Install]
+WantedBy=timers.target
+EOCT
+
+    # path 单元：监听证书目录（config.yaml 里 tls.cert 所在目录）。
+    # 用目录而非单文件：Caddy/acme.sh 续期是「写新文件再 rename 覆盖」，
+    # 单文件 PathChanged 在 rename 场景下可能因 inode 变化而漏触发，盯目录更稳。
+    local cert_watch_dir="$HY2_CERT_DIR"
+    local _cc
+    _cc="$(awk '/^tls:/{f=1;next} f&&/^[ \t]+cert:/{sub(/^[ \t]*cert:[ \t]*/,"");gsub(/["\x27]/,"");print;exit} f&&/^[^ \t]/{f=0}' "$HY2_CONFIG" 2>/dev/null || true)"
+    if [[ -n "$_cc" ]]; then
+        if [[ "$_cc" != /* ]]; then
+            cert_watch_dir="$(dirname "${HY2_DIR}/${_cc}")"
+        else
+            cert_watch_dir="$(dirname "$_cc")"
+        fi
+    fi
+    [[ -d "$cert_watch_dir" ]] || cert_watch_dir="$HY2_CERT_DIR"
+
+    cat > /etc/systemd/system/hy2-cert-selfheal.path <<EOCP
+[Unit]
+Description=Watch certificate dir and self-heal trust model on change
+
+[Path]
+PathChanged=${cert_watch_dir}
+Unit=hy2-cert-selfheal.service
+
+[Install]
+WantedBy=paths.target
+EOCP
+
+    systemctl daemon-reload
+    systemctl enable --now hy2-cert-selfheal.timer >/dev/null 2>&1 || true
+    systemctl enable --now hy2-cert-selfheal.path  >/dev/null 2>&1 || true
+    log_info "证书一致性自愈已启用（每 30 分钟 + 证书目录变更即时触发）。"
 }
 
 # 7. 服务状态与管理命令
@@ -2841,11 +3007,19 @@ uninstall_all() {
         systemctl disable --now wireproxy 2>/dev/null || true
         systemctl disable --now hy2-warp-watchdog.timer 2>/dev/null || true
         systemctl disable --now hy2-warp-watchdog.service 2>/dev/null || true
+        # 证书自愈定时/事件单元
+        systemctl disable --now hy2-cert-selfheal.timer 2>/dev/null || true
+        systemctl disable --now hy2-cert-selfheal.path 2>/dev/null || true
+        systemctl disable --now hy2-cert-selfheal.service 2>/dev/null || true
         rm -f /etc/systemd/system/hysteria-portal.service
         rm -f /etc/systemd/system/gost.service
         rm -f /etc/systemd/system/wireproxy.service
         rm -f /etc/systemd/system/hy2-warp-watchdog.service
         rm -f /etc/systemd/system/hy2-warp-watchdog.timer
+        rm -f /etc/systemd/system/hy2-cert-selfheal.service
+        rm -f /etc/systemd/system/hy2-cert-selfheal.timer
+        rm -f /etc/systemd/system/hy2-cert-selfheal.path
+        rm -f /usr/local/bin/hy2-cert-selfheal.sh
         clear_all_hopping_rules
         rm -f "$HY2_SERVICE"
         systemctl daemon-reload

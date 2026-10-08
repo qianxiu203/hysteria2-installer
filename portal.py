@@ -1863,9 +1863,13 @@ def prepare(meta_path, port, node_api_key=None):
         path.chmod(0o600)
 
 
-def refresh(meta_path):
+def refresh(meta_path, config_path='/etc/hysteria/config.yaml'):
     root = Path(meta_path).parent
     m = json.loads(Path(meta_path).read_text())
+    # 证书可能已被带外替换（Caddy 续期 / 手工换证），先修信任模型再对齐 pin。
+    # 顺序有依赖：sync_pin 依赖 is_insecure 判断 pin 去留，而 is_insecure 本身
+    # 可能正漂移着（自签被换成正式证书后仍是 true）。
+    sync_cert_trust(m, root, meta_path, config_path=config_path)
     sync_pin(m, root, meta_path)
 
     access = json.loads((root / 'portal-access.json').read_text())
@@ -1903,6 +1907,46 @@ def refresh(meta_path):
     temporary.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
     temporary.chmod(0o600)
     temporary.replace(path)
+
+
+def selfheal(meta_path, config_path='/etc/hysteria/config.yaml'):
+    """定时/事件触发的证书一致性自愈（供 systemd timer / path unit 调用）。
+
+    为什么要独立成一个入口（而不是复用 refresh）：
+      * refresh 会**无条件重写 portal.json**（重算 qr / page / token 派生），
+        而续期自愈绝大多数时候无事发生 —— 每 30 分钟重写一次大 JSON 既浪费、
+        也会让门户的 mtime 一直变（不利于排障时判断「谁改过门户」）。
+      * 本入口只在**检测到漂移**时才动盘：先 sync_cert_trust 修 meta，
+        若 meta 真变了，才顺带 refresh 一次让 portal.json 里的 page 跟上
+        （page 里的 server_name / sni 是烘进 HTML 的，meta 变了必须重生成）。
+
+    返回 True 表示发生了自愈（并已同步 portal.json），False 表示本来就一致。
+    """
+    root = Path(meta_path).parent
+    meta_file = Path(meta_path)
+    if not meta_file.exists():
+        return False
+    try:
+        m = json.loads(meta_file.read_text())
+    except (OSError, ValueError):
+        return False
+
+    changed = sync_cert_trust(m, root, meta_path, config_path=config_path)
+    # sync_cert_trust 只在漂移时写盘；pin 的修正也一并在此处理（保持与 refresh 一致）。
+    pin_before = m.get('pin_sha256')
+    sync_pin(m, root, meta_path)
+    if m.get('pin_sha256') != pin_before:
+        changed = True
+
+    if changed:
+        # meta 变了 → portal.json 里烘进去的 server_name/sni 已过期，重生成一次。
+        try:
+            refresh(meta_path, config_path=config_path)
+            print('[portal] 证书自愈后已同步门户页面', file=sys.stderr)
+        except Exception as e:
+            print('[portal] 证书自愈已修 meta，但同步门户页面失败: %s' % str(e)[:160],
+                  file=sys.stderr)
+    return changed
 
 
 def serve(path):
@@ -5162,12 +5206,30 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
 
 
 if __name__ == '__main__':
-    if sys.argv[1] == 'prepare':
+    _cmd = sys.argv[1] if len(sys.argv) > 1 else ''
+    if _cmd == 'prepare':
         api_key = sys.argv[4] if len(sys.argv) > 4 else None
         prepare(sys.argv[2], sys.argv[3], api_key)
-    elif sys.argv[1] == 'refresh':
+    elif _cmd == 'refresh':
         refresh(sys.argv[2])
-    else:
+    elif _cmd == 'selfheal':
+        # 供 systemd timer / path unit 调用；退出码恒 0（自愈失败不应让 timer 报错刷屏，
+        # 真实失败原因已打到 stderr 由 journal 记录）。
+        try:
+            _cfg = sys.argv[3] if len(sys.argv) > 3 else '/etc/hysteria/config.yaml'
+            selfheal(sys.argv[2], config_path=_cfg)
+        except Exception as e:
+            print('[portal] selfheal 失败: %s' % str(e)[:200], file=sys.stderr)
+    elif _cmd == 'serve':
         serve(sys.argv[2])
+    else:
+        # 🔴 绝不能把未知子命令当 serve 处理：旧版门户没有 selfheal，
+        #    `python3 portal.py selfheal <meta>` 会落到 serve 分支，
+        #    于是「自愈」实际**启动了第二个门户进程**（或因参数不对报
+        #    无关的 KeyError），而调用方看到的是「命令成功」——
+        #    又是一次静默降级。这里必须显式报错并以非 0 退出。
+        print('[portal] 未知子命令: %r（可用: prepare / refresh / selfheal / serve）'
+              % _cmd, file=sys.stderr)
+        sys.exit(2)
 
 
