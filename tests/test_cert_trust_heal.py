@@ -421,6 +421,92 @@ class TestPortalSelfHealEntry(unittest.TestCase):
 
 
 # ----------------------------------------------------------------------------
+# portal.py::cert_status —— 证书状态 + 到期告警
+# ----------------------------------------------------------------------------
+class TestCertStatus(unittest.TestCase):
+    def _portal(self):
+        sys.path.insert(0, str(REPO))
+        try:
+            if "portal" in sys.modules:
+                del sys.modules["portal"]
+            import portal  # noqa
+            return portal
+        finally:
+            sys.path.pop(0)
+
+    def test_reports_ca_issued_cert_fields(self):
+        p = self._portal()
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            _make_public(td / "cert", cn="se.zy3a.com")
+            (td / "config.yaml").write_text(
+                "listen: :443\ntls:\n  cert: cert/fullchain.pem\n  key: cert/leaf.key\n")
+            meta = {"server_name": "se.zy3a.com", "cert_type": "custom",
+                    "is_insecure": False, "pin_sha256": ""}
+            info = p.cert_status(td, meta, str(td / "config.yaml"))
+            self.assertTrue(info["ok"])
+            self.assertEqual(info["common_name"], "se.zy3a.com")
+            self.assertIn("se.zy3a.com", info["sans"])
+            self.assertFalse(info["self_signed"])
+            self.assertIn("Fake Root CA", info["issuer"])
+            self.assertTrue(info["not_after"])
+            self.assertIsInstance(info["expires_in_days"], int)
+            self.assertGreater(info["expires_in_days"], 3000)
+            self.assertEqual(info["warn_level"], "ok")
+            self.assertFalse(info["expired"])
+
+    def test_warn_and_critical_thresholds(self):
+        """阈值必须真的驱动 warn_level，且与常量一致。
+
+        做法：先真读一次 notAfter 拿到绝对到期时刻，再把 cert_status 内部的
+        `time.time()` 挪到「到期前 N 天」。不能用 `now + 3650d - N` 去猜 ——
+        证书是**刚刚**生成的，但 notAfter 由 openssl 按真实墙钟写入，
+        猜出来的基准和实际值对不上（实测偏差上千天）。
+        """
+        import unittest.mock as mock
+        import calendar
+        p = self._portal()
+        self.assertEqual(p.CERT_EXPIRY_WARN_DAYS, 30)
+        self.assertEqual(p.CERT_EXPIRY_CRITICAL_DAYS, 7)
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            _make_self_signed(td / "cert", cn="www.bing.com")
+            (td / "config.yaml").write_text(
+                "listen: :443\ntls:\n  cert: cert/server.crt\n  key: cert/server.key\n")
+            base = p.cert_status(td, {"server_name": "www.bing.com"}, str(td / "config.yaml"))
+            self.assertEqual(base["warn_level"], "ok")
+            not_after_epoch = base["expires_at"]      # cert_status 已解析出绝对到期时刻
+            for offset_days, level in ((20, 'warn'), (3, 'critical'), (-2, 'expired')):
+                with self.subTest(days_left=offset_days):
+                    fake_now = not_after_epoch - offset_days * 86400
+                    with mock.patch.object(p.time, 'time', return_value=fake_now):
+                        info = p.cert_status(td, {"server_name": "www.bing.com"},
+                                             str(td / "config.yaml"))
+                    self.assertEqual(info["expires_in_days"], offset_days)
+                    self.assertEqual(info["warn_level"], level)
+                    self.assertEqual(info["expired"], offset_days < 0)
+
+    def test_missing_cert_reports_not_ok(self):
+        p = self._portal()
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            (td / "config.yaml").write_text("listen: :443\ntls:\n  cert: cert/nope.pem\n  key: k\n")
+            info = p.cert_status(td, {}, str(td / "config.yaml"))
+            self.assertFalse(info["ok"])
+            self.assertFalse(info["cert_exists"])
+            self.assertEqual(info["warn_level"], "unknown")
+
+    def test_summary_never_raises(self):
+        """capabilities 是主面板拉全量状态的入口，证书是附加信息，宁可少给也不能拖累主流程。"""
+        p = self._portal()
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            s = p._cert_summary(Path(td), {})
+            self.assertIsInstance(s, dict)
+            self.assertIn('ok', s)
+
+
+# ----------------------------------------------------------------------------
 # repo invariants (guard against silent removal of the fix)
 # ----------------------------------------------------------------------------
 class TestRepoInvariants(unittest.TestCase):
@@ -517,6 +603,62 @@ class TestRepoInvariants(unittest.TestCase):
         j = text.index("def selfheal(", i)
         body = text[i:j]
         self.assertIn("sync_cert_trust(m, root, meta_path", body)
+
+    def test_cert_status_endpoint_exists(self):
+        """门户必须有 /cert-status 端点，且已鉴权（与其它状态端点一致）。"""
+        text = PORTAL.read_text(encoding="utf-8")
+        self.assertIn("if subpath == 'cert-status':", text)
+        self.assertIn("def _h_get_cert_status(self", text)
+        i = text.index("def _h_get_cert_status(self")
+        body = text[i:text.index("def ", i + 10)]
+        self.assertIn("if not self.is_authenticated()", body)
+        self.assertIn("cert_status(", body)
+
+    def test_cert_card_is_rendered_with_all_fields(self):
+        """卡片必须真的渲染出全部字段 —— 少一个 id 就等于那一格永远是 '--'。"""
+        sys.path.insert(0, str(REPO))
+        try:
+            if "portal" in sys.modules:
+                del sys.modules["portal"]
+            import portal  # noqa
+        finally:
+            sys.path.pop(0)
+        meta = {"public_ip": "1.2.3.4", "auth_password": "pw",
+                "server_name": "se.zy3a.com", "cert_type": "custom",
+                "is_insecure": False, "pin_sha256": "", "obfs_password": "",
+                "subscription_port": 443}
+        html = portal.page_html(meta, "hysteria2://x@h:443?sni=se.zy3a.com",
+                                "sub", "{}", "{}", api_key="k" * 24,
+                                token="t" * 16, session_secret="s" * 32)
+        for probe in ('cert-badge', 'cert-daysleft', 'cert-notafter', 'cert-cn',
+                      'cert-sans', 'cert-issuer', 'cert-type', 'cert-servername',
+                      'cert-pin', 'cert-alert', 'cert-heal-note'):
+            self.assertIn('id="%s"' % probe, html, f"卡片缺少 #{probe}")
+
+    def test_cert_js_poller_exists_and_is_wired(self):
+        """JS 必须在页面加载时就被调用，否则卡片永远停在「检测中...」。"""
+        assets = (REPO / "portal_assets.py").read_text(encoding="utf-8")
+        self.assertIn("async function checkCertStatus(", assets)
+        self.assertIn("checkCertStatus();", assets)
+        # 三档告警都要有文案，且不能是同一句（否则分级形同虚设）
+        self.assertIn("已过期", assets)
+        self.assertIn("天后到期", assets)
+        self.assertIn("cert-alert", assets)
+
+    def test_csp_still_covers_modified_script(self):
+        """CSP 是 SCRIPT 的 sha256 白名单 —— 改了 JS 就必须仍被覆盖，否则整站脚本被拦。"""
+        sys.path.insert(0, str(REPO))
+        try:
+            if "portal" in sys.modules:
+                del sys.modules["portal"]
+            import portal  # noqa
+        finally:
+            sys.path.pop(0)
+        import base64
+        import hashlib
+        expect = base64.b64encode(
+            hashlib.sha256(portal.SCRIPT.encode()).digest()).decode()
+        self.assertIn(expect, portal.content_policy())
 
 
 if __name__ == "__main__":

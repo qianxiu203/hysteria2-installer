@@ -56,7 +56,7 @@ MASTER_USER_ID = 'admin_master'
 #
 # ⚠️ 改动 portal.py 的**能力**时记得同步 +1，否则主面板会按旧能力显示。
 # 格式固定 `PORTAL_VERSION = 'x.y'`（capabilities 端点按行首匹配解析它）。
-PORTAL_VERSION = '2.3'
+PORTAL_VERSION = '2.4'
 
 
 def strip_acl_block(text):
@@ -723,6 +723,40 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
     </div>
   </section>
 
+  <!-- 区块: 证书状态与到期告警
+       为什么放在最前面：证书过期/临期是「昨天还好好的、今天突然连不上」里最高频的真凶，
+       而自动自愈只对齐信任模型、不会去续期证书 —— 不把剩余天数摆出来就只能在掉线后才发现。 -->
+  <section class="card cert-section">
+    <div class="user-header">
+      <div>
+        <h2>🔐 证书状态与到期提醒</h2>
+        <p style="font-size:13px">节点对外服务所用的 TLS 证书。临期与过期会在此提前告警，避免突然掉线</p>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <span class="status-pill" id="cert-badge" style="background:#eaf5ef;color:var(--accent)">检测中...</span>
+      </div>
+    </div>
+
+    <div class="cert-bar">
+      <div style="font-size:13px;font-weight:750;color:var(--ink)">
+        剩余有效天数: <span class="bbr-stat-val" id="cert-daysleft">--</span>
+      </div>
+      <div class="bbr-sub-text">到期时刻 (notAfter): <span id="cert-notafter" style="font-family:monospace">--</span></div>
+    </div>
+
+    <div class="cert-fields">
+      <div><div class="cert-field-label">证书主体 (CN)</div><div class="cert-field-val" id="cert-cn">--</div></div>
+      <div><div class="cert-field-label">覆盖域名 (SAN)</div><div class="cert-field-val" id="cert-sans">--</div></div>
+      <div><div class="cert-field-label">签发方</div><div class="cert-field-val" id="cert-issuer">--</div></div>
+      <div><div class="cert-field-label">证书类型</div><div class="cert-field-val" id="cert-type">--</div></div>
+      <div><div class="cert-field-label">订阅使用的 SNI</div><div class="cert-field-val" id="cert-servername">--</div></div>
+      <div><div class="cert-field-label">指纹校验 (pinSHA256)</div><div class="cert-field-val" id="cert-pin">--</div></div>
+    </div>
+
+    <div class="cert-alert" id="cert-alert"></div>
+    <div class="cert-heal-note" id="cert-heal-note" style="display:none"></div>
+  </section>
+
   <!-- 区块: TCP 拥塞控制加速引擎 (BBR V1 / V2 / V3) -->
   <section class="card bbr-section">
     <div class="user-header">
@@ -1274,6 +1308,178 @@ def _parse_cert_subject(cert_file):
         return '', [], False
 
 
+def _resolve_live_cert(root, config_path='/etc/hysteria/config.yaml'):
+    """返回 (cert_path, cn, sans, self_signed) —— 门户实际在用的那张证书。
+
+    与 sync_cert_trust 共用同一套解析规则（读 config.yaml 的 tls.cert，
+    相对路径按配置目录解析，读不到退回 cert/server.crt），保证
+    「自愈用的证书」和「界面显示的证书」永远是同一张 —— 否则卡片显示
+    A、自愈修 B，又是一轮新的不一致。
+    """
+    tls_cert = _config_tls_cert_path(config_path)
+    cert_file = None
+    if tls_cert:
+        candidate = Path(tls_cert)
+        if not candidate.is_absolute():
+            candidate = Path(config_path).parent / candidate
+        if candidate.exists():
+            cert_file = candidate
+    if cert_file is None:
+        cert_file = Path(root) / 'cert' / 'server.crt'
+    cn, sans, self_signed = _parse_cert_subject(cert_file)
+    return cert_file, cn, sans, self_signed
+
+
+# 到期告警阈值（天）。设成常量是为了让界面文案、API 返回、日志措辞一致 ——
+# 三处各写一个数字必然会出现「界面说还剩 10 天、日志说还剩 30 天」。
+CERT_EXPIRY_WARN_DAYS = 30
+CERT_EXPIRY_CRITICAL_DAYS = 7
+
+
+def cert_status(root, meta=None, config_path='/etc/hysteria/config.yaml',
+                selfheal_state_path=None):
+    """证书当前状态 + 到期告警，供门户卡片与 /cert-status 端点使用。
+
+    🔴 为什么必须把「还有几天到期」摆到界面上：真实故障里最难查的一类是
+    「昨天还好好的，今天突然连不上了」。绝大多数不是配置错，而是**证书过期** ——
+    而过期这件事在自愈体系里是静默的（自愈只对齐信任模型，不会去续期证书）。
+    卡片 + 倒计时 + 临期告警，是让这类故障在到期前就被看见的唯一办法。
+    """
+    root = Path(root)
+    meta = meta or {}
+    cert_file, cn, sans, self_signed = _resolve_live_cert(root, config_path)
+
+    info = {
+        'ok': False,
+        'cert_exists': cert_file.exists(),
+        'cert_path': str(cert_file),
+        'common_name': cn,
+        'sans': sans,
+        'self_signed': bool(self_signed),
+        'issuer': '',
+        'not_before': '',
+        'not_after': '',
+        'expires_in_days': None,
+        'expires_at': None,
+        'expired': False,
+        'warn_level': 'unknown',      # unknown | ok | warn | critical | expired
+        'server_name': meta.get('server_name', ''),
+        'cert_type': meta.get('cert_type', ''),
+        'is_insecure': bool(meta.get('is_insecure')),
+        'pin_sha256': meta.get('pin_sha256', ''),
+        'healed_at': 0,
+        'heal_count': 0,
+    }
+
+    if not cert_file.exists():
+        return info
+
+    try:
+        # issuer 单独取（subject 已由 _parse_cert_subject 拿过）
+        p_iss = subprocess.run(['openssl', 'x509', '-in', str(cert_file), '-noout',
+                                '-issuer', '-startdate', '-enddate'],
+                               capture_output=True, text=True, timeout=8)
+        raw = p_iss.stdout if p_iss.returncode == 0 else ''
+        for line in raw.splitlines():
+            line = line.strip()
+            if line.startswith('issuer='):
+                info['issuer'] = line.split('=', 1)[1].strip()
+            elif line.startswith('notBefore='):
+                info['not_before'] = line.split('=', 1)[1].strip()
+            elif line.startswith('notAfter='):
+                info['not_after'] = line.split('=', 1)[1].strip()
+    except Exception:
+        pass
+
+    # notAfter 形如 'Oct  9 00:00:00 2027 GMT' —— 用 dateutil 之类会引入依赖，
+    # 直接交给 openssl 换算成 epoch（-checkend 是相对秒数，但我们要绝对到期时刻，
+    # 所以这里解析文本更稳）。解析失败就留 None，前端只显示「未知」。
+    if info['not_after']:
+        try:
+            ts = subprocess.run(['date', '-d', info['not_after'], '+%s'],
+                                capture_output=True, text=True, timeout=5)
+            epoch = int(ts.stdout.strip())
+            now = int(time.time())
+            info['expires_in_days'] = int((epoch - now) // 86400)
+            info['expires_at'] = epoch
+            info['expired'] = epoch < now
+        except Exception:
+            pass
+
+    days = info['expires_in_days']
+    if info['expired']:
+        info['warn_level'] = 'expired'
+    elif days is None:
+        info['warn_level'] = 'unknown'
+    elif days <= CERT_EXPIRY_CRITICAL_DAYS:
+        info['warn_level'] = 'critical'
+    elif days <= CERT_EXPIRY_WARN_DAYS:
+        info['warn_level'] = 'warn'
+    else:
+        info['warn_level'] = 'ok'
+
+    # 自愈痕迹：让「刚刚自动修过一次」在界面上可见，而不是悄无声息。
+    if selfheal_state_path and Path(selfheal_state_path).exists():
+        try:
+            st = json.loads(Path(selfheal_state_path).read_text(encoding='utf-8'))
+            info['healed_at'] = int(st.get('healed_at') or 0)
+            info['heal_count'] = int(st.get('heal_count') or 0)
+            if st.get('last_pin'):
+                info['pin_sha256'] = st['last_pin']
+        except Exception:
+            pass
+
+    info['ok'] = True
+    return info
+
+
+def _cert_summary(root, meta, config_path='/etc/hysteria/config.yaml'):
+    """给 capabilities / 面板用的证书摘要（比 cert_status 更窄，异常一律吞掉）。
+
+    capabilities 是主面板拉全量节点状态的入口，任何一个字段抛异常都会让
+    整份能力清单拿不到 —— 证书只是附加信息，宁可少给也不能拖累主流程。
+    """
+    try:
+        info = cert_status(root, meta or {}, config_path)
+        return {
+            'ok': info['ok'],
+            'server_name': info.get('server_name', ''),
+            'self_signed': info.get('self_signed', False),
+            'issuer': info.get('issuer', ''),
+            'not_after': info.get('not_after', ''),
+            'expires_in_days': info.get('expires_in_days'),
+            'expired': info.get('expired', False),
+            'warn_level': info.get('warn_level', 'unknown'),
+        }
+    except Exception:
+        return {'ok': False}
+
+
+def record_cert_heal(root, state, before, after):
+    """把一次自愈写成痕迹文件，供界面显示「上次自动对齐时间」。"""
+    try:
+        state_path = Path(root) / 'cert-selfheal.json'
+        prev_count = 0
+        if state_path.exists():
+            try:
+                prev_count = int(json.loads(state_path.read_text(encoding='utf-8')).get('heal_count') or 0)
+            except Exception:
+                prev_count = 0
+        payload = {
+            'healed_at': int(time.time()),
+            'heal_count': prev_count + 1,
+            'last_pin': (after or {}).get('pin_sha256', ''),
+            'fields': [k for k in ('cert_type', 'server_name', 'is_insecure', 'pin_sha256')
+                       if (before or {}).get(k) != (after or {}).get(k)],
+        }
+        tmp = state_path.with_suffix('.tmp')
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding='utf-8')
+        tmp.chmod(0o600)
+        tmp.replace(state_path)
+    except Exception as e:
+        print('[portal] 写入证书自愈痕迹失败: %s' % str(e)[:120], file=sys.stderr)
+
+
 def _is_dns_name(value):
     value = (value or '').strip()
     if not value or len(value) > 253:
@@ -1313,27 +1519,15 @@ def sync_cert_trust(m, root, meta_path, config_path='/etc/hysteria/config.yaml')
     if not isinstance(m, dict):
         return False
 
-    tls_cert = _config_tls_cert_path(config_path)
     config_has_acme = False
     try:
         config_has_acme = bool(re.search(r'^acme:', Path(config_path).read_text(encoding='utf-8'), re.M))
     except OSError:
         pass
 
-    # config.yaml 里的 cert 路径可能是相对路径（install.sh 写的就是 `cert/xxx.pem`，
-    # 因为 hysteria 以 /etc/hysteria 为工作目录启动）。这里必须相对**配置所在目录**
-    # 解析，否则 Path(tls_cert).exists() 会拿进程 CWD 去判，永远 False。
-    cert_file = None
-    if tls_cert:
-        candidate = Path(tls_cert)
-        if not candidate.is_absolute():
-            candidate = Path(config_path).parent / candidate
-        if candidate.exists():
-            cert_file = candidate
-    if cert_file is None:
-        cert_file = Path(root) / 'cert' / 'server.crt'
-
-    cn, sans, self_signed = _parse_cert_subject(cert_file)
+    # 证书解析统一走 _resolve_live_cert —— 自愈与界面显示必须是同一张证书，
+    # 否则会出现「卡片显示 A、自愈修 B」这种更隐蔽的不一致。
+    cert_file, cn, sans, self_signed = _resolve_live_cert(root, config_path)
     if not cert_file.exists():
         # 证书都读不到，不做任何猜测 —— 交给原来的行为。
         return False
@@ -1931,12 +2125,17 @@ def selfheal(meta_path, config_path='/etc/hysteria/config.yaml'):
     except (OSError, ValueError):
         return False
 
+    before = dict(m)
     changed = sync_cert_trust(m, root, meta_path, config_path=config_path)
     # sync_cert_trust 只在漂移时写盘；pin 的修正也一并在此处理（保持与 refresh 一致）。
     pin_before = m.get('pin_sha256')
     sync_pin(m, root, meta_path)
     if m.get('pin_sha256') != pin_before:
         changed = True
+
+    if changed:
+        # 留痕：让「刚刚自动对齐过一次」在门户卡片上可见，而不是悄无声息。
+        record_cert_heal(root, None, before, m)
 
     if changed:
         # meta 变了 → portal.json 里烘进去的 server_name/sni 已过期，重生成一次。
@@ -4521,6 +4720,11 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
                                      or _bin('wireproxy'),
                                      'enabled': d_snap['warp_enabled']},
                             'bbr': {'enabled': _bbr_now()[0], 'algo': _bbr_now()[1]},
+                            # 证书到期一并带出（2026-10-09）：主面板的节点列表
+                            # 需要在**到期前**就把临期节点标出来，而不是等用户
+                            # 报障「昨天还好好的今天连不上」才回来查。只给面板
+                            # 排障必需的最小字段，不泄露私钥之类的东西。
+                            'cert': _cert_summary(meta_path.parent, m),
                         },
                         'node': {
                             'public_ip': m.get('public_ip', ''),
@@ -4669,6 +4873,9 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
 
             if subpath == 'warp-status':
                 return self._h_get_warp_status(subpath)
+
+            if subpath == 'cert-status':
+                return self._h_get_cert_status(subpath)
 
             if subpath == 'user-config' or subpath.startswith('user-config?'):
                 if not self.is_authenticated():
@@ -5129,6 +5336,41 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
                 'ip': outbound_ip,
                 'rules': rules
             })
+
+        def _h_get_cert_status(self, subpath):
+            """GET /cert-status —— 证书当前状态 + 到期倒计时 + 上次自愈痕迹。
+
+            🔴 这个端点存在的理由：证书过期是「昨天还好好的、今天突然连不上」
+            这类故障里最高频的真凶，而自愈体系**只对齐信任模型、不会去续期证书**。
+            把剩余天数摆到界面上，是让这类故障在到期前而不是掉线后被看见的唯一办法。
+            """
+            if not self.is_authenticated():
+                return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+            try:
+                meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+            except Exception:
+                meta = {}
+            root = meta_path.parent
+            try:
+                info = cert_status(root, meta,
+                                   selfheal_state_path=str(root / 'cert-selfheal.json'))
+            except Exception as exc:
+                return self.reply_json(500, {'ok': False, 'error': str(exc)})
+
+            # 与门户实际下发给客户端的 sni 对照：不一致说明又发生了漂移
+            # （自愈单元没装 / 装的是旧版 / 证书刚换还没跑到）。
+            live_sn = ''
+            for san in info.get('sans') or []:
+                if not san.startswith('*.') and _is_dns_name(san):
+                    live_sn = san
+                    break
+            if not live_sn and _is_dns_name(info.get('common_name') or ''):
+                live_sn = info['common_name']
+            info['live_server_name'] = live_sn
+            info['meta_matches_cert'] = bool(live_sn) and live_sn == info.get('server_name')
+            info['warn_days'] = CERT_EXPIRY_WARN_DAYS
+            info['critical_days'] = CERT_EXPIRY_CRITICAL_DAYS
+            return self.reply_json(200, info)
 
         def _h_get_awg_state(self, subpath):
             """GET /awg-state 的处理逻辑（从 do_GET 机械搬移而来）。"""

@@ -222,6 +222,20 @@ footer{display:flex;justify-content:space-between;margin-top:32px;color:#879996;
 .bbr-stat-val { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--accent); font-weight: 800; font-size: 14px; }
 .bbr-sub-text { font-size: 12px; color: var(--muted); margin-top: 3px; }
 
+/* 证书状态模块（2026-10-09）
+   核心目的是让「证书快过期 / 已过期 / 与元数据不一致」在掉线**之前**可见。 */
+.cert-section { margin-top: 24px; border-left: 4px solid var(--accent); }
+.cert-bar { background: #f8fbfb; border: 1px solid var(--line); border-radius: 14px; padding: 16px 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
+.cert-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px 20px; margin-top: 14px; }
+.cert-field-label { font-size: 11.5px; color: var(--muted); margin-bottom: 2px; }
+.cert-field-val { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 13px; font-weight: 750; color: var(--ink); word-break: break-all; }
+/* 告警条：三档配色与 portal 既有告警一致（黄=注意，橙红=紧急） */
+.cert-alert { display: none; margin-top: 14px; border-radius: 12px; padding: 12px 16px; font-size: 12.5px; font-weight: 700; line-height: 1.6; }
+.cert-alert.warn { display: block; background: #fffbe6; border: 1px solid #ffe58f; color: #ad6800; }
+.cert-alert.critical { display: block; background: #fff1f0; border: 1px solid #ffccc7; color: #a8071a; }
+.cert-alert.info { display: block; background: #e6f4ff; border: 1px solid #91caff; color: #0958d9; }
+.cert-heal-note { font-size: 11.5px; color: var(--muted); margin-top: 8px; }
+
 /* 全局自定义高颜值确认弹窗与 Toast 样式 */
 .confirm-card { width: 100%; max-width: 440px; background: #ffffff; border: 1.5px solid var(--line); border-radius: 20px; padding: 24px; box-shadow: 0 20px 50px rgba(18, 43, 49, 0.22); animation: scaleUp .18s cubic-bezier(0.16, 1, 0.3, 1); }
 @keyframes scaleUp { from { opacity: 0; transform: scale(0.94); } to { opacity: 1; transform: scale(1); } }
@@ -829,6 +843,112 @@ async function checkBbrStatus() {
   } catch (_) {}
 }
 
+// ---------------------------------------------------------------------------
+// 证书状态 + 到期告警（2026-10-09）
+//
+// 为什么要把「还剩几天到期」摆到界面上：证书过期是「昨天还好好的、今天突然
+// 连不上」这类故障里最高频的真凶，而自动自愈只对齐信任模型、**不会去续期证书**。
+// 不显示剩余天数，过期就永远只能在掉线之后才发现。
+// ---------------------------------------------------------------------------
+const certBadge = document.getElementById('cert-badge');
+const certAlert = document.getElementById('cert-alert');
+
+function certSetField(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = (value === undefined || value === null || value === '') ? '--' : String(value);
+}
+
+function certShortIssuer(issuer) {
+  if (!issuer) return '--';
+  // "CN=Fake Root CA, O=..., C=US" -> 只留 CN，界面上更清爽
+  const m = issuer.match(/CN=([^,]+)/);
+  return m ? m[1] : issuer;
+}
+
+async function checkCertStatus() {
+  if (!certBadge) return;
+  let json;
+  try {
+    const res = await fetch(location.pathname + 'cert-status', { credentials: 'same-origin' });
+    if (!res.ok) return;
+    json = await res.json();
+  } catch (_) { return; }
+
+  certSetField('cert-cn', json.common_name);
+  certSetField('cert-sans', (json.sans && json.sans.length) ? json.sans.join(', ') : '--');
+  certSetField('cert-issuer', certShortIssuer(json.issuer));
+  certSetField('cert-type', json.self_signed ? '自签名证书' : (json.cert_type === 'acme' ? "Let's Encrypt (ACME)" : '正式证书'));
+  certSetField('cert-notafter', json.not_after || '--');
+  certSetField('cert-servername', json.server_name || '--');
+  certSetField('cert-pin', json.is_insecure ? (json.pin_sha256 ? json.pin_sha256.slice(0, 16) + '…' : '未设置') : '不需要（可信链）');
+
+  const days = json.expires_in_days;
+  certSetField('cert-daysleft', (days === null || days === undefined) ? '--' : days);
+
+  // 到期倒计时徽章
+  if (!json.ok) {
+    certBadge.textContent = '⚠️ 证书不可读';
+    certBadge.style.background = '#fff1f0';
+    certBadge.style.color = '#a8071a';
+  } else if (json.expired) {
+    certBadge.textContent = '🔴 已过期 ' + Math.abs(days) + ' 天';
+    certBadge.style.background = '#fff1f0';
+    certBadge.style.color = '#a8071a';
+  } else if (json.warn_level === 'critical') {
+    certBadge.textContent = '🔴 仅剩 ' + days + ' 天到期';
+    certBadge.style.background = '#fff1f0';
+    certBadge.style.color = '#a8071a';
+  } else if (json.warn_level === 'warn') {
+    certBadge.textContent = '🟡 ' + days + ' 天后到期';
+    certBadge.style.background = '#fffbe6';
+    certBadge.style.color = '#ad6800';
+  } else {
+    certBadge.textContent = '● 正常 · ' + days + ' 天后到期';
+    certBadge.style.background = '#eaf5ef';
+    certBadge.style.color = 'var(--accent)';
+  }
+
+  // 告警条：过期 / 临期 / 元数据不一致，三种情况分开说清楚该做什么
+  if (certAlert) {
+    certAlert.className = 'cert-alert';
+    let msg = '';
+    if (!json.ok) {
+      certAlert.classList.add('critical');
+      msg = '🔴 无法读取证书（' + (json.cert_path || '未知路径') + '）。请检查证书文件是否被误删或权限异常。';
+    } else if (json.expired) {
+      certAlert.classList.add('critical');
+      msg = '🔴 证书已于 ' + json.not_after + ' 过期，客户端会直接握手失败。请立即续期（ACME 会自动续；自签名需重跑安装生成）。';
+    } else if (json.warn_level === 'critical') {
+      certAlert.classList.add('critical');
+      msg = '🔴 证书只剩 ' + days + ' 天到期（' + json.not_after + '）。请立刻确认续期链路是否正常，避免随时掉线。';
+    } else if (json.warn_level === 'warn') {
+      certAlert.classList.add('warn');
+      msg = '🟡 证书将在 ' + days + ' 天后到期（' + json.not_after + '）。若使用的是外部签发工具（Caddy / acme.sh），请确认其续期定时任务正常。';
+    } else if (json.meta_matches_cert === false) {
+      certAlert.classList.add('info');
+      msg = 'ℹ️ 证书与节点记录存在偏差：订阅使用的 SNI 是「' + (json.server_name || '空') +
+            '」，而证书实际覆盖「' + (json.live_server_name || '空') + '」。自动自愈会在换证后自动对齐；若持续出现请检查自愈单元。';
+    }
+    if (msg) { certAlert.textContent = msg; certAlert.style.display = 'block'; }
+    else { certAlert.style.display = 'none'; }
+  }
+
+  // 上次自动对齐时间：让「静默发生过什么」变可见
+  const healNote = document.getElementById('cert-heal-note');
+  if (healNote) {
+    if (json.healed_at) {
+      const t = new Date((json.healed_at || 0) * 1000);
+      const p = n => String(n).padStart(2, '0');
+      healNote.textContent = '最近一次自动对齐：' + t.getFullYear() + '-' + p(t.getMonth() + 1) + '-' + p(t.getDate()) +
+        ' ' + p(t.getHours()) + ':' + p(t.getMinutes()) + '（累计 ' + (json.heal_count || 0) + ' 次）';
+      healNote.style.display = 'block';
+    } else {
+      healNote.textContent = '尚未发生过自动对齐（证书与节点记录始终一致）';
+      healNote.style.display = 'block';
+    }
+  }
+}
+
 document.querySelectorAll('.btn-apply-bbr').forEach(btn => {
   btn.addEventListener('click', async () => {
     const ver = btn.getAttribute('data-version') || 'v1';
@@ -901,6 +1021,7 @@ if (btnRebootServer) {
 }
 
 checkBbrStatus();
+checkCertStatus();
 
 // 版本检测与一键更新交互
 const coreVerDisplay = document.getElementById('core-ver-display');
