@@ -33,6 +33,14 @@ HY2_DIR="$(mktemp -d)"
 # portal_ensure_py 会读 HY2_CONFIG 取trafficStats secret（写计量配置用）；
 # 该变量在 install.sh 头部定义，摘函数时没带进来，set -u 下会直接报unbound。
 HY2_CONFIG="${HY2_DIR}/config.yaml"
+# 🔴 必须造一个**含 trafficStats 段**的 config.yaml。
+# portal_ensure_py 会写 usage-meter-config.json，secret 取自
+# HY2_CONFIG 的 trafficStats.secret；文件不存在或缺该段时会触发
+# install.sh 里的"幂等补写"逻辑，走上一条与本用例无关的代码路径，
+# 使本用例以"网络失败"之名误报（2026-10-08 实测踩到：
+# 明明传输正常，却报 "config.yaml 缺 trafficStats 段"）。
+printf 'listen: :19999\ntrafficStats:\n  listen: 127.0.0.1:19996\n  secret: d2fb62c2c58f21920cb96f45a1e7e34f\n' \
+    > "$HY2_CONFIG"
 
 PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); echo "  ✅ $*"; }

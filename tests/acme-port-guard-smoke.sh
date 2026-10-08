@@ -26,17 +26,42 @@ if [[ ! -f "$INSTALL_SH" ]]; then
     echo "❌ 找不到 install.sh（当前期望位置: $INSTALL_SH）" >&2
     exit 2
 fi
-# 取函数源码的片段，供子 shell 使用
-_port_owner_src="$(sed -n '/^port_owner() {/,/^}/p' "$INSTALL_SH")"
-if [[ -z "$_port_owner_src" ]]; then
-    echo "❌ 没能从 install.sh 里提取到 port_owner()（脚本结构变了？）" >&2
-    exit 2
-fi
+# 🔴 从 install.sh 抽取指定函数的完整定义。
+#
+# 🔴🔴 绝对不能用 `sed -n '/^fn() {/,/^}/p'`：
+# 函数体内的 case 分支、多行条件里也有 `}`，sed 会在那里提前截断，
+# 抽出来的是**残缺函数**，表现为满屏 `command not found`，
+# 而用例却会拿空函数得出看似合理的结论。
+# 2026-10-08 实测踩到：给 find_cert_in_webserver 加了内层循环后，
+# 本文件从16 项全绿变成 15 项（静默失效）—— 没有报错，只是悄悄少测一项。
+#
+# 用 awk 做花括号配平：从函数头开始，直到该函数自己的 } 为止。
+extract_fn() {
+    awk -v want="$1" '
+        index($0, want "() {") == 1 { inside = 1; depth = 0 }
+        inside {
+            print
+            n = gsub(/\{/, "{"); depth += n
+            m = gsub(/\}/, "}"); depth -= m
+            if (depth == 0) { exit }
+        }
+    ' "$INSTALL_SH"
+}
 
-for fn in detect_webserver_squatting find_cert_in_webserver; do
-    eval "$(sed -n "/^${fn}() {/,/^}/p" "$INSTALL_SH")"
+for fn in port_owner detect_webserver_squatting find_cert_in_webserver \
+          _accept_cert_pair _nginx_cert_candidates; do
+    _f="$(extract_fn "$fn")"
+    if [[ -z "$_f" ]]; then
+        echo "❌ 未能从 install.sh 提取到函数 $fn（脚本结构变了？）" >&2
+        exit 2
+    fi
+    eval "$_f"
+    # 🔴 提取后必须确认真的定义出来了，否则会拿着空函数得出"全绿"假结论
+    if ! declare -F "$fn" >/dev/null; then
+        echo "❌ 函数 $fn 提取后无法加载" >&2
+        exit 2
+    fi
 done
-eval "$_port_owner_src"
 log_warn() { echo "  [WRN] $*"; }
 
 PASS=0; FAIL=0

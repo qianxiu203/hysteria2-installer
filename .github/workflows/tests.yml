@@ -130,6 +130,14 @@ jobs:
         # 「端口探测失败不得静默报空闲」——后者曾把代码 bug 伪装成网络故障。
         run: bash tests/acme-port-guard-smoke.sh
 
+      - name: 🔴 安装成功率矩阵（证书真的能用，含真实 TLS 握手）
+        # 与上一条的关注面不同：那条测「检测函数对不对」，
+        # 这条测「用户最终拿到的证书到底能不能用」——
+        # 函数全对但证书落不了地，用户照样连不上。
+        # 验收不看日志措辞，只看证书本身：配对、链完整、insecure 标志、SNI，
+        # 最后起openssl s_server 做一次真实握手比对指纹。
+        run: bash tests/install-cert-matrix.sh
+
       - name: AmneziaWG 纯逻辑测试
         run: bash tests/test_awgctl.sh
 

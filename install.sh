@@ -501,29 +501,73 @@ detect_webserver_squatting() {
 # 输出 "cert|key"（找到）或空串（没找到）。
 find_cert_in_webserver() {
     local domain="$1" c k
-    # Caddy 2.x：/var/lib/caddy/.local/share/caddy/certificates/<ca>/<domain>/
-    # 🔴 CADDY_CERT_ROOT 可覆盖根路径：默认三处都试（不同发行版/运行用户路径不同），
+    # 优先搜 Caddy 2.x：/var/lib/caddy/.local/share/caddy/certificates/<ca>/<domain>/
+    # 🔴 CADDY_CERT_ROOT 可覆盖根路径：不同发行版/运行用户路径不同，
     #    同时留出测试注入点 —— 否则本函数无法被测试覆盖。
-    local -a roots=()
+    local -a croots=()
     if [[ -n "${CADDY_CERT_ROOT:-}" ]]; then
-        roots=("${CADDY_CERT_ROOT}")
+        croots=("${CADDY_CERT_ROOT}")
     else
-        roots=(/var/lib/caddy/.local/share/caddy/certificates
-               /var/lib/caddy/certificates
-               /root/.local/share/caddy/certificates)
+        croots=(/var/lib/caddy/.local/share/caddy/certificates
+                /var/lib/caddy/certificates
+                /root/.local/share/caddy/certificates)
     fi
-    for r in "${roots[@]}"; do
+    for r in "${croots[@]}"; do
         for c in "$r"/*/"$domain"/"$domain".crt; do
-            [[ -s "$c" ]] || continue
             k="${c%.crt}.key"
-            [[ -s "$k" ]] || continue
-            # 必须含证书链（>1 张）；只有 1 张说明是叶证书，Go 系客户端会验证失败
-            [[ "$(grep -c 'BEGIN CERTIFICATE' "$c" 2>/dev/null || echo 0)" -ge 2 ]] || continue
-            echo "$c|$k"
-            return 0
+            _accept_cert_pair "$c" "$k" || continue
+            echo "$c|$k"; return 0
         done
     done
+
+    # 🔴 Nginx（certbot 签发）：布局完全不同，且路径由配置决定，不能硬编码。
+    # Nginx 装机量远大于 Caddy，缺了这条会让大量用户仍退回自签。
+    for c in $(_nginx_cert_candidates); do
+        k="${c%.crt}.key"; [[ -s "$k" ]] || k="${c%.fullchain.pem}.privkey.pem"
+        _accept_cert_pair "$c" "$k" || continue
+        if _cert_matches_domain "$c" "$domain"; then
+            echo "$c|$k"; return 0
+        fi
+    done
     return 1
+}
+
+# 判断证书文件与其私钥是否构成一对可用组合
+# 传入证书路径；私钥路径由调用方给出（不同布局命名不同：.key / privkey.pem）
+_accept_cert_pair() {
+    local c="$1" k="${2:-}"
+    [[ -s "$c" ]] || return 1
+    [[ -n "$k" ]] || return 1
+    [[ -s "$k" ]] || return 1
+    # 正式证书必须含完整链（>1 张）；只有 1 张说明是叶证书，
+    # Go 系客户端（v2rayNG/Xray/hysteria）不会通过 AIA 补齐中间证书，
+    # 会直接报 x509: certificate signed by unknown authority
+    [[ "$(grep -c 'BEGIN CERTIFICATE' "$c" 2>/dev/null || echo 0)" -ge 2 ]] || return 1
+    # 🔴 公私钥必须配对：不配对的证书装上去，握手 100% 失败。
+    # 与其等到用户连不上才发现，不如在这里就拒掉。
+    local pub prv
+    pub="$(openssl x509 -in "$c" -noout -pubkey 2>/dev/null | openssl sha256 2>/dev/null | awk '{print $NF}')"
+    prv="$(openssl pkey -in "$k" -pubout 2>/dev/null | openssl sha256 2>/dev/null | awk '{print $NF}')"
+    [[ -n "$pub" && "$pub" == "$prv" ]] || return 1
+    return 0
+}
+
+# 列出 Nginx/certbot 可能存放的证书文件
+_nginx_cert_candidates() {
+    local d
+    for d in /etc/letsencrypt/live/*/ /etc/nginx/certs/ /etc/nginx/ssl/ \
+             /var/lib/letsencrypt/live/*/ /usr/local/nginx/conf/ssl/; do
+        [[ -d "$d" ]] || continue
+        find "$d" -maxdepth 1 -type f \( -name 'fullchain.pem' -o -name '*.crt' -o -name '*.pem' \) 2>/dev/null
+    done
+}
+
+# 证书的 CN 或 SAN 是否命中目标域名
+_cert_matches_domain() {
+    local c="$1" domain="$2" txt
+    txt="$(openssl x509 -in "$c" -noout -subject -ext subjectAltName 2>/dev/null)"
+    [[ -n "$txt" ]] || return 1
+    grep -qiE "(^|[^a-zA-Z0-9.-])${domain//./\\.}([^a-zA-Z0-9.-]|$)" <<<"$txt"
 }
 
 # 🔴 让已占端口的 Caddy 为某域名签一张证书（复用它的自动签发能力）。
@@ -601,40 +645,60 @@ CEOF
 # 拿不到凭据就明确告诉用户怎么办，而不是静默退回自签。
 setup_cert_via_dns_api() {
     local domain="$1"
+
+    # 🔴🔴 必须【先选凭据、后装 acme.sh】。
+    # 旧顺序是「先装 acme.sh → 再看有没有凭据」，两个后果：
+    #   1. 没凭据时白装一次（下载+解压几十 MB），纯属浪费；
+    #   2. 更糟：HOME 不可写或网络受限时会在安装步骤 return 1，
+    #      把「没有凭据」误报成「acme.sh 安装失败」——
+    #      用户会去查网络/目录权限，而真正该做的是导出凭据。2026-10-08 实测命中。
+    local provider="" prov_env=""
+    if [[ -n "${HY2_CF_TOKEN:-}" && -n "${HY2_CF_EMAIL:-}" ]]; then
+        provider="Cloudflare"; prov_env="HY2_CF_TOKEN + HY2_CF_EMAIL"
+    elif [[ -n "${HY2_ALICLOUD_KEY:-}" ]]; then
+        provider="阿里云";    prov_env="HY2_ALICLOUD_KEY"
+    elif [[ -n "${HY2_DP_TOKEN:-}" ]]; then
+        provider="DuckDNS";   prov_env="HY2_DP_TOKEN"
+    else
+        log_warn "没有可用的 DNS API 凭据，跳过 DNS API 签发。"
+        return 2      # 2 = 无凭据（不是失败，是"这条路走不了"）
+    fi
+
     local acct="${HOME}/.acme.sh/acme.sh"
     if [[ ! -x "$acct" ]]; then
         log_step "正在安装 acme.sh（DNS API 签发，不占用任何端口）..."
         if ! curl -fsSL --max-time 60 https://get.acme.sh | sh -s --home "$HOME/.acme.sh" >/dev/null 2>&1; then
-            log_err "acme.sh 安装失败。"
+            log_err "acme.sh 安装失败（凭据已就绪，仅是工具装不上）。"
+            log_err "可手动安装：curl https://get.acme.sh | sh -s --home ~/.acme.sh"
             return 1
         fi
     fi
     [[ -x "$acct" ]] || { log_err "acme.sh 不可用。"; return 1; }
 
+    log_info "使用 ${provider} DNS API 签发..."
+    # 避免 acme.sh 自升级失败卡住流程
+    export SKIP_ACME_SH_UPGRADE=1
     local ok=0
-    if [[ -n "${HY2_CF_TOKEN:-}" && -n "${HY2_CF_EMAIL:-}" ]]; then
-        log_info "使用 Cloudflare DNS API 签发..."
-        # 避免 acme.sh 升级自己失败卡住流程
-        _old_upgrade="${SKIP_ACME_SH_UPGRADE:-1}"; export SKIP_ACME_SH_UPGRADE=1
-        "$acct" --issue --dns dns_cf -d "$domain" \
-            --dns_cf_token "$HY2_CF_TOKEN" --dns_cf_email "$HY2_CF_EMAIL" || ok=1
-    elif [[ -n "${HY2_ALICLOUD_KEY:-}" ]]; then
-        log_info "使用阿里云 DNS API 签发..."
-        _old_upgrade="${SKIP_ACME_SH_UPGRADE:-1}"; export SKIP_ACME_SH_UPGRADE=1
-        "$acct" --issue --dns dns_ali -d "$domain" \
-            --dns_ali_key "$HY2_ALICLOUD_KEY" --dns_ali_secret "${HY2_ALICLOUD_SECRET:-}" || ok=1
-    elif [[ -n "${HY2_DP_TOKEN:-}" ]]; then
-        log_info "使用 DuckDNS DNS API 签发..."
-        _old_upgrade="${SKIP_ACME_SH_UPGRADE:-1}"; export SKIP_ACME_SH_UPGRADE=1
-        "$acct" --issue --dns dns_dp -d "$domain" \
-            --dns_dp_token "$HY2_DP_TOKEN" || ok=1
-    else
-        log_warn "没有可用的 DNS API 凭据，跳过 DNS API 签发。"
-        return 2      # 2 = 无凭据（不是失败，是"这条路走不了"）
-    fi
-    [[ "${SKIP_ACME_SH_UPGRADE:-1}" == "$_old_upgrade" ]] || unset SKIP_ACME_SH_UPGRADE
+    case "$provider" in
+        Cloudflare)
+            "$acct" --issue --dns dns_cf -d "$domain" \
+                --dns_cf_token "$HY2_CF_TOKEN" --dns_cf_email "$HY2_CF_EMAIL" || ok=1
+            ;;
+        阿里云)
+            "$acct" --issue --dns dns_ali -d "$domain" \
+                --dns_ali_key "$HY2_ALICLOUD_KEY" --dns_ali_secret "${HY2_ALICLOUD_SECRET:-}" || ok=1
+            ;;
+        DuckDNS)
+            "$acct" --issue --dns dns_dp -d "$domain" \
+                --dns_dp_token "$HY2_DP_TOKEN" || ok=1
+            ;;
+    esac
 
-    [[ $ok -eq 0 ]] || { log_err "acme.sh 签发失败。"; return 1; }
+    if [[ $ok -ne 0 ]]; then
+        log_err "${provider} DNS API 签发失败（凭据来源：${prov_env}）。"
+        log_err "常见原因：token 权限不足 / 域名未托管在该 DNS 服务商下。"
+        return 1
+    fi
 
     # acme.sh 的输出布局：$HOME/.acme.sh/<domain>_ecc/
     local certdir="$HOME/.acme.sh/${domain}_ecc"
@@ -712,6 +776,20 @@ setup_acme_certificate() {
                     fi
                 fi
                 log_err "Caddy 签发失败。可手动执行：caddy reload && journalctl -u caddy -f"
+            fi
+        else
+            # 🔴 占端口的不是 Caddy。常见是 Nginx，而 Nginx **不会自动签发**，
+            # 所以不能像 Caddy 那样"借它一签"——必须说清差异，
+            # 否则用户会以为脚本还能自动搞定，转而去折腾 Nginx 配置。
+            _hog="$(port_owner tcp 80) $(port_owner tcp 443)"
+            _hog="${_hog% }"; _hog="${_hog# }"   # 只留非空的那几个
+            log_warn "占用 ${ACRE_PORT_BLOCKER} 的服务不是 Caddy（检测到: ${_hog:-未知}）。"
+            if [[ "${_hog}" == *nginx* ]]; then
+                log_warn "Nginx 不会自动申请证书，本脚本无法借它签发。"
+                log_warn "可行做法："
+                log_warn "   a) 用 certbot 为 ${SERVER_NAME} 签一张，然后菜单第 4 项 → 证书方式 2"
+                log_warn "   b) 装Caddy 接管证书签发（走 DNS API，不占端口）"
+                log_warn "   c) 下面的 DNS API 兜底路线"
             fi
         fi
 
