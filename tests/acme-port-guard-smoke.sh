@@ -192,6 +192,53 @@ else
 fi
 
 echo
+echo "=== 6) 🔴 复用失败后不得滑回内置 ACME（必须走 DNS API 兜底）==="
+# 背景：端口被占时内置 ACME 必然失败。早期实现签发失败后直接继续往下走
+# 内置 ACME，白白浪费一轮，末尾报错还会把用户引向"检查网络"的错误方向。
+_acme_src="$(sed -n '/^setup_acme_certificate() {/,/^}/p' "$INSTALL_SH")"
+if grep -qE '继续尝试内置 ACME|大概率失败' <<<"$_acme_src"; then
+    bad "复用失败后仍在提示「继续尝试内置 ACME」—— 明知必然失败还去试"
+else
+    ok "复用失败后不再滑回内置 ACME"
+fi
+# 必须存在 DNS API 兜底
+if grep -q 'setup_cert_via_dns_api' <<<"$_acme_src"; then
+    ok "存在 DNS API 兜底调用"
+else
+    bad "端口被占且借反代失败后没有任何兜底路径，只能退回自签"
+fi
+# DNS API 必须早于自签回落
+_dns_pos="$(grep -n 'setup_cert_via_dns_api "\$SERVER_NAME"' <<<"$_acme_src" | head -1 | cut -d: -f1)"
+_ss_pos="$(grep -n 'generate_self_signed_cert' <<<"$_acme_src" | head -1 | cut -d: -f1)"
+if [[ -n "$_dns_pos" && -n "$_ss_pos" && "$_dns_pos" -lt "$_ss_pos" ]]; then
+    ok "DNS API 兜底排在自签回落之前"
+else
+    bad "顺序不对（dns=${_dns_pos:-无} selfsigned=${_ss_pos:-无}）"
+fi
+# 回落自签前必须让用户明确同意，绝不静默降级
+if grep -q '仍要继续退回自签证书吗' <<<"$_acme_src"; then
+    ok "退回自签前有用户确认，不会静默降级"
+else
+    bad "会静默退回自签证书 —— 用户根本不知道客户端要开 insecure"
+fi
+
+echo
+echo "=== 7) 🔴 setup_cert_via_dns_api 的返回值必须能被区分 ==="
+# 返回码语义：0=成功；1=真失败；2=无凭据（走不了）
+# 若统一返回 1，就无法区分"缺凭据"与"签发报错"，也拿不到针对性的提示。
+if grep -qE 'return 2' install.sh && grep -qE '_dnsres -eq 2' <<<"$_acme_src"; then
+    ok "无凭据(return 2)与签发失败(return 1)被区分，对应给出不同提示"
+else
+    bad "未区分「无凭据」与「签发失败」，用户会看到误导性提示"
+fi
+# 缺凭据时必须打印对应的环境变量名，否则用户不知道要导出什么
+if grep -q 'HY2_CF_TOKEN' install.sh && grep -q 'HY2_ALICLOUD_KEY' install.sh; then
+    ok "缺凭据提示里指明了具体环境变量"
+else
+    bad "缺凭据提示未说明需要哪些环境变量"
+fi
+
+echo
 echo "================ 结果 ================"
 echo "  通过: $PASS   失败: $FAIL"
 [[ $FAIL -eq 0 ]]

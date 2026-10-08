@@ -512,6 +512,66 @@ CEOF
     return 1
 }
 
+# 🔴 兜底路线：在 80/443 被占、且无法借反代签发时，用 **acme.sh 的 DNS API**签发。
+#
+# 为什么这是端口冲突下唯一还走得通的路：
+#   HTTP-01 要 80、TLS-ALPN-01 要 443 —— 两个都被占就彻底没辙。
+#   而 DNS-01 验证走的是 **DNS 查询**（往 _acme-challenge.<域名> 写一条 TXT），
+#   **完全不碰任何端口**，因此与端口占用彻底解耦。
+#
+# 代价：需要 DNS 服务商的 API 凭据。凭据从环境变量读，不落仓库：
+#   HY2_CF_TOKEN + HY2_CF_EMAIL   （Cloudflare）
+#   HY2_ALICLOUD_KEY              （阿里云）
+#   HY2_DP_TOKEN+ HY2_DP_ID       （DuckDNS）
+# 拿不到凭据就明确告诉用户怎么办，而不是静默退回自签。
+setup_cert_via_dns_api() {
+    local domain="$1"
+    local acct="${HOME}/.acme.sh/acme.sh"
+    if [[ ! -x "$acct" ]]; then
+        log_step "正在安装 acme.sh（DNS API 签发，不占用任何端口）..."
+        if ! curl -fsSL --max-time 60 https://get.acme.sh | sh -s --home "$HOME/.acme.sh" >/dev/null 2>&1; then
+            log_err "acme.sh 安装失败。"
+            return 1
+        fi
+    fi
+    [[ -x "$acct" ]] || { log_err "acme.sh 不可用。"; return 1; }
+
+    local ok=0
+    if [[ -n "${HY2_CF_TOKEN:-}" && -n "${HY2_CF_EMAIL:-}" ]]; then
+        log_info "使用 Cloudflare DNS API 签发..."
+        # 避免 acme.sh 升级自己失败卡住流程
+        _old_upgrade="${SKIP_ACME_SH_UPGRADE:-1}"; export SKIP_ACME_SH_UPGRADE=1
+        "$acct" --issue --dns dns_cf -d "$domain" \
+            --dns_cf_token "$HY2_CF_TOKEN" --dns_cf_email "$HY2_CF_EMAIL" || ok=1
+    elif [[ -n "${HY2_ALICLOUD_KEY:-}" ]]; then
+        log_info "使用阿里云 DNS API 签发..."
+        _old_upgrade="${SKIP_ACME_SH_UPGRADE:-1}"; export SKIP_ACME_SH_UPGRADE=1
+        "$acct" --issue --dns dns_ali -d "$domain" \
+            --dns_ali_key "$HY2_ALICLOUD_KEY" --dns_ali_secret "${HY2_ALICLOUD_SECRET:-}" || ok=1
+    elif [[ -n "${HY2_DP_TOKEN:-}" ]]; then
+        log_info "使用 DuckDNS DNS API 签发..."
+        _old_upgrade="${SKIP_ACME_SH_UPGRADE:-1}"; export SKIP_ACME_SH_UPGRADE=1
+        "$acct" --issue --dns dns_dp -d "$domain" \
+            --dns_dp_token "$HY2_DP_TOKEN" || ok=1
+    else
+        log_warn "没有可用的 DNS API 凭据，跳过 DNS API 签发。"
+        return 2      # 2 = 无凭据（不是失败，是"这条路走不了"）
+    fi
+    [[ "${SKIP_ACME_SH_UPGRADE:-1}" == "$_old_upgrade" ]] || unset SKIP_ACME_SH_UPGRADE
+
+    [[ $ok -eq 0 ]] || { log_err "acme.sh 签发失败。"; return 1; }
+
+    # acme.sh 的输出布局：$HOME/.acme.sh/<domain>_ecc/
+    local certdir="$HOME/.acme.sh/${domain}_ecc"
+    if [[ ! -s "$certdir/fullchain.cer" ]]; then
+        log_err "acme.sh 未产出 fullchain.cer，请检查上方报错。"
+        return 1
+    fi
+    log_info "acme.sh 签发成功。"
+    echo "$certdir/fullchain.cer|$certdir/${domain}.key"
+    return 0
+}
+
 setup_acme_certificate() {
     echo -e "${YELLOW}申请 ACME 证书前，请确认域名 A/AAAA 记录已指向本机，且云安全组与本机防火墙允许 TCP 80。${PLAIN}"
     if [[ -n "${HY2_DOMAIN:-}" ]]; then
@@ -579,10 +639,66 @@ setup_acme_certificate() {
                 log_err "Caddy 签发失败。可手动执行：caddy reload && journalctl -u caddy -f"
             fi
         fi
-        log_warn "继续尝试内置 ACME 签发（大概率失败，失败后会自动退回自签证书）。"
-        log_warn "若想彻底解决，请确保 80/443 有空余，或手动为 ${SERVER_NAME} 准备证书后"
-        log_warn "用菜单第 4 项 → 证书方式 2（使用已有证书文件）。"
-        echo ""
+
+        # 🔴🔴 兜底：借反代也签不出来时，改用 DNS API 签发。
+        #
+        # 关键认知：**绝不能在这里滑回内置 ACME**。端口已被占，
+        # 内置 ACME 的两种验证方式都用不了，回去试只是明知必然失败还浪费一轮，
+        # 最后的报错还会把用户引向错误的排查方向（正是本次要消灭的问题）。
+        # DNS-01 走 DNS 查询、不碰任何端口，是端口冲突下唯一还走得通的路。
+        log_step "借反代签发未成功，改用 DNS API 签发（不占用任何端口）..."
+        _dnsres=0
+        _dnspair="$(setup_cert_via_dns_api "$SERVER_NAME")" || _dnsres=$?
+        if [[ $_dnsres -eq 0 && -n "$_dnspair" ]]; then
+            CERT_TYPE="custom"
+            CERT_FILE="${_dnspair%%|*}"
+            KEY_FILE="${_dnspair#*|}"
+            IS_INSECURE="false"
+            # SNI 必须是真实域名：自签模式下它被伪装成 www.bing.com，沿用会握手失败
+            SERVER_NAME="$SERVER_NAME"
+            log_info "已使用 DNS API 签发的正式证书: ${CERT_FILE}"
+            log_info "SNI: ${SERVER_NAME}（客户端无需再开跳过证书校验）"
+            log_info "续期：acme.sh --cron 需常驻，建议 crontab -e 加入："
+            log_info "  ${acct:-/root/.acme.sh/acme.sh} --cron --home ${HOME}/.acme.sh > /dev/null 2>&1"
+            return 0
+        elif [[ $_dnsres -eq 2 ]]; then
+            log_err "============================================================"
+            log_err " 无法自动签发正式证书：缺少 DNS API 凭据"
+            log_err "============================================================"
+            log_err " 端口 ${ACRE_PORT_BLOCKER} 被占 → 内置 ACME 必然失败；"
+            log_err " 借 Caddy 签发也未成功 → 剩下唯一自动可行的路是 DNS API。"
+            log_err ""
+            log_err " 三选一（按你的 DNS 服务商）："
+            log_err "   Cloudflare : export HY2_CF_TOKEN=xxx HY2_CF_EMAIL=xxx@yyy.com"
+            log_err "   阿里云     : export HY2_ALICLOUD_KEY=xxx HY2_ALICLOUD_SECRET=xxx"
+            log_err "   DuckDNS    : export HY2_DP_TOKEN=xxx"
+            log_err " 然后重新运行本脚本即可。"
+            log_err ""
+            log_err " 或手动准备证书后：菜单第 4 项 → 证书方式 2（使用已有证书文件）"
+            log_err " 或腾出端口：停掉占用 ${ACRE_PORT_BLOCKER} 的服务后重试。"
+            log_err ""
+            log_err " ⚠️ 若继续，将退回【自签证书】，客户端必须开启"
+            log_err "「跳过证书校验 / insecure」，个别客户端干脆不支持。"
+            echo ""
+            read -rp "仍要继续退回自签证书吗? [y/N, 默认 N]: " fallback_selfsigned
+            fallback_selfsigned=${fallback_selfsigned:-N}
+            if [[ ! "$fallback_selfsigned" =~ ^[Yy]$ ]]; then
+                log_err "已中止。请按上述方式提供 DNS API 凭据，或手动准备证书。"
+                return 1
+            fi
+        else
+            log_err "DNS API 签发也失败了。"
+            log_warn "⚠️ 若继续，将退回【自签证书】，客户端必须开启「跳过证书校验」。"
+            read -rp "仍要继续退回自签证书吗? [y/N, 默认 N]: " fallback_selfsigned || true
+            fallback_selfsigned=${fallback_selfsigned:-N}
+            if [[ ! "$fallback_selfsigned" =~ ^[Yy]$ ]]; then
+                log_err "已中止。"
+                return 1
+            fi
+        fi
+        # 只有用户明确同意才落到这里 => 生成自签
+        generate_self_signed_cert
+        return 0
     fi
 
     # DNS 解析预校验：避免 Let's Encrypt HTTP-01 必然失败导致服务反复重启
