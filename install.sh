@@ -359,6 +359,159 @@ select_local_certificate() {
     [[ -n "$SERVER_NAME" ]] || { log_err "域名不能为空。"; return 1; }
 }
 
+# 🔴 检查某个 TCP/UDP 端口是否已被占用，并报告占用者（供 ACME 前置检查用）
+# 输出：空=空闲；否则是进程名（如 caddy）。
+# ⚠️ 不用 `ss -H -tlnp --sport N`：iproute2 6.1.0 既不认 `--sport`，
+#    而 `ss -t` 传错会让 ss 直接报错退出、被 2>/dev/null 吞掉，
+#    结果是"明明被占却报空闲"—— 静默失败最危险，必须用 grep 兜底。
+port_owner() {
+    local proto="$1" port="$2" flag line pname
+    case "$proto" in
+        tcp) flag="-tlnp" ;;
+        udp) flag="-ulnp" ;;
+        *)   return 0 ;;
+    esac
+    line="$(ss -H $flag 2>/dev/null | grep -E "[:.]${port}[[:space:]]" | head -1)"
+    # 再用 python3 bind 兜底：ss 解析不出来时以实际能否绑定为准
+    if [[ -z "$line" ]] && command -v python3 >/dev/null 2>&1; then
+        if python3 -c '
+import socket,sys
+p=sys.argv[1];t=sys.argv[2]
+s=socket.socket(socket.AF_INET, socket.SOCK_STREAM if t=="tcp" else socket.SOCK_DGRAM)
+try:
+    s.bind(("0.0.0.0",int(p))); sys.exit(1)
+except OSError: sys.exit(0)
+finally: s.close()
+' "$port" "$proto" 2>/dev/null; then
+            # 绑不上 = 确实被占，但 ss 没能报出是谁
+            echo "unknown"
+            return 0
+        fi
+        return 0
+    fi
+    [[ -z "$line" ]] && return 0
+    pname="$(sed -n 's/.*users:((\"\([^\"]*\)\".*/\1/p' <<<"$line")"
+    echo "${pname:-unknown}"
+}
+
+# 🔴🔴 检测本机 80/443 是否被占用，据此决定 ACME 该怎么签。
+#
+#背景：Let's Encrypt 只有两种验证方式，**都要求端口空闲**：
+#   - HTTP-01    : 需要 TCP 80
+#   - TLS-ALPN-01: 需要 TCP 443
+# 在已经跑了 Caddy / Nginx 的机器上（绝大多数生产机）这两个端口都被占，
+# 而 Hysteria 内置的 ACME 客户端**没有任何办法绕过**——
+# 于是自动签发必然失败，用户只能退回去签证书，表现就是
+# 「装好了但客户端连不上（还得开跳过证书校验）」。
+#
+# 结论：这时唯一干净的路是**让已在跑的反代（通常就是 Caddy）去签**，
+# 它自己就是那个占着端口的程序，签完把 fullchain 交给 Hysteria复用即可。
+# 两者完全可以共存：Hysteria 主监听是 **UDP** 端口，
+# 与反代的 TCP/UDP 443 通常不冲突。
+detect_webserver_squatting() {
+    local occupied=() who80 who443
+    who80="$(port_owner tcp 80)"
+    who443="$(port_owner tcp 443)"
+    [[ -n "$who80" ]]  && occupied+=("TCP 80 (${who80})")
+    [[ -n "$who443" ]] && occupied+=("TCP 443 (${who443})")
+    if [[ ${#occupied[@]} -eq 0 ]]; then
+        ACRE_PORT_BLOCKER=""
+        return 1   # 空闲：可以自己签
+    fi
+    ACRE_PORT_BLOCKER="$(printf '%s、' "${occupied[@]}")"; ACRE_PORT_BLOCKER="${ACRE_PORT_BLOCKER%、}"
+    return 0       # 被占：需要复用
+}
+
+#🔴 从Caddy / Nginx 的存储里找出本机已签发的、匹配域名的【完整证书链】。
+# 输出 "cert|key"（找到）或空串（没找到）。
+find_cert_in_webserver() {
+    local domain="$1" c k
+    # Caddy 2.x：/var/lib/caddy/.local/share/caddy/certificates/<ca>/<domain>/
+    # 🔴 CADDY_CERT_ROOT 可覆盖根路径：默认三处都试（不同发行版/运行用户路径不同），
+    #    同时留出测试注入点 —— 否则本函数无法被测试覆盖。
+    local -a roots=()
+    if [[ -n "${CADDY_CERT_ROOT:-}" ]]; then
+        roots=("${CADDY_CERT_ROOT}")
+    else
+        roots=(/var/lib/caddy/.local/share/caddy/certificates
+               /var/lib/caddy/certificates
+               /root/.local/share/caddy/certificates)
+    fi
+    for r in "${roots[@]}"; do
+        for c in "$r"/*/"$domain"/"$domain".crt; do
+            [[ -s "$c" ]] || continue
+            k="${c%.crt}.key"
+            [[ -s "$k" ]] || continue
+            # 必须含证书链（>1 张）；只有 1 张说明是叶证书，Go 系客户端会验证失败
+            [[ "$(grep -c 'BEGIN CERTIFICATE' "$c" 2>/dev/null || echo 0)" -ge 2 ]] || continue
+            echo "$c|$k"
+            return 0
+        done
+    done
+    return 1
+}
+
+# 🔴 让已占端口的 Caddy 为某域名签一张证书（复用它的自动签发能力）。
+# 不改动用户已有的 Caddyfile 逻辑，只**追加**一个极小的站点块，
+# 签完证书由 Caddy 保管、Hysteria 只读，续期也由 Caddy 负责。
+setup_cert_via_existing_caddy() {
+    local domain="$1"
+    local certdir="/var/lib/caddy/.local/share/caddy/certificates"
+    command -v caddy >/dev/null 2>&1 || { log_err "未找到 caddy 命令。"; return 1; }
+
+    log_step "检测到本机 Caddy，正尝试让它为 ${domain} 签发证书..."
+    # 先看它手里有没有现成的（含自动续期签过的）
+    if find_cert_in_webserver "$domain" >/dev/null 2>&1; then
+        log_info "Caddy 已有 ${domain} 的证书，直接复用。"
+        return 0
+    fi
+
+    # 备份后追加站点块
+    local cf="/etc/caddy/Caddyfile" bak
+    [[ -f "$cf" ]] || { log_err "找不到 /etc/caddy/Caddyfile。"; return 1; }
+    bak="${cf}.bak-hy2-$(date +%Y%m%d-%H%M%S)"
+    cp -a "$cf" "$bak" || { log_err "备份 Caddyfile 失败。"; return 1; }
+    log_info "已备份 Caddyfile -> ${bak}"
+
+    # 幂等：已存在该域名块就不重复追加
+    if ! grep -qE "^[[:space:]]*${domain//./\\.}([[:space:]]|\{)" "$cf"; then
+        cat >> "$cf" <<CEOF
+
+# Hysteria 2 节点证书专用站点（由 install.sh 自动追加）
+# 用途：本机 80/443 已被 Caddy 占用，内置 ACME 无法自行签发，
+# 故借 Caddy 之手签发并保管，Hysteria 只读证书文件。
+# Hysteria 主监听是 UDP 端口，与本反代不冲突。
+${domain} {
+	respond "hy2 cert holder" 200
+}
+CEOF
+    fi
+    if ! caddy validate --config "$cf" >/dev/null 2>&1; then
+        log_err "追加后的 Caddyfile 校验不通过，已回滚。"
+        cp -a "$bak" "$cf"
+        return 1
+    fi
+    # reload 而非 restart：保住现有线上连接（Caddy 2 在跑生产站点）
+    if ! systemctl reload caddy 2>/dev/null; then
+        systemctl restart caddy 2>/dev/null || true
+    fi
+    sleep 3
+    # 触发签发
+    curl -s -o /dev/null -m 15 "http://${domain}/" 2>/dev/null || true
+
+    log_info "等待 Caddy 完成 ACME 签发（通常 5~30 秒）..."
+    local i
+    for i in $(seq 1 12); do
+        if find_cert_in_webserver "$domain" >/dev/null 2>&1; then
+            log_info "Caddy 签发成功: ${certdir}"
+            return 0
+        fi
+        sleep 5
+    done
+    log_err "等待 60 秒仍未拿到证书。请查看: journalctl -u caddy -n 50"
+    return 1
+}
+
 setup_acme_certificate() {
     echo -e "${YELLOW}申请 ACME 证书前，请确认域名 A/AAAA 记录已指向本机，且云安全组与本机防火墙允许 TCP 80。${PLAIN}"
     if [[ -n "${HY2_DOMAIN:-}" ]]; then
@@ -380,6 +533,56 @@ setup_acme_certificate() {
     if [[ -z "$ACME_EMAIL" || "$ACME_EMAIL" != *"@"* ]]; then
         log_err "请输入有效的通知邮箱。"
         return 1
+    fi
+
+    # 🔴🔴 端口占用预检：**放在 DNS 校验之前**，因为端口被占时
+    # 内置 ACME 根本没有可用验证方式，再怎么校验 DNS 都是白费。
+    if detect_webserver_squatting; then
+        log_warn "============================================================"
+        log_warn " 检测到本机 ${ACRE_PORT_BLOCKER} 已被其他服务占用"
+        log_warn "============================================================"
+        log_warn " Let's Encrypt 只有两种验证方式，都要求端口空闲："
+        log_warn "   HTTP-01 (TCP 80) / TLS-ALPN-01 (TCP 443)"
+        log_warn " Hysteria 内置 ACME 无法在这种环境下自行签发，"
+        log_warn " 强行尝试只会反复失败，然后退回自签证书（客户端必须开跳过校验）。"
+        log_warn ""
+        log_warn " ✅ 正确做法：让已占用这些端口的反代（通常是 Caddy）去签，"
+        log_warn "    Hysteria 直接复用它的证书。"
+        log_warn ""
+        log_warn " 说明：这不会影响 ${ACRE_PORT_BLOCKER} 上现有的服务，"
+        log_warn "    Hysteria 主监听是 UDP 端口，与反代互不冲突。"
+        log_warn ""
+
+        if find_cert_in_webserver "$SERVER_NAME" >/dev/null 2>&1; then
+            log_info "已找到 Caddy/Nginx 为 ${SERVER_NAME} 签发的证书，直接复用。"
+        elif command -v caddy >/dev/null 2>&1; then
+            read -rp "是否让本机 Caddy 为 ${SERVER_NAME} 自动签发证书? [Y/n]: " use_caddy || true
+            use_caddy="${use_caddy:-Y}"
+            if [[ "$use_caddy" =~ ^[Yy]$ ]]; then
+                if setup_cert_via_existing_caddy "$SERVER_NAME"; then
+                    local ck
+                    ck="$(find_cert_in_webserver "$SERVER_NAME")" || ck=""
+                    if [[ -n "$ck" ]]; then
+                        CERT_TYPE="custom"
+                        CERT_FILE="${ck%%|*}"
+                        KEY_FILE="${ck#*|}"
+                        IS_INSECURE="false"
+                        # 🔴 关键：SNI 必须是真实域名。
+                        # 自签模式下 SERVER_NAME 被伪装成 www.bing.com，
+                        # 若沿用会让客户端拿 bing 的 SNI 去连，必然握手失败。
+                        SERVER_NAME="$SERVER_NAME"
+                        log_info "已改为使用 Caddy 签发的正式证书: ${CERT_FILE}"
+                        log_info "SNI: ${SERVER_NAME}（客户端无需再开跳过证书校验）"
+                        return 0
+                    fi
+                fi
+                log_err "Caddy 签发失败。可手动执行：caddy reload && journalctl -u caddy -f"
+            fi
+        fi
+        log_warn "继续尝试内置 ACME 签发（大概率失败，失败后会自动退回自签证书）。"
+        log_warn "若想彻底解决，请确保 80/443 有空余，或手动为 ${SERVER_NAME} 准备证书后"
+        log_warn "用菜单第 4 项 → 证书方式 2（使用已有证书文件）。"
+        echo ""
     fi
 
     # DNS 解析预校验：避免 Let's Encrypt HTTP-01 必然失败导致服务反复重启

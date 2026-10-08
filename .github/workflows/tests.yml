@@ -123,6 +123,13 @@ jobs:
         #   3. 正常路径能取到并通过 Python 语法校验
         run: bash tests/portal-py-fetch-smoke.sh
 
+      - name: ACME 端口占用检测（已有反代时也能签证书）
+        # 真实故障（2026-10-08）：机器上已跑 Caddy 占住 80/443，
+        # 内置 ACME 的两种验证方式都用不了 ⇒ 退回自签 ⇒ 客户端连不上。
+        # 这条测试钉住「端口被占时必须改走复用路线」以及
+        # 「端口探测失败不得静默报空闲」——后者曾把代码 bug 伪装成网络故障。
+        run: bash tests/acme-port-guard-smoke.sh
+
       - name: AmneziaWG 纯逻辑测试
         run: bash tests/test_awgctl.sh
 
