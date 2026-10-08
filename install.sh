@@ -1140,44 +1140,89 @@ portal_files_ok() {
         [[ -s "${dir}/${m}" ]] || return 1
     done
     # ast.parse 而不是 py_compile —— 后者会在源文件旁边生成 __pycache__
+    # 🔴 每个文件都必须带 "${dir}/" 前缀：这里传的是【文件名】而不是【路径】。
+    #    校验发生在 mktemp -d / 脚本同目录上，两者几乎永远不等于当前工作目录，
+    #    裸文件名会解析成 $PWD/xxx 而 FileNotFoundError => 校验恒失败 =>
+    #    三个源全被误判为失败 => 安装报"无法获取门户程序"（网络其实完全正常）。
+    #    这是 2026-10-08 计量模块并入时引入的真实故障。
+    local -a _pylist=()
+    for f in $PORTAL_FILES $METER_FILES; do
+        _pylist+=("${dir}/${f}")
+    done
     python3 -c '
 import ast, sys
 for p in sys.argv[1:]:
     ast.parse(open(p, encoding="utf-8").read())
-' "${dir}/portal.py" "${dir}/portal_assets.py" $METER_FILES 2>/dev/null || return 1
+' "${_pylist[@]}" 2>/dev/null || return 1
     return 0
 }
 
-# 把门户文件拉到指定目录；任一文件失败即整体失败
+# 把门户文件拉到指定目录；任一文件失败即整体失败。
+# 🔴 失败详情写进 _fetch_files_err（局部变量）而不是共享的 PORTAL_FETCH_ERR ——
+#    两个函数复用同一个变量会互相覆盖，外层已累积的逐源原因会被内层清空，
+#    最终报错只剩最后一个源，正是本项目反复踩的"错误被覆盖"坑。
 portal_fetch_files() {
-    local dir="$1" base="$2" mode="$3" f
+    local dir="$1" base="$2" mode="$3" f _fetch_files_err=""
     # 计量文件与门户文件同源同生命周期，一起拉、一起失败
     for f in $PORTAL_FILES $METER_FILES; do
         if [[ "$mode" == "api" ]]; then
-            curl -fsSL --max-time 30 -H "Accept: application/vnd.github.raw" \
-                 "${base}/${f}?ref=main" -o "${dir}/${f}" 2>/dev/null || return 1
+            # 逐个文件报错，不要只留最后一个（错误被覆盖会把排查带偏）
+            if ! curl -fsSL --max-time 30 -H "Accept: application/vnd.github.raw" \
+                 "${base}/${f}?ref=main" -o "${dir}/${f}" 2>/dev/null; then
+                _fetch_files_err="下载 ${f} 失败"
+                return 1
+            fi
         else
-            curl -fsSL --max-time 30 "${base}/${f}" -o "${dir}/${f}" 2>/dev/null || return 1
+            if ! curl -fsSL --max-time 30 "${base}/${f}" -o "${dir}/${f}" 2>/dev/null; then
+                _fetch_files_err="下载 ${f} 失败"
+                return 1
+            fi
         fi
     done
+    # 成功时也要把细节带出去（调用方在失败分支里读它）
+    PORTAL_FETCH_FILES_ERR="${_fetch_files_err}"
     return 0
 }
+
+# 每一源的真实失败原因累积在这里，供最终报错逐条展示。
+# 🔴 旧实现把「网络拉不到」与「拉到了但本地校验不过」都压成同一个 return 1，
+#    最终只报「三个源均失败」+「请确认能访问 GitHub」，于是本地校验 bug
+#    被误判成网络故障（2026-10-08 真实发生过，排查方向完全被带偏）。必须分类。
+PORTAL_FETCH_ERR=""
+PORTAL_FETCH_FILES_ERR=""
+PORTAL_FETCH_ALL_VERIFY_FAILED=0
 
 portal_fetch_py() {
     local dir="$1"
     local repo="${AWG_REPO}"
-    if portal_fetch_files "$dir" "https://api.github.com/repos/${repo}/contents" api \
-       && portal_files_ok "$dir"; then
-        return 0
-    fi
-    if portal_fetch_files "$dir" "https://cdn.jsdelivr.net/gh/${repo}@main" plain \
-       && portal_files_ok "$dir"; then
-        return 0
-    fi
-    if portal_fetch_files "$dir" "https://raw.githubusercontent.com/${repo}/main" plain \
-       && portal_files_ok "$dir"; then
-        return 0
-    fi
+    local spec name base mode why m
+    PORTAL_FETCH_ERR=""
+    PORTAL_FETCH_FILES_ERR=""
+    PORTAL_FETCH_ALL_VERIFY_FAILED=0
+    # spec 格式：名称|base|模式
+    while IFS='|' read -r name base mode; do
+        [[ -z "$name" ]] && continue
+        # 每轮从干净目录开始，避免上一源的残留被当成本源的成功
+        rm -f "${dir}"/portal.py "${dir}"/portal_assets.py 2>/dev/null || true
+        for m in $METER_FILES; do
+            rm -f "${dir}/${m}" 2>/dev/null || true
+        done
+
+        if portal_fetch_files "$dir" "$base" "$mode"; then
+            if portal_files_ok "$dir"; then
+                return 0
+            fi
+            why="文件已取回，但未通过校验（关键标记缺失或 Python 语法不通）"
+            PORTAL_FETCH_ALL_VERIFY_FAILED=1
+        else
+            why="网络拉取失败（${PORTAL_FETCH_FILES_ERR:-下载失败}）"
+        fi
+        PORTAL_FETCH_ERR="${PORTAL_FETCH_ERR}  [${name}] ${why}"$'\n'
+    done <<EOF
+GitHub API|https://api.github.com/repos/${repo}/contents|api
+jsDelivr|https://cdn.jsdelivr.net/gh/${repo}@main|plain
+raw.githubusercontent|https://raw.githubusercontent.com/${repo}/main|plain
+EOF
     return 1
 }
 
@@ -1189,12 +1234,18 @@ portal_ensure_py() {
     local dest_dir="$HY2_DIR"
     local srcdir="" dir="" tmpdir=""
 
-    # 本地快路径：两个文件都在脚本同目录才用（只找到一个说明是残缺的本地树，
-    # 这种情况宁可走网络拉完整的，也不要写一半进去）
+    # 本地快路径：门户两个文件 + 计量模块都在脚本同目录才用。
+    # 少任何一个都说明是残缺的本地树 —— 这种情况宁可走网络拉完整的，也不要写一半进去。
+    # ⚠️ 判断条件必须与 portal_files_ok 对齐（同样要求计量模块），
+    #    否则本地树残缺时要等到后面落地校验才失败，报错信息更模糊。
     if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
         dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || dir=""
         if [[ -n "$dir" && -f "${dir}/portal.py" && -f "${dir}/portal_assets.py" ]]; then
-            srcdir="$dir"
+            local _m _all_present=1
+            for _m in $METER_FILES; do
+                [[ -s "${dir}/${_m}" ]] || { _all_present=0; break; }
+            done
+            [[ "$_all_present" == "1" ]] && srcdir="$dir"
         fi
     fi
 
@@ -1204,9 +1255,21 @@ portal_ensure_py() {
             srcdir="$tmpdir"
         else
             rm -rf "$tmpdir"
-            log_err "无法获取门户程序（portal.py + portal_assets.py，三个源均失败）"
-            log_err "门户同时是 Hysteria 的鉴权后端，缺了它所有客户端都连不上，因此中止安装。"
-            log_err "请确认本机能访问 GitHub 或 jsDelivr；也可手动把这两个文件放到脚本同目录后重试。"
+            log_err "无法获取门户程序（portal.py + portal_assets.py + 计量模块，三个源均失败）"
+            # 🔴 逐源打印真实原因：网络不通与本地校验逻辑坏掉是两回事，
+            #    只报一句「请检查网络」会把排查带偏（2026-10-08 真的发生过）。
+            while IFS= read -r _line; do
+                [[ -n "$_line" ]] && log_err "  ${_line}"
+            done <<< "$PORTAL_FETCH_ERR"
+            if [[ "$PORTAL_FETCH_ALL_VERIFY_FAILED" == "1" ]]; then
+                log_err "三个源都成功取回了文件却都校验不通过 —— 这不是网络问题，"
+                log_err "而是本地校验逻辑有 bug，或仓库 main 分支内容已损坏。"
+                log_err "请到仓库提 issue，并附上以上逐源原因。"
+            else
+                log_err "门户同时是 Hysteria 的鉴权后端，缺了它所有客户端都连不上，因此中止安装。"
+                log_err "请确认本机能访问 GitHub 或 jsDelivr；也可手动把门户文件"
+                log_err "（portal.py / portal_assets.py / 计量模块）放到脚本同目录后重试。"
+            fi
             return 1
         fi
     fi
