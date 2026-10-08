@@ -1180,6 +1180,210 @@ def get_cert_pin_sha256(root_path):
         return ''
 
 
+def pin_sha256_of_file(cert_file):
+    """SHA-256(DER) of an arbitrary PEM path, lowercase HEX64, or '' on failure."""
+    cert_file = Path(cert_file)
+    if not cert_file.exists():
+        return ''
+    try:
+        p1 = subprocess.Popen(['openssl', 'x509', '-in', str(cert_file), '-outform', 'DER'],
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        p2 = subprocess.Popen(['openssl', 'dgst', '-sha256'], stdin=p1.stdout,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        p1.stdout.close()
+        out = p2.communicate()[0].decode().strip()
+        hexval = out.rsplit('=', 1)[-1].strip().lower()
+        return hexval if len(hexval) == 64 and all(c in '0123456789abcdef' for c in hexval) else ''
+    except Exception:
+        return ''
+
+
+def _config_tls_cert_path(config_path='/etc/hysteria/config.yaml'):
+    """Return the leaf/fullchain cert path that Hysteria actually serves with.
+
+    Reads `tls.cert:` from config.yaml. When the node uses the `acme:` block
+    (Let's Encrypt managed in-process) there is no file, so '' is returned and
+    the caller must fall back to cert/server.crt.
+    """
+    try:
+        text = Path(config_path).read_text(encoding='utf-8')
+    except OSError:
+        return ''
+    in_tls = False
+    for raw in text.split('\n'):
+        if not raw.strip() or raw.lstrip().startswith('#'):
+            continue
+        if not raw.startswith((' ', '\t')):
+            in_tls = raw.split(':', 1)[0].strip() == 'tls'
+            continue
+        if in_tls:
+            stripped = raw.strip()
+            if stripped.startswith('cert:'):
+                value = stripped.split(':', 1)[1].strip().strip('"').strip("'")
+                return value
+            if stripped.startswith('key:'):
+                in_tls = False
+    return ''
+
+
+def _parse_cert_subject(cert_file):
+    """(common_name, [san...], self_signed_bool) for a PEM path.
+
+    SAN is preferred over CN for the usable server_name: every browser/client
+    built after 2017 ignores CN and matches only SAN, so a cert whose CN is
+    right but whose SAN is empty/wrong will still fail `CRYPTO_ERROR 0x150`.
+    """
+    cert_file = Path(cert_file)
+    if not cert_file.exists():
+        return '', [], False
+    try:
+        # fullchain.pem holds the leaf first; openssl x509 reads the first block.
+        # 分别取 CN / SAN / issuer：不要合并成一次调用再切字符串 ——
+        # `-subject -ext subjectAltName -issuer` 的输出里 SAN 块夹在
+        # subject 与 issuer 之间，按 issuer 切会把 SAN 块并进 CN。
+        p_subj = subprocess.run(['openssl', 'x509', '-in', str(cert_file),
+                                 '-noout', '-subject'], capture_output=True, text=True)
+        p_iss = subprocess.run(['openssl', 'x509', '-in', str(cert_file),
+                                '-noout', '-issuer'], capture_output=True, text=True)
+        p_san = subprocess.run(['openssl', 'x509', '-in', str(cert_file),
+                                '-noout', '-ext', 'subjectAltName'],
+                               capture_output=True, text=True)
+        if p_subj.returncode != 0:
+            return '', [], False
+
+        subject_line = p_subj.stdout.strip().split('subject=', 1)[-1].splitlines()[0].strip()
+        issuer_line = p_iss.stdout.strip().split('issuer=', 1)[-1].splitlines()[0].strip() \
+            if p_iss.returncode == 0 else ''
+        cn = ''
+        for part in subject_line.split(','):
+            part = part.strip()
+            if part.startswith('CN') and '=' in part:
+                cn = part.split('=', 1)[1].strip()
+                break
+
+        sans = []
+        for line in p_san.stdout.splitlines():
+            line = line.strip()
+            if line.startswith('DNS:'):
+                sans = [d.strip() for d in line[len('DNS:'):].split(',') if d.strip()]
+                break
+
+        self_signed = bool(issuer_line) and issuer_line == subject_line
+        return cn, sans, self_signed
+    except Exception:
+        return '', [], False
+
+
+def _is_dns_name(value):
+    value = (value or '').strip()
+    if not value or len(value) > 253:
+        return False
+    if value.startswith('www.bing.com'):
+        return True
+    return bool(re.match(r'^[A-Za-z0-9]([A-Za-z0-9\-]{0,61}[A-Za-z0-9])?'
+                         r'(\.[A-Za-z0-9]([A-Za-z0-9\-]{0,61}[A-Za-z0-9])?)+$', value))
+
+
+def sync_cert_trust(m, root, meta_path, config_path='/etc/hysteria/config.yaml'):
+    """Idempotently reconcile client_meta.json's trust model with the live cert.
+
+    🔴 为什么需要这个函数（真实 bug，2026-10-08）：
+    `client_meta.json` 里的 `cert_type` / `server_name` / `is_insecure` /
+    `pin_sha256` 四个字段是**安装那一刻**根据用户选择写死的。一旦证书文件
+    在安装之后被**带外替换**（Caddy 抢证续期、手工 cp、menu-4 只换证书没重跑
+    generate_server_config），四个字段就会同时与真实证书漂移：
+
+        config.yaml 用的是 CN=se.zy3a.com 的真 Let's Encrypt 证书，
+        meta 却还记着 cert_type=self_signed / server_name=www.bing.com /
+        is_insecure=true / pin=旧自签指纹。
+
+    后果：面板生成的订阅把 `sni=www.bing.com` 发给客户端，而服务端出示的是
+    `se.zy3a.com` 的证书 → 客户端直接 `CRYPTO_ERROR 0x150`（SNI 不匹配）。
+    用户只看到「连不上」，完全无从下手 —— 而 `sync_pin()` 只管 pin，从不碰
+    另外三个字段，所以自愈永远不会发生。
+
+    本函数以**证书文件本身**为唯一事实来源，幂等地把四个字段拉回一致：
+      * 读 config.yaml 的 tls.cert（读不到就退回 cert/server.crt）；
+      * 自签（issuer==subject）→ cert_type=self_signed, is_insecure=True,
+        server_name=SAN 首选 / CN 次选，pin=该证书的 SHA-256(DER)；
+      * 非自签 → cert_type 保留 acme/custom（有 acme 块即 acme），
+        is_insecure=False, server_name=SAN 首选 / CN，pin 清空（可信链不需要 pin）。
+    只有真正发生漂移时才写盘并返回 True。
+    """
+    if not isinstance(m, dict):
+        return False
+
+    tls_cert = _config_tls_cert_path(config_path)
+    config_has_acme = False
+    try:
+        config_has_acme = bool(re.search(r'^acme:', Path(config_path).read_text(encoding='utf-8'), re.M))
+    except OSError:
+        pass
+
+    # config.yaml 里的 cert 路径可能是相对路径（install.sh 写的就是 `cert/xxx.pem`，
+    # 因为 hysteria 以 /etc/hysteria 为工作目录启动）。这里必须相对**配置所在目录**
+    # 解析，否则 Path(tls_cert).exists() 会拿进程 CWD 去判，永远 False。
+    cert_file = None
+    if tls_cert:
+        candidate = Path(tls_cert)
+        if not candidate.is_absolute():
+            candidate = Path(config_path).parent / candidate
+        if candidate.exists():
+            cert_file = candidate
+    if cert_file is None:
+        cert_file = Path(root) / 'cert' / 'server.crt'
+
+    cn, sans, self_signed = _parse_cert_subject(cert_file)
+    if not cert_file.exists():
+        # 证书都读不到，不做任何猜测 —— 交给原来的行为。
+        return False
+
+    # server_name 取值：SAN 首选（现代客户端只看 SAN），CN 兜底。
+    # 过滤掉 wildcard / 纯 IP / 明显不是域名的 SAN，避免把 *.example.com 写进 sni。
+    candidate = ''
+    for san in sans:
+        if san.startswith('*.'):
+            continue
+        if _is_dns_name(san):
+            candidate = san
+            break
+    if not candidate and _is_dns_name(cn):
+        candidate = cn
+
+    if self_signed:
+        new_type = 'self_signed'
+        new_insecure = True
+        new_pin = pin_sha256_of_file(cert_file)
+    else:
+        new_type = 'acme' if config_has_acme else 'custom'
+        new_insecure = False
+        new_pin = ''
+
+    new_sn = candidate or m.get('server_name') or m.get('public_ip', 'localhost')
+
+    changed = False
+    if m.get('cert_type') != new_type:
+        m['cert_type'] = new_type
+        changed = True
+    if bool(m.get('is_insecure')) != bool(new_insecure):
+        m['is_insecure'] = new_insecure
+        changed = True
+    if m.get('server_name') != new_sn:
+        m['server_name'] = new_sn
+        changed = True
+    if (m.get('pin_sha256') or '') != (new_pin or ''):
+        m['pin_sha256'] = new_pin
+        changed = True
+
+    if changed:
+        Path(meta_path).write_text(json.dumps(m, ensure_ascii=False), encoding='utf-8')
+        print(f"[portal] 证书信任模型已自愈: cert_type={new_type} "
+              f"is_insecure={new_insecure} server_name={new_sn} "
+              f"pin={'<set>' if new_pin else '<empty>'} (证书={cert_file})",
+              file=sys.stderr)
+    return changed
+
+
 def reality_uuid_for_user(user_id):
     """为某个 Hy2 用户派生**稳定**的 VLESS UUID。
 
@@ -1611,6 +1815,10 @@ def sync_pin(m, root, meta_path):
 def prepare(meta_path, port, node_api_key=None):
     root = Path(meta_path).parent
     m = json.loads(Path(meta_path).read_text())
+    # 先修信任模型（cert_type/server_name/is_insecure/pin），再对齐 pin。
+    # 顺序不能反：sync_pin 依赖 is_insecure 判断 pin 该不该留，而 is_insecure
+    # 本身可能正漂移着（自签证书被换成正式证书后仍是 true）。
+    sync_cert_trust(m, root, meta_path)
     sync_pin(m, root, meta_path)
 
     uri, clash, sing = artifacts(m)

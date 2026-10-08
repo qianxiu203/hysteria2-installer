@@ -2,6 +2,63 @@
 
 ## 未发布
 
+### 修复：真实计量从未启用（`install.sh` 从不写 `trafficStats`，portal 静默降级）
+- **现象（真实故障）**：装完后仪表盘「真实计量」永远显示「未开始计量」，
+  `/traffic-speed` 恒为 `0`，`users/list` 的 `measurement_ok` 恒为 `false`，
+  而安装过程**看起来完全成功**——是本项目最忌的静默降级。
+- **根因链**：`install.sh` 生成的 `config.yaml` **从来没有 `trafficStats:` 段** →
+  portal 启动时 `usage-meter-config.json` 缺失 → `真实计量未初始化: FileNotFoundError`
+  → `usage_meter=None` → `poll()` 从不运行 → speed_tracker 为空 → `/traffic-speed` 返回 0。
+- **修法**：
+  1. `generate_server_config()` 生成 `METER_SECRET`（`openssl rand -hex 16`）并把
+     `trafficStats: {listen: 127.0.0.1:19996, secret: ...}` 写进配置模板。
+  2. `portal_ensure_py()` 由「缺 secret 就 `log_warn` 后继续」改为**幂等补写 + 硬失败**：
+     补不上就 `return 1`，拒绝以静默降级的方式继续安装。
+  3. `do_upgrade.sh portal` 路径同样幂等补写 `trafficStats` 并重建
+     `usage-meter-config.json`（老装机在线升级也能修好）。
+- **实测证据（测试机 se）**：修复后 `/traffic` 返回 `{"user":{"tx":3297,"rx":92021}}`，
+  `/traffic-speed` 返回 `rx=26310.67`，`measurement_scope` 变为
+  `since_measurement_started`（此前为 `unavailable`）。
+- **回归**：新增 `tests/test_meter_config.py`（8 例，含动态执行真实
+  `do_upgrade.sh` 自愈片段的用例）。
+
+### 修复：证书信任模型漂移导致 `CRYPTO_ERROR 0x150`（`sync_pin` 只管 pin）
+- **现象（真实故障）**：证书文件在安装后被带外替换（Caddy 抢证续期、手工 `cp`、
+  菜单 4 只换证书没重跑 `generate_server_config`）后，客户端连不上，
+  只能看到笼统的握手失败；用错误 SNI（如 `www.bing.com`）连接时报
+  `CRYPTO_ERROR 0x150`。
+- **根因**：`client_meta.json` 的 `cert_type` / `server_name` / `is_insecure` /
+  `pin_sha256` 是**安装那一刻**写死的。证书被替换后四个字段同时与真实证书漂移
+  （实测：config 用 `CN=se.zy3a.com` 的真 Let's Encrypt 证书，meta 却仍是
+  `cert_type=self_signed / server_name=www.bing.com / is_insecure=true /` 旧自签 pin），
+  面板于是把 `sni=www.bing.com` 发给客户端。而既有的 `sync_pin()` **只修 pin，
+  从不碰另外三个字段**，自愈永远不会发生。
+- **修法**：以**证书文件本身**为唯一事实来源，新增幂等自愈：
+  1. `portal.py::sync_cert_trust()`——读 `config.yaml` 的 `tls.cert`
+     （相对路径显式相对配置目录解析；acme 模式退回 `cert/server.crt`），
+     由 `CN`/`SAN`/`issuer==subject` 推断
+     `cert_type` / `is_insecure` / `server_name`（SAN 优先）/ `pin_sha256`，
+     仅在漂移时写盘。已在 `prepare()` 中**先于** `sync_pin()` 调用（顺序有依赖：
+     `sync_pin` 需要正确的 `is_insecure` 才决定 pin 去留）。
+  2. `install.sh::sync_cert_meta()` 做同样的事，挂到 `refresh_portal()`；
+     `do_upgrade.sh portal` 内联同一段自愈。
+- **踩坑记录**：
+  * 证书路径必须**相对配置目录**解析，否则 `-f`/`.exists()` 拿进程 CWD 判、永远失败
+    （`portal.py` 与 `install.sh` 两侧各踩到一次）。
+  * jq 的 `//` 把布尔 `false` 当 `null`，`.is_insecure // empty` 会把 `false`
+    变成空串 → 自愈每轮都判成漂移、反复写盘。改用
+    `if has("is_insecure") then (.is_insecure|tostring) else "" end`。
+  * 解析证书不能用一次 `openssl x509 -subject -ext subjectAltName -issuer` 再切字符串：
+    SAN 块夹在 subject 与 issuer 之间，按 issuer 切会把 SAN 并进 CN。改为分别调用。
+- **实测证据（测试机 se，真实漂移状态）**：自愈前
+  `cert_type=self_signed, server_name=www.bing.com, is_insecure=true, pin=8037cef0…`；
+  自愈后 `cert_type=custom, server_name=se.zy3a.com, is_insecure=false, pin=""`，
+  门户输出的 URI 变为 `…@se.zy3a.com:19906?sni=se.zy3a.com…`（此前是
+  `sni=www.bing.com`），且二次运行确认为 no-op（幂等）。
+- **回归**：新增 `tests/test_cert_trust_heal.py`（10 例：`portal.py` 侧 4 例 +
+  真实执行 `install.sh` 自愈片段的 shell 侧 4 例 + 仓库不变量 2 例；
+  在测试机 se 上 10/10 绿）。已用变异测试验证新用例能真正抓到上述两个坑。
+
 ### 修复与增强：Reality 停用同步、端口冲突规避与能力参数白名单
 - 停用用户时同步移除其 Reality 客户端身份；重新启用时恢复原映射，避免已停用账号仍可连接。
 - Reality 自动选择端口时检查当前监听端口、保留端口和额外冲突端口；已有可用配置端口继续沿用。
