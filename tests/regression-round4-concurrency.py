@@ -33,7 +33,10 @@ import urllib.request
 CFG = '/etc/hysteria/config.yaml'
 D = json.load(open('/etc/hysteria/portal.json'))
 TOK = D['token']
-B = 'http://127.0.0.1:33947/' + TOK + '/'
+# 🔴 端口必须从 portal.json 读，不能硬编码 —— 门户端口是随机生成的，
+# 每台机器都不一样（se=33947、us5x=54741...）。
+# 硬编码会让这些脚本只能在那台机器上跑，换机即 Connection refused。
+B = 'http://127.0.0.1:%d/' % D['port'] + TOK + '/'
 SIG = hmac.new(D['session_secret'].encode(), ('sess:' + TOK).encode(),
                hashlib.sha256).hexdigest()
 CK = 'hy2_session=' + TOK + '.' + SIG

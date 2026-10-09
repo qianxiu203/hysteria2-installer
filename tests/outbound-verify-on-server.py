@@ -36,7 +36,56 @@ ns = {'re': re, 'json': json, 'Path': Path,
       'data': {}, 'data_lock': threading.RLock()}
 exec('import re\n' + src[start:end], ns)
 
-BASE = open(BASE_FILE, encoding='utf-8').read()
+def _ensure_cert():
+    """自签一张证书，供下面自造配置里的 tls 段引用。"""
+    c, k = '/tmp/ymlcheck/t.crt', '/tmp/ymlcheck/t.key'
+    if os.path.exists(c) and os.path.exists(k):
+        return
+    os.makedirs('/tmp/ymlcheck', exist_ok=True)
+    subprocess.run(
+        ['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+         '-keyout', k, '-out', c, '-days', '1', '-subj', '/CN=regress.test'],
+        capture_output=True, timeout=30)
+
+
+def _load_base():
+    """读取基准配置；缺失或不含tls 时自造一份完整合法的。
+
+    🔴 本脚本要能在**干净机器**上独立跑（不依赖已装 Hysteria），
+    所以 base.yaml 不可用时自己造。两条硬要求都是实测踩出来的：
+      · 必须有 tls 段，否则报 `invalid config: tls: must set either tls or acme`
+      · obfs/auth 密码必须 >= 4 字节，否则报 `PSK must be at least 4 bytes`
+    """
+    if os.path.exists(BASE_FILE):
+        txt = open(BASE_FILE, encoding='utf-8').read()
+        if 'tls:' in txt and 'password:' in txt:
+            return txt
+    L = []
+    L.append('listen: :443')
+    L.append('tls:')
+    L.append('  cert: /tmp/ymlcheck/t.crt')
+    L.append('  key: /tmp/ymlcheck/t.key')
+    L.append('auth:')
+    L.append('  type: password')
+    L.append('  password: "test-auth-pwd-1234"')
+    L.append('obfs:')
+    L.append('  type: salamander')
+    L.append('  salamander:')
+    L.append('    password: "test-obfs-pwd-1234"')
+    L.append('outbounds:')
+    L.append('  - name: direct_ipv4')
+    L.append('    type: direct')
+    L.append('    direct:')
+    L.append('      mode: "4"')
+    L.append('  - name: warp_socks')
+    L.append('    type: socks5')
+    L.append('    socks5:')
+    L.append('      addr: 127.0.0.1:19898')
+    return '\n'.join(L) + '\n'
+
+
+_ensure_cert()
+BASE = _load_base()
 
 
 def check(text, timeout=8):
@@ -120,6 +169,7 @@ case('warp_socks 保留', 'name: warp_socks' in t3)
 case('obfs 段保留', 'salamander' in t3)
 
 print('\n=== 场景5: 规则引用已删除出站必须兜底 ===')
+Path('/etc/hysteria').mkdir(parents=True, exist_ok=True)
 Path('/etc/hysteria/config.yaml').write_text(t3, encoding='utf-8')
 acl = ns['build_acl_block']('rules',
                             [{'domain': 'openai.com', 'outbound': 'GONE'}],
