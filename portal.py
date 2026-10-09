@@ -424,10 +424,33 @@ def apply_outbounds_config(data, data_lock, config_path='/etc/hysteria/config.ya
             pass
         return False, '写入配置失败: %s' % e
 
-    # 重启并校验
-    try:
-        subprocess.run(['systemctl', 'restart', 'hysteria-server'],
-                       capture_output=True, timeout=25)
+    # 🔴🔴 restart 之前**必须 reset-failed**。
+        #
+        # 真实事故（2026-10-09第 4 轮回归）：连续切几次模式后，
+        # systemd 进入 `start-limit-hit` 状态 —— 此后即使配置完全合法、
+        # 端口空闲，`systemctl start` 也会直接拒绝：
+        #     Failed to start hysteria-server.service.
+        #     hysteria-server.service: Failed with result 'start-limit-hit'.
+        # 也就是说**一次失败就把服务永久锁死**，此后所有出站操作都会
+        # 报"配置可能有误"，把用户引向完全错误的方向（真因是 systemd 限流）。
+        #
+        # 面板上的操作会连续触发 restart，所以必须每次都先清掉失败计数。
+        subprocess.run(['systemctl', 'reset-failed', 'hysteria-server'],
+                       capture_output=True, timeout=15)
+    # 🔴🔴🔴 用 stop + reset-failed + start，**不要用 restart**。
+        #
+        # 第 4 轮回归实测（真实事故）：`systemctl restart` 在连续操作时
+        # 会撞上 systemd 的 start-limit ——
+        #     Stopping ... Stopped ... Start request repeated too quickly.
+        #     hysteria-server.service: Failed with result 'start-limit-hit'.
+        # 一旦进入该状态，**后续所有 start/restart 都被直接拒绝**，
+        # 于是「配置明明合法、端口空闲、服务就是起不来」，
+        # 而错误提示却说"配置可能有误"，把用户引向完全错误的方向。
+        #
+        # `reset-failed` 才是解封手段，且必须在每次启动**之前**做
+        # （原来只在 restart 前做了一次，回滚路径里的那次 restart 没做，
+        #  结果一次失败就把服务永久锁死）。
+        _restart_hy2()
     except subprocess.TimeoutExpired:
         _rollback_outbounds(cfg, original)
         return False, '重启超时（服务未响应）'
@@ -435,30 +458,152 @@ def apply_outbounds_config(data, data_lock, config_path='/etc/hysteria/config.ya
         _rollback_outbounds(cfg, original)
         return False, '重启失败: %s' % e
 
-    time.sleep(2)
-    try:
-        state = subprocess.run(['systemctl', 'is-active', 'hysteria-server'],
-                               capture_output=True, text=True, timeout=8).stdout.strip()
-    except Exception as e:
-        state = 'unknown(%s)' % e
+    # 🔴 轮询等就绪而不是死等 2 秒：Hysteria 启动要解析配置、绑端口，
+    #    慢一点时 2 秒不够，会被误判成失败（又触发一次回滚，越滚越乱）。
+    state = 'unknown'
+    for _i in range(12):
+        try:
+            state = subprocess.run(['systemctl', 'is-active', 'hysteria-server'],
+                                   capture_output=True, text=True,
+                                   timeout=8).stdout.strip()
+        except Exception as e:
+            state = 'unknown(%s)' % e
+        if state == 'active':
+            break
+        # 已经是明确失败就别再等了
+        if state in ('failed', 'inactive'):
+            break
+        time.sleep(1)
+    if state == 'active':
+        # 再确认一次：连续操作时偶发"起来了又立刻挂"
+        time.sleep(1)
+        try:
+            if subprocess.run(['systemctl', 'is-active', 'hysteria-server'],
+                              capture_output=True, text=True,
+                              timeout=8).stdout.strip() != 'active':
+                state = 'unstable'
+        except Exception:
+            pass
 
     if state != 'active':
         # 🔴 起不来 = 配置有问题（多半是出站名拼错或地址格式不被接受）
         #    必须回滚，否则用户的服务就废了、且面板再也连不上
-        _rollback_outbounds(cfg, original)
-        return False, ('Hysteria 启动失败（配置可能有误，已自动回滚到原配置）。'
-                       '请检查出站地址格式；HTTP 出站不支持 UDP。')
+        rb_state = _rollback_outbounds(cfg, original)
+        if rb_state == 'active':
+            # 🔴 第 4 轮回归实测到的两种失败必须分开提示，
+            #    否则会把用户引向完全错误的方向：
+            #   · 配置真的写错了（出站名字段/地址格式不被 hysteria 接受）
+            #   · 配置没错，但**出站指向的代理没在跑** —— 最常见的一种，
+            #     因为 hysteria 启动后会立刻尝试连它，连不上就退出。
+            #     旧提示只说"配置可能有误 / HTTP 不支持 UDP"，
+            #     用户会去反复检查格式，永远查不出真因。
+            unreachable = _unreachable_outbounds(outs)
+            if unreachable:
+                return False, (
+                    'Hysteria 启动失败，已自动回滚到原配置。\n'
+                    '原因：**出站「%s」指向的代理连不上**（该地址没有服务在监听）。\n'
+                    '请先启动该代理，或改用其他出站。'
+                    % '」「'.join(unreachable))
+            return False, ('Hysteria 启动失败（配置可能有误，已自动回滚到原配置）。'
+                           '请检查出站地址格式；HTTP 出站不支持 UDP。')
+        # 🔴 回滚后仍起不来 = 服务真的挂了，必须直说，
+        #    否则用户只会反复重试，而真因（可能是 systemd start-limit-hit）
+        #    永远不会被发现。
+        return False, ('Hysteria 启动失败，**回滚后服务仍未恢复**（当前状态: %s）。'
+                       '请 SSH 登录执行：'
+                       'systemctl reset-failed hysteria-server && systemctl start hysteria-server'
+                       '　并查看 journalctl -u hysteria-server -n 30。' % rb_state)
     return True, ''
 
 
+def _restart_hy2():
+    """停 → 清失败计数 → 启动。**所有**改Hysteria 配置后都必须走这里。
+
+    🔴 为什么不用 `systemctl restart`：
+    systemd 有 start-limit（默认 5 次/10 秒）。面板上的连续操作会密集 restart，
+    计数耗尽后进入 `start-limit-hit`，此后 start/restart 一律被直接拒绝，
+    服务就永久锁死 —— 而配置完全合法、端口空闲，极难定位（第 4 轮回归真实踩到）。
+    `reset-failed` 是官方解封手段，必须在**每次**启动前调用。
+    """
+    subprocess.run(['systemctl', 'stop', 'hysteria-server'],
+                   capture_output=True, timeout=25)
+    # 🔴 关键：每次启动前都要 reset，否则上一次的失败计数会累积
+    subprocess.run(['systemctl', 'reset-failed', 'hysteria-server'],
+                   capture_output=True, timeout=15)
+    subprocess.run(['systemctl', 'start', 'hysteria-server'],
+                   capture_output=True, timeout=30)
+
+
+def _unreachable_outbounds(outs, timeout=2):
+    """返回【连不上】的自定义出站名列表（纯本地 socket 探测，不发数据）。
+
+    🔴 为什么要单独探测：Hysteria 启动后会立刻尝试连接全局出站，
+    连不上就直接退出。而这时配置本身完全合法，
+    旧提示却说"配置可能有误 / HTTP 不支持 UDP"——
+    用户会去反复检查地址格式，永远查不到真因（代理根本没在跑）。
+    第 4 轮回归就是踩这个：测试出站指向 127.0.0.1:19898，
+    而 WARP 没装 → 报"配置可能有误"，实际是"代理没启动"。
+
+    只对 socks5 / http 有意义（direct 不需要外部服务）。
+    """
+    dead = []
+    for ob in outs or []:
+        target = None
+        if ob.get('type') == 'socks5':
+            target = ob.get('addr') or ''
+        elif ob.get('type') == 'http':
+            m = re.match(r'^[a-zA-Z]+://([^/:]+)(?::(\d+))?', ob.get('url') or '')
+            if m:
+                target = '%s:%s' % (m.group(1), m.group(2) or '80')
+        if not target or ':' not in target:
+            continue
+        host, port = target.rsplit(':', 1)
+        try:
+            port = int(port)
+        except ValueError:
+            continue
+        sock = None
+        try:
+            sock = socket.create_connection((host, port), timeout=timeout)
+        except Exception:
+            dead.append(ob.get('name'))
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+    return dead
+
+
 def _rollback_outbounds(cfg, original):
-    """回滚配置并尽力把服务拉回可用状态。"""
+    """回滚配置并尽力把服务拉回可用状态。
+
+    🔴 回滚是最后一道保险，它自己失败的话用户就彻底没救了。
+    所以这里做了三件之前没做的事：
+      1. `reset-failed`：否则上一轮失败留下的 start-limit-hit 会让
+         restart 直接被拒（真实事故：回滚也跟着一起失败）。
+      2. 写回配置后再 reset 再 restart，顺序不能乱。
+      3. 校验最终状态：回滚后仍不 active 就明确记下来，
+         让面板能告诉用户"需要手动干预"，而不是静默留一个坏服务。
+    """
+    state = 'unknown'
     try:
         cfg.write_text(original, encoding='utf-8')
-        subprocess.run(['systemctl', 'restart', 'hysteria-server'],
-                       capture_output=True, timeout=25)
+        # 🔴 必须走 _restart_hy2（内含 reset-failed），
+        #    这里原来直接 restart，会被 start-limit 挡住 ——
+        #    后果是「回滚也失败」，用户彻底没救（真实事故）。
+        _restart_hy2()
+        for _i in range(10):
+            state = subprocess.run(['systemctl', 'is-active', 'hysteria-server'],
+                                   capture_output=True, text=True,
+                                   timeout=8).stdout.strip()
+            if state in ('active', 'failed', 'inactive'):
+                break
+            time.sleep(1)
     except Exception:
         pass
+    return state
 
 
 def set_outbound_apply_error(data, data_lock, save_data, msg):
@@ -6048,7 +6193,13 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
                         'username': (form.get('username', [''])[0] or '').strip(),
                         'password': (form.get('password', [''])[0] or '').strip(),
                         'insecure': (form.get('insecure', [''])[0] or '').strip(),
-                        'mode': (form.get('ob_mode', [''])[0] or '').strip(),
+                        # 🔴 键名必须与 validate_outbound / render_outbound_yaml 一致。
+                        #   原来这里读 form 的 'ob_mode' 写进 'mode'，
+                        #   而 validate 里只认 entry['mode']（表单里没有这个字段名），
+                        #   导致 direct 的 mode **永远校验不到** —— 用户填任何值都被当作
+                        #   "未填"而放行，错值直接进 config.yaml ⇒ hysteria 起不来。
+                        #   表单侧按type 切换字段，两个键名现已统一为 mode。
+                        'mode': (form.get('mode', [''])[0] or '').strip(),
                     }
                     ok, cleaned, err = validate_outbound(entry)
                     if not ok:
