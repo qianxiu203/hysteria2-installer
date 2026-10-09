@@ -185,6 +185,82 @@ footer{display:flex;justify-content:space-between;margin-top:32px;color:#879996;
 
 .warp-add-form { display: flex; gap: 10px; margin-bottom: 14px; }
 @media(max-width: 600px) { .warp-add-form { flex-direction: column; } }
+
+/* ===== 自定义出站（Custom Outbounds）区块 =====
+   与 WARP 区块同风格但独立命名，避免选择器互相污染。 */
+.ob-card { margin-top: 22px; }
+.ob-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+.ob-title-box { min-width: 0; }
+.ob-title { font-size: 16px; font-weight: 800; color: var(--ink); margin: 0; }
+.ob-mode-badge { font-size: 12px; font-weight: 700; padding: 5px 13px; border-radius: 20px; background: #f0f5f4; color: var(--muted); border: 1px solid var(--line); white-space: nowrap; }
+.ob-mode-badge.global { background: #fff4e5; color: #8a5200; border-color: #ffd9a0; }
+.ob-mode-badge.rules { background: #eaf5ef; color: var(--accent); border-color: #c0ded4; }
+
+.ob-mode-card, .ob-probe-card, .ob-list-card, .ob-form-card, .ob-rules-card {
+  background: #fafcfb; border: 1px solid var(--line); border-radius: 16px;
+  padding: 18px 20px; margin-bottom: 16px;
+}
+.ob-mode-card { background: #f6faf9; border-color: #d3e7e2; }
+.ob-mode-title, .ob-list-title { font-size: 14px; font-weight: 800; color: var(--ink); margin-bottom: 12px; display: block; }
+.ob-mode-switch { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+.ob-mode-btn { flex: 1; min-width: 220px; text-align: left; padding: 13px 16px; border-radius: 12px;
+  border: 1.5px solid var(--line); background: #fff; cursor: pointer; transition: all .15s ease; }
+.ob-mode-btn b { display: block; font-size: 13.5px; color: var(--ink); margin-bottom: 3px; font-weight: 800; }
+.ob-mode-btn span { font-size: 12px; color: var(--muted); }
+.ob-mode-btn:hover { border-color: var(--accent); }
+.ob-mode-btn.active { border-color: var(--accent); background: #eef7f5; box-shadow: 0 0 0 3px rgba(8,127,116,.08); }
+.ob-mode-note { font-size: 12px; color: var(--muted); margin: 0; line-height: 1.6; }
+
+.ob-probe-card { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; background: #f8fbff; border-color: #d6e5f5; }
+.ob-probe-title { font-size: 12.5px; font-weight: 700; color: #2c5a86; margin-bottom: 6px; }
+.ob-probe-ip { font-size: 21px; font-weight: 800; color: #1b3f61; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: -.02em; }
+.ob-probe-sub { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
+.ob-probe-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+.ob-list-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; gap: 10px; flex-wrap: wrap; }
+.ob-count-badge { font-size: 11.5px; font-weight: 700; padding: 3px 11px; border-radius: 20px; background: #eaf5ef; color: var(--accent); border: 1px solid #c0ded4; }
+.ob-list { display: flex; flex-direction: column; gap: 9px; }
+.ob-item { display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  padding: 12px 15px; background: #fff; border: 1.5px solid var(--line); border-radius: 12px; flex-wrap: wrap; }
+.ob-item-main { min-width: 0; flex: 1; }
+.ob-item-name { font-size: 13.5px; font-weight: 750; color: var(--ink); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.ob-item-meta { font-size: 12px; color: var(--muted); margin-top: 3px; word-break: break-all; }
+.ob-item-type { font-size: 11px; font-weight: 700; padding: 2px 9px; border-radius: 6px; margin-left: 8px; vertical-align: middle; }
+.ob-type-socks5 { background: #e8f0fd; color: #1d4e89; }
+.ob-type-http { background: #fdeee8; color: #9a4a1e; }
+.ob-type-direct { background: #eaf5ef; color: #2c6b52; }
+.ob-item-actions { display: flex; gap: 7px; flex-shrink: 0; }
+.ob-mini-btn { height: 28px; padding: 0 11px; font-size: 12px; font-weight: 650; border-radius: 8px;
+  border: 1px solid var(--line); background: #fff; color: var(--muted); cursor: pointer; transition: all .15s ease; }
+.ob-mini-btn:hover { border-color: var(--accent); color: var(--accent); }
+.ob-mini-btn.danger:hover { border-color: #d64545; color: #d64545; background: #fef5f5; }
+
+.ob-form-card { background: #fbfcfd; }
+.ob-form-title { font-size: 14px; font-weight: 800; color: var(--ink); margin-bottom: 14px; }
+.ob-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 4px; }
+@media(max-width: 640px) { .ob-form-grid { grid-template-columns: 1fr; } .ob-probe-card { flex-direction: column; align-items: flex-start; } }
+.ob-field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; min-width: 0; }
+.ob-field-wide { width: 100%; }
+.ob-field > span { font-size: 12px; font-weight: 700; color: #496861; }
+.ob-field > em { font-size: 11px; color: var(--muted); font-style: normal; line-height: 1.5; }
+.ob-input, .ob-select { height: 40px; padding: 0 13px; border: 1.5px solid var(--line); border-radius: 10px;
+  font-size: 13px; color: var(--ink); background: #fff; outline: none; transition: all .15s ease; width: 100%; }
+.ob-input:focus, .ob-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(8,127,116,.12); }
+.ob-inline-check { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: #496861; margin-bottom: 12px; cursor: pointer; }
+.ob-form-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+.ob-form-msg { font-size: 12px; font-weight: 650; }
+.ob-form-msg.ok { color: #2c8a4e; }
+.ob-form-msg.err { color: #d64545; }
+
+.ob-add-form { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+.ob-add-form .ob-input { flex: 1; min-width: 160px; }
+.ob-rules-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.ob-rule-item { display: inline-flex; align-items: center; gap: 8px; padding: 6px 13px; background: #fff;
+  border: 1.5px solid #cfe0dc; border-radius: 20px; font-size: 12.5px; font-weight: 650; color: #184239; }
+.ob-rule-domain { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.ob-rule-target { font-size: 11px; color: var(--muted); font-weight: 600; }
+.ob-rule-del { color: #d64545; text-decoration: none; font-size: 15px; line-height: 1; font-weight: 800; cursor: pointer; border-radius: 50%; }
+.ob-rule-del:hover { color: #a82020; transform: scale(1.15); }
 .warp-domain-input { flex: 1; height: 42px; padding: 0 14px; border: 1.5px solid var(--line); border-radius: 10px; font-size: 13px; color: var(--ink); background: #fdfefe; outline: none; transition: all .15s ease; }
 .warp-domain-input:focus { border-color: var(--accent); background: #fff; box-shadow: 0 0 0 3px rgba(8, 127, 116, 0.12); }
 .warp-add-btn { height: 42px; padding: 0 20px; font-size: 13px; font-weight: 700; border-radius: 10px; background: var(--accent); color: #fff; border: none; cursor: pointer; white-space: nowrap; transition: all .15s ease; }
@@ -646,6 +722,383 @@ if (btnResetWarpRules) {
 }
 
 checkWarpStatus();
+
+// ============================================================================
+// 自定义出站（Custom Outbounds）
+// ============================================================================
+// 🔴 CSP 的 script-src 只有哈希白名单、没有 'unsafe-inline'，
+//    所以任何 onclick="..." 内联事件都会被浏览器丢弃（表现为"按钮点了没反应"）。
+//    全部交互统一用 data-* 属性 + 事件委托。
+const obEls = {
+  badge: document.getElementById('ob-mode-badge'),
+  modeNote: document.getElementById('ob-mode-note'),
+  btnRules: document.getElementById('btn-ob-mode-rules'),
+  btnGlobal: document.getElementById('btn-ob-mode-global'),
+  ip: document.getElementById('ob-outbound-ip'),
+  ipNote: document.getElementById('ob-outbound-ip-note'),
+  probeKind: document.getElementById('ob-probe-kind'),
+  probeAddr: document.getElementById('ob-probe-addr'),
+  btnProbe: document.getElementById('btn-ob-probe'),
+  list: document.getElementById('ob-list'),
+  count: document.getElementById('ob-count'),
+  formTitle: document.getElementById('ob-form-title'),
+  name: document.getElementById('ob-name'),
+  type: document.getElementById('ob-type'),
+  typeHint: document.getElementById('ob-type-hint'),
+  blockSocks: document.getElementById('ob-block-socks5'),
+  blockHttp: document.getElementById('ob-block-http'),
+  socksAddr: document.getElementById('ob-socks-addr'),
+  socksUser: document.getElementById('ob-socks-user'),
+  socksPass: document.getElementById('ob-socks-pass'),
+  httpUrl: document.getElementById('ob-http-url'),
+  httpInsecure: document.getElementById('ob-http-insecure'),
+  btnSave: document.getElementById('btn-ob-save'),
+  btnCancel: document.getElementById('btn-ob-cancel'),
+  msg: document.getElementById('ob-form-msg'),
+  ruleDomain: document.getElementById('ob-rule-domain'),
+  ruleOutbound: document.getElementById('ob-rule-outbound'),
+  btnRuleAdd: document.getElementById('btn-ob-rule-add'),
+  rulesList: document.getElementById('ob-rules-list'),
+  rulesCount: document.getElementById('ob-rules-count'),
+};
+
+const OB_TYPE_LABEL = {
+  socks5: { label: 'SOCKS5', cls: 'ob-type-socks5', hint: '需填host:port，如 1.2.3.4:1080' },
+  http: { label: 'HTTP/HTTPS', cls: 'ob-type-http', hint: '需填完整地址，如 http://1.2.3.4:8080' },
+  direct: { label: '直连', cls: 'ob-type-direct', hint: '无需额外参数' },
+};
+
+// 🔴 密码绝不显示在列表里（门户有被截图的风险），只显示"已设置"
+function obMetaOf(o) {
+  if (o.type === 'socks5') {
+    let s = o.addr || '';
+    if (o.username) s += ' · 认证 ' + o.username + ':******';
+    else if (o.password) s += ' · 密码已设置';
+    return s;
+  }
+  if (o.type === 'http') return (o.url || '') + (o.insecure ? ' · 跳过证书校验' : '');
+  return '服务器本地网络直连' + (o.mode && o.mode !== 'auto' ? ' (mode:' + o.mode + ')' : '');
+}
+
+function obEsc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+function renderOutboundList(outs) {
+  if (!obEls.list) return;
+  if (obEls.count) obEls.count.textContent = outs.length + ' 个';
+  if (!outs.length) {
+    obEls.list.innerHTML = '<span style="font-size:12px;color:var(--muted)">还没有自定义出站。'
+      + '在下方表单添加一个 SOCKS5 / HTTP 代理，再切到「全局出口」即可让所有流量走它。</span>';
+    return;
+  }
+  obEls.list.innerHTML = outs.map(o => {
+    const t = OB_TYPE_LABEL[o.type] || { label: o.type, cls: '' };
+    const testAddr = (o.type === 'socks5') ? (o.addr || '') : (o.url || '');
+    return '<div class="ob-item">'
+      + '<div class="ob-item-main">'
+      + '<div class="ob-item-name">' + obEsc(o.name)
+      + '<span class="ob-item-type ' + t.cls + '">' + obEsc(t.label) + '</span></div>'
+      + '<div class="ob-item-meta">' + obEsc(obMetaOf(o)) + '</div></div>'
+      + '<div class="ob-item-actions">'
+      + '<button class="ob-mini-btn" data-ob-test="' + obEsc(o.name) + '" data-ob-kind="' + obEsc(o.type)
+      + '" data-ob-addr="' + obEsc(testAddr) + '">测出口</button>'
+      + '<button class="ob-mini-btn" data-ob-edit="' + obEsc(o.name) + '">编辑</button>'
+      + '<button class="ob-mini-btn danger" data-ob-del="' + obEsc(o.name) + '">删除</button>'
+      + '</div></div>';
+  }).join('');
+}
+
+function renderOutboundRules(rules, outs) {
+  if (!obEls.rulesList) return;
+  const norm = [];
+  (rules || []).forEach(r => {
+    norm.push((r && typeof r === 'object')
+      ? { domain: r.domain, outbound: r.outbound || 'warp_socks' }
+      : { domain: String(r), outbound: 'warp_socks' });
+  });
+  if (obEls.rulesCount) obEls.rulesCount.textContent = norm.length + ' 条';
+
+  const all = [{ name: 'warp_socks', type: 'socks5' }, { name: 'direct', type: 'direct' }].concat(outs || []);
+  const seen = {}; const uniq = [];
+  all.forEach(o => { if (o && o.name && !seen[o.name]) { seen[o.name] = 1; uniq.push(o); } });
+
+  if (obEls.ruleOutbound) {
+    const cur = obEls.ruleOutbound.value;
+    obEls.ruleOutbound.innerHTML = uniq.map(o => {
+      const t = OB_TYPE_LABEL[o.type];
+      return '<option value="' + obEsc(o.name) + '">' + obEsc(o.name)
+        + (t ? ' (' + obEsc(t.label) + ')' : '') + '</option>';
+    }).join('');
+    if (cur) obEls.ruleOutbound.value = cur;
+  }
+
+  if (!norm.length) {
+    obEls.rulesList.innerHTML = '<span style="font-size:12px;color:var(--muted)">暂无分流规则。'
+      + '添加后该域名走指定出站，其余流量不受影响。</span>';
+    return;
+  }
+  obEls.rulesList.innerHTML = norm.map(r => {
+    return '<span class="ob-rule-item">'
+      + '<span class="ob-rule-domain">' + obEsc(r.domain) + '</span>'
+      + '<span class="ob-rule-target">' + obEsc(r.outbound) + '</span>'
+      + '<a href="javascript:void(0)" class="ob-rule-del" data-rule-del="'
+      + obEsc(r.domain) + '" title="移除">×</a></span>';
+  }).join('');
+}
+
+function obSetModeUI(mode) {
+  const isGlobal = mode === 'global';
+  if (obEls.badge) {
+    obEls.badge.textContent = isGlobal ? '全局出口模式' : '按域名分流';
+    obEls.badge.className = 'ob-mode-badge ' + (isGlobal ? 'global' : 'rules');
+  }
+  if (obEls.btnGlobal) obEls.btnGlobal.classList.toggle('active', isGlobal);
+  if (obEls.btnRules) obEls.btnRules.classList.toggle('active', !isGlobal);
+  if (obEls.modeNote) {
+    obEls.modeNote.textContent = isGlobal
+      ? '全局模式：客户端访问任何网站都从列表里第一个出站出去。列表顺序即优先级。'
+      : '按域名分流：名单内域名走指定出站，其余走直连（影响面可控，建议先用这个）。';
+  }
+}
+
+function obTypeSwitch() {
+  const t = obEls.type ? obEls.type.value : 'socks5';
+  if (obEls.blockSocks) obEls.blockSocks.hidden = (t !== 'socks5');
+  if (obEls.blockHttp) obEls.blockHttp.hidden = (t !== 'http');
+  if (obEls.typeHint) {
+    const meta = OB_TYPE_LABEL[t];
+    if (meta) obEls.typeHint.textContent = meta.hint;
+  }
+}
+
+function obMsg(text, kind) {
+  if (!obEls.msg) return;
+  obEls.msg.textContent = text || '';
+  obEls.msg.className = 'ob-form-msg ' + (kind || '');
+}
+
+// 🔴 端点走<prefix>manage-outbounds（网页会话认证），不是 /api/v1/。
+//    出站配置能改流量出口，属管理操作，不能仅凭 api_key 就能动。
+async function obApi(action, params) {
+  const p = Object.assign({ action: action }, params || {});
+  const body = new URLSearchParams(p).toString();
+  const res = await fetch(location.pathname + 'manage-outbounds', {
+    method: 'POST', credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body,
+  });
+  let json = {};
+  try { json = await res.json(); } catch (_) {}
+  if (!res.ok || !json.ok) throw new Error(json.error || ('请求失败 HTTP ' + res.status));
+  return json;
+}
+
+let OB_STATE = { mode: 'rules', outbounds: [], rules: [] };
+
+async function loadOutbounds() {
+  if (!obEls.list) return;
+  try {
+    const res = await fetch(location.pathname + 'outbounds/list',
+      { credentials: 'same-origin' });
+    if (!res.ok) return;
+    const json = await res.json();
+    if (!json.ok) return;
+    OB_STATE = { mode: json.mode || 'rules', outbounds: json.outbounds || [], rules: json.rules || [] };
+    obSetModeUI(OB_STATE.mode);
+    renderOutboundList(OB_STATE.outbounds);
+    renderOutboundRules(OB_STATE.rules, OB_STATE.outbounds);
+  } catch (_) {}
+}
+
+async function probeOutbound(kind, addr) {
+  if (!obEls.ip) return;
+  obEls.ip.textContent = '探测中...';
+  if (obEls.ipNote) obEls.ipNote.textContent = '正在通过所选出站访问 ipify';
+  try {
+    const q = new URLSearchParams({ kind: kind || 'direct', addr: addr || '' });
+    const res = await fetch(location.pathname + 'outbounds/probe?' + q.toString(),
+      { credentials: 'same-origin' });
+    const json = await res.json();
+    if (!json.ok) throw new Error(json.error || '探测失败');
+    if (json.ip) {
+      obEls.ip.textContent = json.ip;
+      if (obEls.ipNote) obEls.ipNote.textContent = '客户端流量出去时对方看到的地址';
+    } else {
+      obEls.ip.textContent = '探测失败';
+      if (obEls.ipNote) {
+        obEls.ipNote.textContent = (kind === 'direct' || kind === 'warp')
+          ? '本机无法访问 ipify —— 请检查出站网络连通性'
+          : '该出站无法连通 —— 请检查地址、端口与认证信息';
+      }
+    }
+  } catch (e) {
+    obEls.ip.textContent = '探测失败';
+    if (obEls.ipNote) obEls.ipNote.textContent = String(e.message || e);
+  }
+}
+
+function obResetForm() {
+  if (obEls.name) obEls.name.value = '';
+  if (obEls.socksAddr) obEls.socksAddr.value = '';
+  if (obEls.socksUser) obEls.socksUser.value = '';
+  if (obEls.socksPass) obEls.socksPass.value = '';
+  if (obEls.httpUrl) obEls.httpUrl.value = '';
+  if (obEls.httpInsecure) obEls.httpInsecure.checked = false;
+  if (obEls.formTitle) obEls.formTitle.textContent = '➕ 新增出站';
+  if (obEls.btnCancel) obEls.btnCancel.hidden = true;
+  obMsg('');
+  obTypeSwitch();
+}
+
+function obFillForm(o) {
+  if (!o) return;
+  if (obEls.name) obEls.name.value = o.name;
+  if (obEls.type) obEls.type.value = o.type;
+  if (obEls.socksAddr) obEls.socksAddr.value = o.addr || '';
+  if (obEls.socksUser) obEls.socksUser.value = o.username || '';
+  if (obEls.socksPass) obEls.socksPass.value = o.password || '';
+  if (obEls.httpUrl) obEls.httpUrl.value = o.url || '';
+  if (obEls.httpInsecure) obEls.httpInsecure.checked = !!o.insecure;
+  if (obEls.formTitle) obEls.formTitle.textContent = '✏️ 编辑出站：' + o.name;
+  if (obEls.btnCancel) obEls.btnCancel.hidden = false;
+  obTypeSwitch();
+}
+
+async function setOutboundMode(mode) {
+  try {
+    obMsg('切换中，正在重启服务...', '');
+    await obApi('mode', { mode: mode });
+    obSetModeUI(mode);
+    obMsg('已切换到' + (mode === 'global' ? '全局出口' : '按域名分流') + ' ✓', 'ok');
+    await loadOutbounds();
+  } catch (e) {
+    obMsg('切换失败：' + (e.message || e), 'err');
+  }
+}
+
+// --- 事件绑定（全部 data-* + 委托，无内联 onclick）---
+if (obEls.type) obEls.type.addEventListener('change', obTypeSwitch);
+if (obEls.btnCancel) obEls.btnCancel.addEventListener('click', () => obResetForm());
+
+if (obEls.btnSave) {
+  obEls.btnSave.addEventListener('click', async () => {
+    obMsg('保存中，正在重启服务生效...', '');
+    obEls.btnSave.disabled = true;
+    try {
+      const t = obEls.type ? obEls.type.value : 'socks5';
+      await obApi('save', {
+        name: obEls.name ? obEls.name.value.trim() : '',
+        type: t,
+        addr: obEls.socksAddr ? obEls.socksAddr.value.trim() : '',
+        url: obEls.httpUrl ? obEls.httpUrl.value.trim() : '',
+        username: obEls.socksUser ? obEls.socksUser.value : '',
+        password: obEls.socksPass ? obEls.socksPass.value : '',
+        insecure: (obEls.httpInsecure && obEls.httpInsecure.checked) ? 'true' : '',
+      });
+      obMsg('已保存并生效 ✓', 'ok');
+      obResetForm();
+      await loadOutbounds();
+    } catch (e) {
+      // 🔴 失败必须原样显示原因 —— 服务可能已被回滚，用户需要知道
+      obMsg('保存失败：' + (e.message || e), 'err');
+    } finally {
+      obEls.btnSave.disabled = false;
+    }
+  });
+}
+
+if (obEls.list) {
+  obEls.list.addEventListener('click', async (e) => {
+    const del = e.target.closest('[data-ob-del]');
+    const edit = e.target.closest('[data-ob-edit]');
+    const test = e.target.closest('[data-ob-test]');
+    if (del) {
+      e.preventDefault();
+      const name = del.getAttribute('data-ob-del');
+      if (!window.confirm('确认删除出站「' + name + '」？\n引用它的分流规则也会一并移除。')) return;
+      try {
+        await obApi('delete', { name: name });
+        await loadOutbounds();
+        obMsg('已删除「' + name + '」', 'ok');
+      } catch (err) {
+        obMsg('删除失败：' + (err.message || err), 'err');
+      }
+    } else if (edit) {
+      e.preventDefault();
+      const name = edit.getAttribute('data-ob-edit');
+      const found = OB_STATE.outbounds.find(x => x.name === name);
+      obFillForm(found);
+      window.scrollTo({ top: obEls.list.offsetTop - 120, behavior: 'smooth' });
+    } else if (test) {
+      e.preventDefault();
+      const kind = test.getAttribute('data-ob-kind');
+      const addr = test.getAttribute('data-ob-addr') || '';
+      if (obEls.probeKind) obEls.probeKind.value = kind;
+      if (obEls.probeAddr) {
+        obEls.probeAddr.value = addr;
+        obEls.probeAddr.hidden = (kind !== 'socks5' && kind !== 'http');
+      }
+      await probeOutbound(kind, addr);
+      window.scrollTo({ top: obEls.ip.offsetTop - 200, behavior: 'smooth' });
+    }
+  });
+}
+
+if (obEls.rulesList) {
+  obEls.rulesList.addEventListener('click', async (e) => {
+    const del = e.target.closest('[data-rule-del]');
+    if (!del) return;
+    e.preventDefault();
+    const dom = del.getAttribute('data-rule-del');
+    try {
+      await obApi('rule-del', { domain: dom });
+      await loadOutbounds();
+    } catch (err) {
+      obMsg('删除规则失败：' + (err.message || err), 'err');
+    }
+  });
+}
+
+if (obEls.btnRuleAdd) {
+  obEls.btnRuleAdd.addEventListener('click', async () => {
+    const dom = obEls.ruleDomain ? obEls.ruleDomain.value.trim() : '';
+    const tgt = obEls.ruleOutbound ? obEls.ruleOutbound.value : 'warp_socks';
+    if (!dom) { obMsg('请填写域名', 'err'); return; }
+    try {
+      await obApi('rule-add', { domain: dom, outbound: tgt });
+      if (obEls.ruleDomain) obEls.ruleDomain.value = '';
+      await loadOutbounds();
+      obMsg('规则已添加 ✓', 'ok');
+    } catch (e) {
+      obMsg('添加规则失败：' + (e.message || e), 'err');
+    }
+  });
+}
+
+if (obEls.btnRules) obEls.btnRules.addEventListener('click', () => setOutboundMode('rules'));
+if (obEls.btnGlobal) obEls.btnGlobal.addEventListener('click', () => setOutboundMode('global'));
+
+if (obEls.btnProbe) {
+  obEls.btnProbe.addEventListener('click', () => {
+    probeOutbound(obEls.probeKind ? obEls.probeKind.value : 'direct',
+      obEls.probeAddr ? obEls.probeAddr.value.trim() : '');
+  });
+}
+if (obEls.probeKind) {
+  obEls.probeKind.addEventListener('change', () => {
+    if (!obEls.probeAddr) return;
+    const k = obEls.probeKind.value;
+    obEls.probeAddr.hidden = (k !== 'socks5' && k !== 'http');
+    obEls.probeAddr.placeholder = (k === 'http') ? 'http://1.2.3.4:8080' : '1.2.3.4:1080';
+  });
+}
+
+loadOutbounds();
+probeOutbound('direct', '');
+obTypeSwitch();
 
 // VLESS-Reality 客户端与状态交互
 const realityBadge = document.getElementById('reality-badge');

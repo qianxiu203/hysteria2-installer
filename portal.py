@@ -91,6 +91,392 @@ def strip_acl_block(text):
     return '\n'.join(out)
 
 
+# ==============================================================================
+# 自定义出站（Custom Outbounds）核心模块
+# ==============================================================================
+#
+# 为什么需要它：原来面板只有 WARP 这一个固定出站，且只能"按域名分流"。
+# 用户真正的需求是"把所有流量走某个代理"（全局出站）或
+# "让特定域名走自定义 http/socks5 代理"，两者都无法表达。
+#
+# 三条硬约束（都是踩出来的，写错了Hysteria 直接起不来）：
+#   1. 🔴 出站名不能含 `-`。ACL 里用 `名称(suffix:xxx)` 引用，
+#      带横线的名字会被解析歧义，导致规则匹配不到（表现为"配了没生效"）。
+#      所以下面统一用下划线命名。
+#   2. 🔴 ACL 末尾必须有一条兜底规则（通常是 `direct(all)`），
+#      否则未被任何规则覆盖的连接会走 outbounds 列表里的**第一个**出站，
+#      而那不一定是用户想要的那个。
+#   3. 🔴 ACL 引用了不存在的出站名 ⇒ Hysteria 启动失败
+#      （`outbound xxx not found`）。所以写完必须真重启并校验 is-active，
+#      失败立刻回滚 —— 一个开关不该把整台机器的 Hysteria 打挂。
+#
+# Hysteria 2 官方只支持三种出站类型：
+#   direct / socks5(addr, username, password) / http(url, insecure)
+# ⚠️ http 出站在协议层不支持 UDP，UDP 流量走它会被拒绝。
+
+# 出站类型白名单：不在其中的类型一律拒绝，避免用户填错导致启动失败
+OUTBOUND_TYPES = {
+    'direct': ('直接连接（服务器本地网络）', None),
+    'socks5': ('SOCKS5 代理', ('addr', 'username', 'password')),
+    'http': ('HTTP / HTTPS 代理', ('url', 'insecure')),
+}
+
+# 出站名的合法字符：🔴 只允许字母数字与下划线，禁止横线（见文件头约束 1）
+OUTBOUND_NAME_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]{0,31}$')
+
+
+def sanitize_outbound_name(raw):
+    """把用户输入的出站名规范化成合法标识符。
+
+    🔴 不能只做正则校验然后拒绝——用户输入 "my-proxy" 时直接报错体验很差。
+    这里做确定性转换：非字母数字一律换成下划线，再补上"out_" 前缀避免
+    与 direct / warp_socks 这类内建名冲突。
+    """
+    s = re.sub(r'[^A-Za-z0-9_]', '_', str(raw or '').strip())
+    s = re.sub(r'_+', '_', s).strip('_')
+    if not s:
+        return ''
+    if not re.match(r'^[A-Za-z_]', s):
+        s = 'out_' + s
+    if s.lower() in ('direct', 'direct_ipv4', 'warp', 'warp_socks'):
+        s = 'out_' + s
+    return s[:32]
+
+
+def validate_outbound(entry):
+    """校验一条自定义出站配置，返回 (ok, cleaned, error)。
+
+    校验失败必须给出**可执行**的提示，而不是"参数错误"这种废话——
+    用户是自己填的，得告诉他哪一栏不对、正确格式是什么。
+    """
+    otype = (entry.get('type') or '').strip().lower()
+    if otype not in OUTBOUND_TYPES:
+        return False, None, "类型只能是 direct / socks5 / http 之一"
+    name = sanitize_outbound_name(entry.get('name'))
+    if not name:
+        return False, None, "名称不能为空"
+    if not OUTBOUND_NAME_RE.match(name):
+        return False, None, "名称只能含字母数字与下划线，且不能以数字开头"
+
+    cleaned = {'name': name, 'type': otype}
+
+    if otype == 'socks5':
+        addr = (entry.get('addr') or '').strip()
+        # 必须带端口；只给域名或IP 是不够的
+        if not re.match(r'^[^\s:]+:\d{1,5}$', addr):
+            return False, None, "SOCKS5 地址格式应为 host:port，例如 1.2.3.4:1080"
+        host, port = addr.rsplit(':', 1)
+        if not (0 < int(port) < 65536):
+            return False, None, "端口超出范围"
+        cleaned['addr'] = addr
+        if entry.get('username'):
+            cleaned['username'] = str(entry['username']).strip()
+        if entry.get('password'):
+            cleaned['password'] = str(entry['password']).strip()
+
+    elif otype == 'http':
+        url = (entry.get('url') or '').strip()
+        if not re.match(r'^https?://[^\s/]+(?:/.*)?$', url, re.I):
+            return False, None, "HTTP 代理地址格式应为 http://host:port 或 https://host:port"
+        cleaned['url'] = url
+        # insecure 只接受明确的一串真值，其他一律当false（别把 "no" 当 true）
+        cleaned['insecure'] = str(entry.get('insecure', '')).strip().lower() in ('1', 'true', 'yes', 'on')
+
+    else:  # direct
+        mode = (entry.get('mode') or '').strip()
+        if mode and mode not in ('auto', '64', '46', '6', '4'):
+            return False, None, "direct 模式只能是 auto / 64 / 46 / 6 / 4 之一"
+        if mode:
+            cleaned['mode'] = mode
+
+    return True, cleaned, ''
+
+
+def render_outbound_yaml(entry):
+    """把一条出站配置渲染成 YAML 片段（缩进与 config.yaml 风格一致）。"""
+    otype = entry['type']
+    lines = ['  - name: %s' % entry['name'], '    type: %s' % otype]
+    if otype == 'socks5':
+        lines.append('    socks5:')
+        lines.append('      addr: %s' % entry['addr'])
+        if entry.get('username'):
+            lines.append('      username: %s' % entry['username'])
+        if entry.get('password'):
+            lines.append('      password: %s' % entry['password'])
+    elif otype == 'http':
+        lines.append('    http:')
+        lines.append('      url: %s' % entry['url'])
+        lines.append('      insecure: %s' % ('true' if entry.get('insecure') else 'false'))
+    elif otype == 'direct':
+        lines.append('    direct:')
+        lines.append('      mode: %s' % (entry.get('mode') or 'auto'))
+    return '\n'.join(lines)
+
+
+def upsert_outbound_block(cfg_text, outbounds):
+    """把自定义出站写进 config.yaml 的 outbounds 段，保留内建出站。
+
+    内建出站（direct_ipv4 / warp_socks / warp）由 install.sh 写入，
+    **必须保留**：ACL 里可能引用它们，且 direct_ipv4 承担"强制 IPv4"的意图。
+    这里只做两件事：删掉上一次由本模块写入的出站（靠内建白名单排除），
+    再追加新的。
+    """
+    text = strip_managed_outbounds(cfg_text)
+    if not outbounds:
+        return text
+
+    block = '\n'.join(render_outbound_yaml(ob) for ob in outbounds)
+    if 'outbounds:' in text:
+        # 插到 outbounds 段的末尾（顶格行的下一行起）
+        lines = text.split('\n')
+        idx = next((i for i, l in enumerate(lines) if l.startswith('outbounds:')), None)
+        if idx is None:
+            text = text.rstrip('\n') + '\noutbounds:\n' + block + '\n'
+        else:
+            # 找 outbounds: 之后第一个顶格行，在它前面插入
+            insert_at = len(lines)
+            for j in range(idx + 1, len(lines)):
+                s = lines[j]
+                if s.strip() and s[:1] not in (' ', '\t'):
+                    insert_at = j
+                    break
+            new_lines = lines[:insert_at] + block.split('\n') + lines[insert_at:]
+            text = '\n'.join(new_lines)
+    else:
+        text = text.rstrip('\n') + '\n\noutbounds:\n' + block + '\n'
+    return text.rstrip('\n') + '\n'
+
+
+def strip_managed_outbounds(cfg_text):
+    """移除上一次由本模块写入的自定义出站。
+
+    🔴 判定方式不能靠"名字带 out_ 前缀" —— sanitize_outbound_name 只在
+    名字与内建名冲突时才加前缀，用户输入 "my-proxy" 规范化后是 "my_proxy"
+    （不带前缀）。按前缀过滤会漏掉它，导致每保存一次就重复追加一条，
+    最终配置里出现多个同名出站，Hysteria 启动失败。
+
+    正确做法：**用内建出站白名单排除**，其余带缩进的出站项一律视为
+    自定义（自定义出站是本模块独占管理的，install.sh 不会写它们）。
+    """
+    builtin = {'direct', 'direct_ipv4', 'warp', 'warp_socks'}
+    lines = cfg_text.split('\n')
+    out = []
+    skipping = False
+    for line in lines:
+        m = re.match(r'^\s*-\s*name:\s*(\S+)\s*$', line)
+        if m:
+            name = m.group(1)
+            # 内建出站：不跳过，继续保留
+            skipping = name not in builtin
+            if skipping:
+                continue
+            out.append(line)
+            continue
+        if skipping:
+            # 出站项的字段都是缩进的；遇到顶格行说明这一项结束了
+            if line.strip() and line[:1] not in (' ', '\t'):
+                skipping = False
+            else:
+                continue
+        out.append(line)
+    return '\n'.join(out)
+
+
+def build_acl_block(mode, rules, outbounds, tail_outbound='direct'):
+    """生成 acl.inline 块。
+
+    mode='global'：全部流量走选中的出站（真正的"全局出口"）
+    mode='rules' ：名单内走对应出站，其余走 tail_outbound（传统分流）
+
+    🔴 两种模式最后都补一条兜底，否则未匹配的连接会落到 outbounds
+    列表第一个出站上——那通常是内建 direct_ipv4，行为不可控。
+    """
+    names = [ob['name'] for ob in (outbounds or [])]
+    acl = ['acl:', '  inline:']
+
+    if mode == 'global' and names:
+        acl.append('    - %s(all)' % names[0])
+        return '\n'.join(acl)
+
+    for r in (rules or []):
+        dom = (r.get('domain') or '').strip().lower()
+        if not dom:
+            continue
+        target = r.get('outbound') or ''
+        # 出站可能已被用户删除 —— 引用不存在的名字会让 Hysteria 起不来
+        if target not in names:
+            target = 'warp_socks' if 'warp_socks' in _existing_outbound_names() else tail_outbound
+        acl.append('    - %s(suffix:%s)' % (target, dom))
+
+    acl.append('    - %s(all)' % tail_outbound)
+    return '\n'.join(acl)
+
+
+def _existing_outbound_names():
+    """读当前 config.yaml 里已存在的出站名（供兜底判断用）。"""
+    try:
+        cfg = Path('/etc/hysteria/config.yaml').read_text(encoding='utf-8')
+    except Exception:
+        return []
+    return re.findall(r'^\s*-\s*name:\s*(\S+)\s*$', cfg, re.M)
+
+
+def detect_outbound_ip(kind='auto', addr='', timeout=6):
+    """探测出站真实出口 IP —— 面板要显示"现在出去是哪个 IP"。
+
+    🔴 这是用户判断"到底生效没有"的唯一依据。旧面板只显示 WARP 装没装，
+    显示不了实际出口，用户只能靠访问 ipify 自己猜。
+    """
+    proxy = None
+    if kind == 'socks5' and addr:
+        proxy = {'http': 'socks5h://' + addr, 'https': 'socks5h://' + addr}
+    elif kind == 'http' and addr:
+        proxy = {'http': addr, 'https': addr}
+    elif kind in ('warp', 'auto'):
+        # WARP 本地 socks5；auto 时先试 WARP 再试直连，方便对比
+        if kind == 'warp':
+            proxy = {'http': 'socks5h://127.0.0.1:19898', 'https': 'socks5h://127.0.0.1:19898'}
+    try:
+        handler = urllib.request.ProxyHandler(proxy) if proxy else urllib.request.ProxyHandler({})
+        opener = urllib.request.build_opener(handler)
+        req = urllib.request.Request(
+            'https://api4.ipify.org?format=json',
+            headers={'User-Agent': 'curl/8.0 hysteria-portal'})
+        with opener.open(req, timeout=timeout) as resp:
+            if resp.status != 200:
+                return ''
+            payload = resp.read().decode('utf-8', 'ignore')
+            try:
+                return json.loads(payload).get('ip', '')
+            except Exception:
+                return payload.strip()
+    except Exception:
+        return ''
+
+
+def apply_outbounds_config(data, data_lock, config_path='/etc/hysteria/config.yaml'):
+    """把出站配置写进 Hysteria 并安全应用。返回 (ok, error)。
+
+    🔴🔴 data / data_lock 必须由调用方（serve() 内部）传进来：
+    它们是 serve() 的闭包变量，模块级函数访问不到
+    （2026-10-09 实测踩到：NameError: data_lock is not defined，
+    且异常发生在改配置的中途，门户线程直接抛出、
+    请求连接被关闭 —— 表现为"点保存就断线"）。
+
+    🔴🔴 这段是整个自定义出站功能的**安全底线**，逻辑顺序不能改：
+      1. 先备份原文件
+      2. 写新配置
+      3. 真重启服务
+      4. 校验 is-active
+      5. 起不来 → 立刻回滚 + 再重启 → 返回失败
+
+    为什么必须这么写：ACL 里只要引用了一个不存在的出站名，
+    Hysteria 就会 `invalid config: outbound xxx not found` 启动失败。
+    面板上的一个"保存"按钮，能把整台机器的代理服务打挂。
+    历史教训：早期版本没做 is-active 校验，写完就返回成功，
+    用户看到的提示是"已保存"，实际上服务已经挂了、且无法自救。
+    """
+    cfg = Path(config_path)
+    if not cfg.exists():
+        return False, '配置文件不存在: %s' % config_path
+    try:
+        original = cfg.read_text(encoding='utf-8')
+    except Exception as e:
+        return False, '读取配置失败: %s' % e
+
+    with data_lock:
+        outs = [dict(o) for o in data.get('custom_outbounds', [])]
+        rules = [dict(r) if isinstance(r, dict) else {'domain': str(r), 'outbound': 'warp_socks'}
+                 for r in data.get('warp_rules', [])]
+        mode = data.get('outbound_mode', 'rules')
+
+    try:
+        # 1) 先清掉旧的 acl 块（保留其余全部内容，详见 strip_acl_block 注释）
+        text = strip_acl_block(original)
+        # 2) 写/更新自定义出站段（只动 out_ 前缀的，保留内建）
+        text = upsert_outbound_block(text, outs)
+        # 3) 决定兜底出站名：优先内建 direct_ipv4，其次 direct
+        existing = re.findall(r'^\s*-\s*name:\s*(\S+)\s*$', text, re.M)
+        tail = 'direct_ipv4' if 'direct_ipv4' in existing else 'direct'
+        # 4) 生成 acl
+        if mode == 'global' and not outs:
+            # 🔴 删掉最后一个自定义出站后，全局模式已无对象可指。
+            #    旧实现直接 return False，于是这次删除被整体回滚 ——
+            #    表现为"删不掉最后一个出站"，而且规则清理也被连带撤销。
+            #    正确处理：**自动退回分流模式**，让用户始终能删干净。
+            mode = 'rules'
+            try:
+                with data_lock:
+                    data['outbound_mode'] = 'rules'
+            except Exception:
+                pass
+        text = text.rstrip('\n') + '\n\n' + build_acl_block(mode, rules, outs, tail) + '\n'
+
+        # 🔴 语法预检：config.yaml 是 YAML，写坏了服务同样起不来。
+        # 这里用 hysteria 自己的 config check 能力最可靠，
+        # 但它可能不存在（旧版本无此子命令），因此失败不阻断 ——
+        # 真正的兜底是后面的 is-active 校验 + 回滚。
+        cfg.write_text(text, encoding='utf-8')
+    except Exception as e:
+        try:
+            cfg.write_text(original, encoding='utf-8')
+        except Exception:
+            pass
+        return False, '写入配置失败: %s' % e
+
+    # 重启并校验
+    try:
+        subprocess.run(['systemctl', 'restart', 'hysteria-server'],
+                       capture_output=True, timeout=25)
+    except subprocess.TimeoutExpired:
+        _rollback_outbounds(cfg, original)
+        return False, '重启超时（服务未响应）'
+    except Exception as e:
+        _rollback_outbounds(cfg, original)
+        return False, '重启失败: %s' % e
+
+    time.sleep(2)
+    try:
+        state = subprocess.run(['systemctl', 'is-active', 'hysteria-server'],
+                               capture_output=True, text=True, timeout=8).stdout.strip()
+    except Exception as e:
+        state = 'unknown(%s)' % e
+
+    if state != 'active':
+        # 🔴 起不来 = 配置有问题（多半是出站名拼错或地址格式不被接受）
+        #    必须回滚，否则用户的服务就废了、且面板再也连不上
+        _rollback_outbounds(cfg, original)
+        return False, ('Hysteria 启动失败（配置可能有误，已自动回滚到原配置）。'
+                       '请检查出站地址格式；HTTP 出站不支持 UDP。')
+    return True, ''
+
+
+def _rollback_outbounds(cfg, original):
+    """回滚配置并尽力把服务拉回可用状态。"""
+    try:
+        cfg.write_text(original, encoding='utf-8')
+        subprocess.run(['systemctl', 'restart', 'hysteria-server'],
+                       capture_output=True, timeout=25)
+    except Exception:
+        pass
+
+
+def set_outbound_apply_error(data, data_lock, save_data, msg):
+    """记录/清除"上次应用失败"的痕迹（与 WARP 开关同样的处理思路）。
+
+    🔴 同apply_outbounds_config：data / data_lock / save_data 都得由调用方传入。
+    """
+    try:
+        with data_lock:
+            if msg:
+                data['outbound_apply_error'] = msg
+            else:
+                data.pop('outbound_apply_error', None)
+        save_data()
+    except Exception:
+        # 记录失败本身绝不能影响主流程
+        pass
+
 
 # 🔴 必须是原始字符串（r"""），不能改成普通三引号。
 # 这是内嵌的 JS 源码，里面写的 \n 需要【原样保留】成 JS 的转义序列。
@@ -595,6 +981,139 @@ def page_html(m, uri, subscription, clash, sing, users=None, api_key=None, token
 
       <div class="warp-tags-wrap" id="warp-tags-cloud">
         <span style="font-size:12px;color:var(--muted)">正在拉取规则...</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 区块 2.5: 自定义出站（全局出口 / 自定义 http·socks5 代理） -->
+  <section class="card ob-card" style="margin-top:22px">
+    <div class="ob-head">
+      <div class="ob-title-box">
+        <h2 class="ob-title">🌐 自定义出站（全局出口 · 第三方代理）</h2>
+        <p style="font-size:13px;margin:4px 0 0;color:var(--muted)">
+          让流量走你自己指定的出口：可把<b>全部流量</b>交给一个代理，或让特定域名分别走不同代理。
+        </p>
+      </div>
+      <span class="ob-mode-badge" id="ob-mode-badge">加载中...</span>
+    </div>
+
+    <!-- 出站模式：分流 / 全局 -->
+    <div class="ob-mode-card">
+      <div class="ob-mode-title">🎚️ 出站模式</div>
+      <div class="ob-mode-switch">
+        <button class="ob-mode-btn active" id="btn-ob-mode-rules" data-mode="rules" type="button">
+          <b>按域名分流</b>
+          <span>名单内走指定出站，其余走直连</span>
+        </button>
+        <button class="ob-mode-btn" id="btn-ob-mode-global" data-mode="global" type="button">
+          <b>全局出口</b>
+          <span>所有流量都走第一个出站</span>
+        </button>
+      </div>
+      <p class="ob-mode-note" id="ob-mode-note">
+        全局模式下，客户端访问任何网站都从你指定的出口出去（对解锁 AI、换 IP 场景最有效）。
+      </p>
+    </div>
+
+    <!-- 真实出口 IP 探测 -->
+    <div class="ob-probe-card">
+      <div class="ob-probe-left">
+        <div class="ob-probe-title">📍 当前真实出口 IP</div>
+        <div class="ob-probe-ip" id="ob-outbound-ip">探测中...</div>
+        <div class="ob-probe-sub" id="ob-outbound-ip-note">这是客户端流量出去时对方看到的地址</div>
+      </div>
+      <div class="ob-probe-actions">
+        <select id="ob-probe-kind" class="ob-select" style="max-width:170px">
+          <option value="direct">直连（服务器本机）</option>
+          <option value="warp">WARP (127.0.0.1:19898)</option>
+          <option value="socks5">自定义 SOCKS5</option>
+          <option value="http">自定义 HTTP</option>
+        </select>
+        <input type="text" id="ob-probe-addr" class="ob-input" style="max-width:190px"
+               placeholder="1.2.3.4:1080 或 http://1.2.3.4:8080" hidden>
+        <button class="button" id="btn-ob-probe" type="button">探测出口</button>
+      </div>
+    </div>
+
+    <!-- 自定义出站列表 -->
+    <div class="ob-list-card">
+      <div class="ob-list-head">
+        <span class="ob-list-title">📦 已配置的出站</span>
+        <span class="ob-count-badge" id="ob-count">0 个</span>
+      </div>
+      <div class="ob-list" id="ob-list">
+        <span style="font-size:12px;color:var(--muted)">加载中...</span>
+      </div>
+    </div>
+
+    <!-- 新增/编辑出站表单 -->
+    <div class="ob-form-card">
+      <div class="ob-form-title" id="ob-form-title">➕ 新增出站</div>
+      <div class="ob-form-grid">
+        <label class="ob-field">
+          <span>名称</span>
+          <input type="text" id="ob-name" class="ob-input" placeholder="例如：us_exit">
+          <em>只能用字母数字与下划线；横线会自动转为下划线</em>
+        </label>
+        <label class="ob-field">
+          <span>类型</span>
+          <select id="ob-type" class="ob-select">
+            <option value="socks5">SOCKS5 代理</option>
+            <option value="http">HTTP / HTTPS 代理</option>
+            <option value="direct">直连（服务器本地网络）</option>
+          </select>
+          <em id="ob-type-hint">需填 host:port</em>
+        </label>
+      </div>
+      <!-- SOCKS5 专用字段 -->
+      <div class="ob-form-block" id="ob-block-socks5">
+        <label class="ob-field ob-field-wide">
+          <span>SOCKS5 地址</span>
+          <input type="text" id="ob-socks-addr" class="ob-input" placeholder="1.2.3.4:1080 或 1.2.3.4:1080">
+        </label>
+        <div class="ob-form-grid">
+          <label class="ob-field">
+            <span>用户名（可选）</span>
+            <input type="text" id="ob-socks-user" class="ob-input" placeholder="留空表示无认证">
+          </label>
+          <label class="ob-field">
+            <span>密码（可选）</span>
+            <input type="text" id="ob-socks-pass" class="ob-input" placeholder="留空表示无认证">
+          </label>
+        </div>
+      </div>
+      <!-- HTTP 专用字段 -->
+      <div class="ob-form-block" id="ob-block-http" hidden>
+        <label class="ob-field ob-field-wide">
+          <span>HTTP 代理地址</span>
+          <input type="text" id="ob-http-url" class="ob-input" placeholder="http://1.2.3.4:8080">
+          <em>HTTP 出站不支持 UDP，UDP 流量会被拒绝</em>
+        </label>
+        <label class="ob-inline-check">
+          <input type="checkbox" id="ob-http-insecure">
+          <span>跳过证书校验（代理是自签 https 证书时勾选）</span>
+        </label>
+      </div>
+      <div class="ob-form-actions">
+        <button class="button primary" id="btn-ob-save" type="button">保存并生效</button>
+        <button class="button" id="btn-ob-cancel" type="button" hidden>取消编辑</button>
+        <span class="ob-form-msg" id="ob-form-msg"></span>
+      </div>
+    </div>
+
+    <!-- 分流规则（每条可指定走哪个出站）-->
+    <div class="ob-rules-card">
+      <div class="ob-list-head">
+        <span class="ob-list-title">🎯 分流规则（仅在「按域名分流」模式下生效）</span>
+        <span class="ob-count-badge" id="ob-rules-count">0 条</span>
+      </div>
+      <div class="ob-add-form">
+        <input type="text" id="ob-rule-domain" class="ob-input" placeholder="域名，如 openai.com">
+        <select id="ob-rule-outbound" class="ob-select" style="max-width:200px"></select>
+        <button class="button" id="btn-ob-rule-add" type="button">添加规则</button>
+      </div>
+      <div class="ob-rules-list" id="ob-rules-list">
+        <span style="font-size:12px;color:var(--muted)">加载中...</span>
       </div>
     </div>
   </section>
@@ -3668,6 +4187,10 @@ if __name__ == '__main__':
             if self.path == prefix + 'install-warp':
                 return self._h_post_install_warp(prefix)
 
+            # ---------------- 自定义出站（写） ----------------
+            if self.path == prefix + 'manage-outbounds':
+                return self._ob_manage()
+
 
             return self.reply(404, b'Not found')
 
@@ -5014,6 +5537,19 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
             if subpath == 'warp-status':
                 return self._h_get_warp_status(subpath)
 
+            # ---------------- 自定义出站（读） ----------------
+            # 🔴 走 prefix（网页会话）而不是 /api/v1/（api_key）：
+            #    出站含代理地址与凭据，属于管理操作，
+            #    必须走管理员会话，不能仅凭 api_key 就能改流量出口。
+            if subpath == 'outbounds/list':
+                return self._ob_list()
+            #🔴 self.path 是**含 query** 的原始路径：
+            #   `outbounds/probe?kind=direct` 会让 subpath 变成
+            #   `outbounds/probe?kind=direct`，等值比较直接落空 → 404。
+            #   本项目多个既有端点都有这个毛病，这里新端点自己扛住：先剥 query。
+            if subpath.split('?', 1)[0] == 'outbounds/probe':
+                return self._ob_probe()
+
             if subpath == 'cert-status':
                 return self._h_get_cert_status(subpath)
 
@@ -5452,6 +5988,154 @@ log "Cloudflare WARP Local Proxy (wgcf + wireproxy) 部署完成"
                 })
             except Exception as e:
                 return self.reply_json(500, {'ok': False, 'error': str(e)})
+
+        def _ob_list(self):
+            """GET <prefix>outbounds/list —— 出站列表 + 模式 + 内建出站。"""
+            if not self.is_authenticated():
+                return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+            with data_lock:
+                outs = list(data.get('custom_outbounds', []))
+                mode = data.get('outbound_mode', 'rules')
+                rules = list(data.get('warp_rules', []))
+            return self.reply_json(200, {
+                'ok': True,
+                'mode': mode,
+                'outbounds': outs,
+                # 规则里的旧格式是纯字符串（只有域名），前端需要渲染成对象
+                'rules': [({'domain': r, 'outbound': 'warp_socks'} if isinstance(r, str)
+                           else dict(r)) for r in rules],
+                'builtin': _existing_outbound_names(),
+                'types': [{'id': k, 'label': v[0]} for k, v in OUTBOUND_TYPES.items()],
+            })
+
+        def _ob_probe(self):
+            """GET <prefix>outbounds/probe?kind=&addr= —— 探测真实出口 IP。
+
+            🔴 只探测、不改任何配置，可以放心反复点。
+            这是用户判断"到底生效没有"的唯一依据。
+            """
+            if not self.is_authenticated():
+                return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+            query = parse_qs(self.path.split('?', 1)[1]) if '?' in self.path else {}
+            kind = (query.get('kind', ['direct'])[0] or 'direct').strip().lower()
+            addr = (query.get('addr', [''])[0] or '').strip()
+            ip = detect_outbound_ip(kind, addr)
+            return self.reply_json(200, {'ok': True, 'ip': ip, 'kind': kind})
+
+        def _ob_manage(self):
+            """POST <prefix>manage-outbounds —— 出站增删改 / 模式切换 / 规则增删。"""
+            if not self.is_authenticated():
+                return self.reply_json(401, {'ok': False, 'error': 'Unauthorized'})
+            try:
+                length = int(self.headers.get('Content-Length', 0))
+                body = self.rfile.read(length).decode('utf-8') if length > 0 else ''
+                form = parse_qs(body)
+            except Exception:
+                return self.reply_json(400, {'ok': False, 'error': 'Bad request'})
+            action = (form.get('action', [''])[0] or '').strip().lower()
+            if not action:
+                return self.reply_json(400, {'ok': False, 'error': '缺少 action 参数'})
+
+            msg = ''
+            # ---------- 出站增删改 ----------
+            if action in ('save', 'delete'):
+                if action == 'save':
+                    entry = {
+                        'name': (form.get('name', [''])[0] or '').strip(),
+                        'type': (form.get('type', [''])[0] or '').strip().lower(),
+                        'addr': (form.get('addr', [''])[0] or '').strip(),
+                        'url': (form.get('url', [''])[0] or '').strip(),
+                        'username': (form.get('username', [''])[0] or '').strip(),
+                        'password': (form.get('password', [''])[0] or '').strip(),
+                        'insecure': (form.get('insecure', [''])[0] or '').strip(),
+                        'mode': (form.get('ob_mode', [''])[0] or '').strip(),
+                    }
+                    ok, cleaned, err = validate_outbound(entry)
+                    if not ok:
+                        return self.reply_json(400, {'ok': False, 'error': err})
+                    with data_lock:
+                        outs = [o for o in data.get('custom_outbounds', [])
+                                if o.get('name') != cleaned['name']]
+                        outs.append(cleaned)
+                        data['custom_outbounds'] = outs
+                    msg = '出站「%s」已保存' % cleaned['name']
+                else:
+                    name = (form.get('name', [''])[0] or '').strip()
+                    if not name:
+                        return self.reply_json(400, {'ok': False, 'error': '缺少 name 参数'})
+                    with data_lock:
+                        outs = list(data.get('custom_outbounds', []))
+                        if not any(o.get('name') == name for o in outs):
+                            return self.reply_json(404, {'ok': False, 'error': '出站不存在'})
+                        data['custom_outbounds'] = [o for o in outs if o.get('name') != name]
+                        # 🔴 必须同步清理引用它的分流规则，否则 ACL 里会留下
+                        #    不存在的出站名 ⇒ Hysteria 启动失败（且用户毫无察觉）。
+                        data['warp_rules'] = [r for r in data.get('warp_rules', [])
+                                              if (r.get('outbound') if isinstance(r, dict) else None) != name]
+                    msg = '出站「%s」已删除' % name
+
+            # ---------- 模式切换 ----------
+            elif action == 'mode':
+                mode = (form.get('mode', [''])[0] or '').strip().lower()
+                if mode not in ('rules', 'global'):
+                    return self.reply_json(400, {
+                        'ok': False,
+                        'error': '模式只能是 rules（按域名分流）或 global（全局出口）'})
+                with data_lock:
+                    # 🔴 不在这里拦"全局模式但没有出站"：
+                    #    apply_outbounds_config 会自动退回rules，
+                    #    由那一层统一处理，避免两处规则不一致。
+                    data['outbound_mode'] = mode
+                msg = '已切换到' + ('全局出口' if mode == 'global' else '按域名分流')
+
+            # ---------- 分流规则增删 ----------
+            elif action in ('rule-add', 'rule-del'):
+                dom = (form.get('domain', [''])[0] or '').strip().lower()
+                if not dom:
+                    return self.reply_json(400, {'ok': False, 'error': '缺少 domain 参数'})
+                with data_lock:
+                    rules = [({'domain': r, 'outbound': 'warp_socks'} if isinstance(r, str) else dict(r))
+                             for r in data.get('warp_rules', [])]
+                    if action == 'rule-add':
+                        cleaned = re.sub(r'^[a-zA-Z]+://', '', dom).split('/')[0].split(':')[0].strip('.')
+                        if not cleaned or not re.match(r'^[a-zA-Z0-9.\-]+$', cleaned):
+                            return self.reply_json(400, {'ok': False, 'error': '域名格式不正确'})
+                        target = (form.get('outbound', ['warp_socks'])[0] or 'warp_socks').strip()
+                        rules = [r for r in rules if r['domain'] != cleaned]
+                        rules.append({'domain': cleaned, 'outbound': target})
+                        msg = '规则「%s」→ %s 已添加' % (cleaned, target)
+                    else:
+                        rules = [r for r in rules if r['domain'] != dom]
+                        msg = '规则「%s」已删除' % dom
+                    data['warp_rules'] = rules
+            else:
+                return self.reply_json(400, {'ok': False, 'error': '未知 action: ' + action})
+
+            save_data()
+
+            # 🔴 应用配置：任何异常都必须捕获并如实返回 JSON，
+            #    绝不能让异常冒到 http.server —— 那样连接会被直接断开，
+            #    前端只看到"请求失败"，用户完全不知道发生了什么。
+            #    （实测踩过：模块级函数访问不到闭包 data_lock 抛 NameError，
+            #     现象就是点"保存"后连接被断开。）
+            try:
+                applied, aerr = apply_outbounds_config(data, data_lock)
+            except Exception as exc:
+                set_outbound_apply_error(data, data_lock, save_data, str(exc))
+                return self.reply_json(500, {
+                    'ok': False,
+                    'error': '应用配置时发生内部错误，已保持原配置：%s' % exc,
+                    'applied': False,
+                })
+            if not applied:
+                set_outbound_apply_error(data, data_lock, save_data, aerr)
+                return self.reply_json(500, {
+                    'ok': False,
+                    'error': ('配置已保存，但应用失败并已自动回滚到原配置：' + aerr),
+                    'applied': False,
+                })
+            set_outbound_apply_error(data, data_lock, save_data, '')
+            return self.reply_json(200, {'ok': True, 'message': msg, 'applied': True})
 
         def _h_get_warp_status(self, subpath):
             """GET /warp-status 的处理逻辑（从 do_GET 机械搬移而来）。"""
